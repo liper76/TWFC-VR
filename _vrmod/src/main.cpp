@@ -219,6 +219,7 @@ static void LoadConfig()
     g_cfg.grenadeThrowScale = IniFloat(ini, L"Input", L"GrenadeThrowScale", g_cfg.grenadeThrowScale);
     g_cfg.grenadeGravity = IniFloat(ini, L"Input", L"GrenadeGravity", g_cfg.grenadeGravity);
     g_cfg.grenadeBelt = (int)IniFloat(ini, L"Input", L"GrenadeBelt", (float)g_cfg.grenadeBelt);
+    g_cfg.grenadeScale = IniFloat(ini, L"Input", L"GrenadeScale", g_cfg.grenadeScale);
     g_cfg.cutscenes3D = (int)IniFloat(ini, L"VR", L"Cutscenes3D", (float)g_cfg.cutscenes3D);
     g_cfg.reticleSize = IniFloat(ini, L"VR", L"ReticleSize", g_cfg.reticleSize);
     g_cfg.reticleStyle = (int)IniFloat(ini, L"VR", L"ReticleStyle", (float)g_cfg.reticleStyle);

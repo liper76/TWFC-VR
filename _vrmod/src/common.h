@@ -58,6 +58,7 @@ struct Config {
     int   hudMarkersInEyes = 1;     // minimal HUD: its other parts (waypoints, names, lock-on marks) drawn into the eyes
     int   cutscenes3D = 0;          // 1 = in-engine cutscenes in 3D around you (0 = on the virtual screen)
     int   grenadeBelt = 1;          // a grenade is seen on the belt (where they are taken from) while there are any
+    float grenadeScale = 0.5f;      // size of the grenade on the belt and in the hand (1 = the game's thrown one)
     int   fingerPoses = 1;          // robot fingers follow yours on the controller (trigger, grip, thumb on the buttons)
     int   fingerPalmSign = 1;       // -1 = fingers bend the other way (if a robot's hand bends them backwards)
     int   pull = 1;                 // point the free left hand at a pickup and jerk it back: it flies to you

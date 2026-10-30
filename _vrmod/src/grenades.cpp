@@ -154,6 +154,27 @@ void Hush(uint8_t* a, bool hush)
     else ForEachAudio(a, [](uint8_t* c, int i) { *(float*)(c + kAudioVolume) = g_savedVolume[i] > 0.0f ? g_savedVolume[i] : 1.0f; });
 }
 
+// the caught grenade drawn at GrenadeScale (its mesh and glow, not its collision), for the rest of its life; the
+// moves in the hand update their transforms
+const int kCompScale = 0x178;
+void Shrink(uint8_t* a)
+{
+    __try {
+        uint8_t** comps = *(uint8_t***)(a + kActorComponents);
+        int n = *(int*)(a + kActorComponents + 4);
+        int k = 0;
+        for (int i = 0; comps && i < n && i < 32; i++) {
+            const wchar_t* name = comps[i] ? NameOf(*(unsigned*)(comps[i] + 4)) : nullptr;
+            if (name && (wcsstr(name, L"StaticMeshComponent") || wcsstr(name, L"SkeletalMeshComponent") || wcsstr(name, L"ParticleSystemComponent"))) {
+                *(float*)(comps[i] + kCompScale) = fmaxf(g_cfg.grenadeScale, 0.05f);
+                k++;
+            }
+        }
+        Log("grenades: %d of its %d components drawn at %.2f", k, n, g_cfg.grenadeScale);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
 void TurnWithHand(uint8_t* a, const float fwd[3])
 {
     __try {
@@ -383,8 +404,8 @@ void UpdateBelt(uint8_t* pawn, bool show)
         }
         *(uint8_t**)(g_belt + kCompOwner) = pawn;   // (the grenade weapon itself is hidden: drawn as part of the robot)
         *(uint32_t*)(g_belt + kCompFlags) &= ~kHiddenGame;
-        // the single grenade as big as the one thrown (its template's scale 1); the pickup model like the weapons
-        IKSetBelt(g_belt, g_beltMeshAt ? 1.0f : 0.0f);
+        // the single grenade as big as the one in the hand; the pickup model like the weapons
+        IKSetBelt(g_belt, g_beltMeshAt ? fmaxf(g_cfg.grenadeScale, 0.05f) : 0.0f);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         g_belt = g_beltMesh = g_beltWeapon = nullptr;
         g_beltMeshAt = 0;
@@ -479,6 +500,7 @@ void GrenadesUpdate(void* pawnPtr)
         if (g_grenade) {
             g_state = Holding;
             Hush(g_grenade, true);
+            Shrink(g_grenade);
             VRHaptic(g_hand,0.5f, 0.05f);
             Log("grenades: in the hand (%p)", g_grenade);
         } else if (now - g_stateAt > 1500) {
