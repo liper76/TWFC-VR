@@ -1,6 +1,9 @@
 # Test run: backs up the saves, launches BinariesVR\TWFC.exe on MockXR with automation, walks to Ventilation Shafts.
-# Usage: run_vent.ps1 [-ExtraIni "Key=Value",...]   (keys go to [Debug]; remove them afterwards with -Cleanup)
-param([string[]]$ExtraIni = @(), [switch]$Cleanup, [int]$PopupWait = 46)
+# Usage: run_vent.ps1 [-ExtraIni "Key=Value",...] [-Continue]   (keys go to [Debug]; remove them afterwards with -Cleanup)
+# -Continue: Campaign -> Continue (the user's own checkpoint) instead of Ventilation Shafts.
+# The game keeps its saves in <game>\TransGame\SaveData (the Documents one is old): both are backed up; compare the
+# hashes after the test and copy the backup back if the checkpoint was rewritten.
+param([string[]]$ExtraIni = @(), [switch]$Cleanup, [switch]$Continue, [int]$PopupWait = 46)
 $root = "C:\Games\Transformers - War for Cybertron"
 $bin = "$root\BinariesVR"
 $ini = "$bin\twfcvr.ini"
@@ -20,6 +23,8 @@ if ($Cleanup) { Set-Debug @() $false; Remove-Item $cmd -ErrorAction SilentlyCont
 $saves = [Environment]::GetFolderPath("MyDocuments") + "\My Games\Transformers\TransGame\SaveData"
 $bk = "$root\_vrmod\backup\SaveData_" + (Get-Date -Format "yyyy-MM-dd_HHmm")
 if (-not (Test-Path $bk)) { Copy-Item $saves $bk -Recurse }
+$bkGame = "$root\_vrmod\backup\GameDirSaveData_" + (Get-Date -Format "yyyy-MM-dd_HHmm")
+if (-not (Test-Path $bkGame)) { Copy-Item "$root\TransGame\SaveData" $bkGame -Recurse }
 Set-Debug $ExtraIni $true
 Remove-Item $cmd -ErrorAction SilentlyContinue
 $env:XR_RUNTIME_JSON = "$root\_vrmod\tools\mockxr\mockxr.json"
@@ -28,5 +33,5 @@ Remove-Item Env:\XR_RUNTIME_JSON
 # intro videos: START every 8 s until the Accounts popup is up
 for ($t = 16; $t -lt $PopupWait; $t += 8) { Start-Sleep 8; [IO.File]::WriteAllText($cmd, "press START 150`r`n") }
 Start-Sleep 6
-Copy-Item "$root\_vrmod\tools\go_vent.txt" $cmd
-"launched; saves backed up to $bk"
+Copy-Item "$root\_vrmod\tools\$(if ($Continue) { 'go_continue.txt' } else { 'go_vent.txt' })" $cmd
+"launched; saves backed up to $bk and $bkGame"

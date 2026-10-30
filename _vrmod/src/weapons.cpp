@@ -310,7 +310,7 @@ void UpdateList(uint8_t* pawn, bool vehicle, DWORD now)
         if (!cls) continue;
         bool guessVehicle = group == 1 || wcsstr(cls, L"Vehicle") || wcsstr(cls, L"Plane");
         // grenades are thrown with their own button, the "next weapon" button never reaches them
-        bool grenade = wcsstr(cls, L"Grenade") && !wcsstr(cls, L"Launcher");
+        bool grenade = GrenadeWeaponClass(cls);
         if (grenade || Contains(g_unreachable, 16, w)) continue;
         if (!hand && (Contains(g_vehicleWeapons, 16, w) || guessVehicle || group == 50)) continue;
         if (w == cur) l.current = l.count;
