@@ -7,8 +7,9 @@
 //   1. Frame    - where the mesh will be drawn this frame (its LocalToWorld is still last frame's here).
 //   2. Body     - spine and clavicles in the bind pose (no idle/walk sway at the roots of the arms), the mesh
 //                 turned to where the head looks and kept under the head when you walk around the room.
-//   3. Arms     - each hand goes exactly where the real hand holds the controller; an arm that is too short is
-//                 stretched, never the hand moved. The right arm holding the forearm-mounted gun is posed from
+//   3. Arms     - rigid, from the bind pose (both arms alike): each wrist goes where the real hand holds the
+//                 controller (out of reach: the arm points at it), the shoulder pads turn half as far as the
+//                 upper arm. The right arm holding the forearm-mounted gun is posed from
 //                 the gun: the gun takes the controller's aim, the wrist sits in the real hand. The left hand
 //                 holding the gun's front grip (two-handed) sits on the grip. A hand holding the melee weapon is
 //                 a free hand (the weapon hangs off its weapon bone).
@@ -108,6 +109,15 @@ Mat3 FrameToFrame(const Vec3 from[3], const Vec3 to[3])
 }
 
 void RotatePose(Pose& p, const Mat3& r) { for (auto& a : p.ax) a = Mul(r, a); }
+
+// Rotation by `angle` (radians) about the unit axis.
+Mat3 AxisAngle(Vec3 a, float angle)
+{
+    float c = cosf(angle), s = sinf(angle), t = 1.0f - c;
+    return { { { c + t * a.x * a.x, t * a.x * a.y - s * a.z, t * a.x * a.z + s * a.y },
+               { t * a.y * a.x + s * a.z, c + t * a.y * a.y, t * a.y * a.z - s * a.x },
+               { t * a.z * a.x - s * a.y, t * a.z * a.y + s * a.x, c + t * a.z * a.z } } };
+}
 
 // Scale a bone by `along` in direction dir and by `across` perpendicular to it.
 void StretchThin(Pose& p, Vec3 dir, float along, float across)
@@ -486,50 +496,125 @@ void HandAxesFor(int side, const Pose* pose, const Vec3 ctrl[3], Vec3 out[3])
     Orthonormalize(out);
 }
 
-// Two-bone arm: the wrist goes to `wrist`, the elbow bends towards behind/below the hand and outwards. An arm
-// that cannot reach gets a longer upper arm; the forearm keeps its length (it looks wrong stretched). Returns the
-// upper arm's stretch.
-float ReachWrist(int side, Pose* pose, Vec3 wrist, const Vec3 ctrl[3])
+// The armour on the arm bones (ShoulderRobo*, ElbowRobo*) is placed from these frames, not from the slimmed bones:
+// the shoulder pads turn half as far as the upper arm (they stay over the shoulder, as a deltoid does), the elbow
+// plates go with the forearm, both at their full size.
+Pose g_padFrame[2][2];      // per side: shoulder pads, elbow plates (component space)
+bool g_padValid[2];
+
+// The bend of an arm: the direction of its bone and the elbow's hinge axis (the same for both bones of a
+// two-bone limb) as a frame.
+void BendFrame(Vec3 along, Vec3 hinge, Vec3 out[3])
+{
+    out[0] = Norm(along);
+    out[1] = Norm(Sub(hinge, Scale(out[0], Dot(hinge, out[0]))));
+    out[2] = Cross(out[0], out[1]);
+}
+
+// Twist (radians) about the unit axis d taking frame a onto frame b (their axis 1 compared, across d).
+float TwistAbout(Vec3 d, const Vec3 a[3], const Vec3 b[3])
+{
+    int k = fabsf(Dot(a[1], d)) < 0.9f ? 1 : 2;
+    Vec3 p = Norm(Sub(a[k], Scale(d, Dot(a[k], d)))), q = Norm(Sub(b[k], Scale(d, Dot(b[k], d))));
+    return atan2f(Dot(Cross(p, q), d), Dot(p, q));
+}
+
+// An arm, rigid, from the bind pose (both arms are mirror images there, so they look the same): the clavicle
+// shrugs a little when the hand is raised, the wrist goes to `wrist` (out of reach: the arm points at it,
+// straight), the elbow bends down, out and back from the hand, the forearm takes half of the wrist's roll and the
+// hand gets `handAx` at `handSize`. Upper arm and forearm are slimmed by LimbThickness, the armour is not.
+void SolveArm(int side, Pose* pose, Vec3 wrist, const Vec3 ctrl[3], const Vec3 handAx[3], float handSize)
 {
     const Arm& a = g_sk.arm[side];
-    Vec3 S = pose[a.shoulder].pos, E = pose[a.elbow].pos, H = pose[a.hand].pos;
-    float l1 = Len(Sub(E, S)), l2 = Len(Sub(H, E));
+    int clav = g_sk.parent[a.shoulder];
+    Vec3 up = { 0, 0, 1 };
+    Vec3 right = clav >= 0 && g_sk.arm[1 - side].shoulder >= 0 ? Norm(Sub(pose[g_sk.arm[1].shoulder].pos, pose[g_sk.arm[0].shoulder].pos)) : ctrl[1];
+    Vec3 out = Scale(right, side ? 1.0f : -1.0f);
+
+    // the bind pose of the arm on the clavicle as the body has it
+    Pose rs = Compose(g_sk.ref[a.shoulder], clav >= 0 ? pose[clav] : pose[a.shoulder]);
+    Pose re = Compose(g_sk.ref[a.elbow], rs), rh = Compose(g_sk.ref[a.hand], re);
+    float l1 = Len(Sub(re.pos, rs.pos)), l2 = Len(Sub(rh.pos, re.pos));
+
+    // shrug: the hand above the shoulder lifts the clavicle (up to 20 degrees)
+    if (clav >= 0) {
+        Vec3 C = pose[clav].pos, c = Sub(rs.pos, C);
+        float lift = fminf(fmaxf(Dot(Sub(wrist, rs.pos), up) / fmaxf(l1 + l2, 1.0f), 0.0f), 1.0f);
+        Vec3 axis = Cross(c, up);
+        if (lift > 0.0f && Len(axis) > 1e-3f) {
+            Mat3 r = AxisAngle(Norm(axis), lift * 20.0f * 0.0174533f);
+            RotatePose(pose[clav], r);
+            for (Pose* p : { &rs, &re, &rh }) { RotatePose(*p, r); p->pos = Add(C, Mul(r, Sub(p->pos, C))); }
+        }
+    }
+    Vec3 S = rs.pos;
+
+    // the bind pose's bend: the elbow's side of the shoulder-wrist line, and the hinge
+    Vec3 dir0 = Norm(Sub(rh.pos, S)), e0 = Sub(re.pos, S);
+    Vec3 perp0 = Sub(e0, Scale(dir0, Dot(e0, dir0)));
+    Vec3 hinge0 = Len(perp0) > 1e-3f ? Norm(Cross(perp0, dir0)) : Norm(Cross(out, dir0));
+    Vec3 up0[3], fore0[3];
+    BendFrame(e0, hinge0, up0);
+    BendFrame(Sub(rh.pos, re.pos), hinge0, fore0);
+
+    // the new bend
     Vec3 toT = Sub(wrist, S);
-    float dist = Len(toT);
     Vec3 dir = Norm(toT);
-    float stretch = dist > (l1 + l2) * 0.98f ? (dist / 0.98f - l2) / fmaxf(l1, 1e-3f) : 1.0f;
-    l1 *= stretch;
-    dist = fminf(fmaxf(dist, fabsf(l1 - l2) + 0.5f), l1 + l2 - 0.05f);
+    float dist = fminf(fmaxf(Len(toT), fabsf(l1 - l2) + 0.5f), (l1 + l2) * 0.999f);
     // pole: like a human elbow - behind the hand along the forearm, down, and out to the side
-    Vec3 out = Scale(ctrl[1], side ? 1.0f : -1.0f);
-    Vec3 pole = Norm(Add(Add(Scale(ctrl[0], -0.7f), Vec3{ 0, 0, -1.0f }), Scale(out, 0.5f)));
+    Vec3 pole = Norm(Add(Add(Scale(ctrl[0], -0.6f), Scale(up, -0.8f)), Scale(out, 0.5f)));
     Vec3 perp = Sub(pole, Scale(dir, Dot(pole, dir)));
-    if (Len(perp) < 1e-3f) perp = Cross(dir, { 0, 0, 1 });
+    if (Len(perp) < 1e-3f) perp = Sub(out, Scale(dir, Dot(out, dir)));
     perp = Norm(perp);
     float cosA = fminf(fmaxf((l1 * l1 + dist * dist - l2 * l2) / (2.0f * l1 * dist), -1.0f), 1.0f);
     float sinA = sqrtf(1.0f - cosA * cosA);
-    Vec3 E2 = Add(S, Scale(Add(Scale(dir, cosA), Scale(perp, sinA)), l1));
-    Vec3 H2 = Add(S, Scale(dir, dist));
-    Mat3 r1 = RotFromTo(Sub(E, S), Sub(E2, S));
-    RotatePose(pose[a.shoulder], r1);
-    Mat3 r2 = RotFromTo(Mul(r1, Sub(H, E)), Sub(H2, E2));
-    RotatePose(pose[a.elbow], Mul(r2, r1));
-    pose[a.elbow].pos = E2;
-    pose[a.hand].pos = H2;
-    StretchThin(pose[a.shoulder], Sub(E2, S), stretch, g_cfg.limbThickness);
-    StretchThin(pose[a.elbow], Sub(H2, E2), 1.0f, g_cfg.limbThickness);
-    return stretch;
+    Vec3 E = Add(S, Scale(Add(Scale(dir, cosA), Scale(perp, sinA)), l1));
+    Vec3 H = Add(S, Scale(dir, dist));
+    Vec3 hinge = Norm(Cross(perp, dir));
+    Vec3 up1[3], fore1[3];
+    BendFrame(Sub(E, S), hinge, up1);
+    BendFrame(Sub(H, E), hinge, fore1);
+
+    Pose sh = rs, el = re;
+    RotatePose(sh, FrameToFrame(up0, up1));
+    RotatePose(el, FrameToFrame(fore0, fore1));
+    el.pos = E;
+    // the forearm rolls half of the way the hand rolls past it
+    Pose rigidHand = rh;
+    RotatePose(rigidHand, FrameToFrame(fore0, fore1));
+    Vec3 hr[3];
+    UnitAxes(rigidHand, hr);
+    float roll = TwistAbout(fore1[0], hr, handAx);
+    RotatePose(el, AxisAngle(fore1[0], roll * 0.5f));
+
+    // the armour's frames: elbow plates on the forearm; shoulder pads halfway between the bind and the upper arm
+    Vec3 mid[3] = { Add(up0[0], up1[0]), Add(up0[1], up1[1]), {} };
+    Pose pad = rs;
+    if (Len(mid[0]) > 0.2f && Len(mid[1]) > 0.2f) {
+        BendFrame(mid[0], mid[1], mid);
+        RotatePose(pad, FrameToFrame(up0, mid));
+    } else {
+        pad = sh;
+    }
+    g_padFrame[side][0] = pad;
+    g_padFrame[side][1] = el;
+    g_padValid[side] = true;
+
+    StretchThin(sh, Sub(E, S), 1.0f, g_cfg.limbThickness);
+    StretchThin(el, Sub(H, E), 1.0f, g_cfg.limbThickness);
+    pose[a.shoulder] = sh;
+    pose[a.elbow] = el;
+    pose[a.hand].pos = H;
+    SetAxes(pose[a.hand], handAx, handSize);
 }
 
 // A free hand (empty, holding the gun's front grip, or holding the melee weapon): the hand takes the
 // controller's orientation and the wrist goes where the real hand is.
 void SolveFreeArm(int side, Pose* pose, Vec3 target, const Vec3 ctrl[3])
 {
-    const Arm& a = g_sk.arm[side];
     Vec3 want[3];
     HandAxesFor(side, pose, ctrl, want);
-    ReachWrist(side, pose, target, ctrl);
-    SetAxes(pose[a.hand], want, g_cfg.handScale);
+    SolveArm(side, pose, target, ctrl, want, g_cfg.handScale);
 }
 
 // A leg of a crouching body: the hip went down, the ankle stays at `ankle` (its orientation too: the foot stays
@@ -554,15 +639,6 @@ void CrouchLeg(int side, Pose* pose, Vec3 ankle, Vec3 fwd, bool* driven)
     pose[k].pos = K2;
     pose[a].pos = A2;
     driven[t] = driven[k] = driven[a] = true;
-}
-
-// Rotation by `angle` (radians) about the unit axis.
-Mat3 AxisAngle(Vec3 a, float angle)
-{
-    float c = cosf(angle), s = sinf(angle), t = 1.0f - c;
-    return { { { c + t * a.x * a.x, t * a.x * a.y - s * a.z, t * a.x * a.z + s * a.y },
-               { t * a.y * a.x + s * a.z, c + t * a.y * a.y, t * a.y * a.z - s * a.x },
-               { t * a.z * a.x - s * a.y, t * a.z * a.y + s * a.x, c + t * a.z * a.z } } };
 }
 
 // Fingers of a hand the player controls (not the gun hand, which the game animates around the grip): from the
@@ -644,8 +720,7 @@ void SolveGunArm(Pose* pose, Vec3 target, const Vec3 ctrl[3])
             Orthonormalize(handAx);
         }
         float size = g_gun.moved == g_gun.comp ? g_gun.handSize * Len(pose[a.elbow].ax[0]) : Len(pose[a.hand].ax[0]);
-        ReachWrist(g_gunSide, pose, target, ctrl);
-        SetAxes(pose[a.hand], handAx, size);
+        SolveArm(g_gunSide, pose, target, ctrl, handAx, size);
     }
 }
 
@@ -908,6 +983,7 @@ void OnSkelPose(uint8_t* comp)
         int melee = WeaponsMeleeHeld();
         bool gunArm = g_gun.comp && melee != g_gunSide && VRGunHand() >= 0;   // (g_gunSide: the arm the gun is on)
         for (int s = 0; s < 2; s++) for (int b : { g_sk.arm[s].shoulder, g_sk.arm[s].elbow, g_sk.arm[s].hand }) driven[b] = true;
+        g_padValid[0] = g_padValid[1] = false;
         if (g_cfg.handIK && ikWeight > 0.0f) {
             Vec3 gunTarget = {}, gunCtrl[3] = {};
             bool gunValid = false;
@@ -969,13 +1045,24 @@ void OnSkelPose(uint8_t* comp)
         // children keep their local transforms relative to the moved bones; hidden parts collapse to a point: the
         // head always (the eyes are inside it), the torso unless ShowBody=2, the legs too with ShowBody=0
         static bool changed[kMaxBones];   // pose differs from `anim`: the children follow it
+        bool padsOn = ikWeight >= 1.0f;   // (blending to an ability's animation: the armour on the blended bones)
         for (int i = 0; i < n; i++) {
             int p = g_sk.parent[i];
             // the clavicles keep their bind pose even though the torso they hang on is hidden (collapsed with it,
             // the shoulders and the top of the upper arms were gone)
             changed[i] = driven[i] || (g_sk.bindPose[i] && g_sk.group[i] == 0);
             if (changed[i]) continue;
-            if (g_sk.armour[i] && p >= 0) { pose[i] = Compose(g_sk.ref[i], pose[p]); changed[i] = true; continue; }
+            if (g_sk.armour[i] && p >= 0) {
+                const Pose* frame = &pose[p];
+                for (int s = 0; s < 2; s++)
+                    if (padsOn && g_padValid[s]) {
+                        if (p == g_sk.arm[s].shoulder) frame = &g_padFrame[s][0];
+                        if (p == g_sk.arm[s].elbow) frame = &g_padFrame[s][1];
+                    }
+                pose[i] = Compose(g_sk.ref[i], *frame);
+                changed[i] = true;
+                continue;
+            }
             if (p >= 0 && changed[p]) { pose[i] = Compose(Compose(anim[i], Inverse(anim[p])), pose[p]); changed[i] = true; }
             bool hide = i == g_sk.head || (g_sk.group[i] == 1 && g_cfg.showBody < 2) || (g_sk.group[i] == 2 && g_cfg.showBody == 0);
             if (hide) { for (auto& a : pose[i].ax) a = Scale(a, 0.01f); changed[i] = true; }

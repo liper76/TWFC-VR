@@ -233,7 +233,7 @@ HeldFrameTime, SingleThreadRender, StereoPerFrame=0, HandIK, ShowBody, LimbThick
 WeaponScale, FingerPoses, NearClip=10, NoNearFade, MuzzleFlashScale, Reticle, ReticleSize, ReticleStyle,
 Cutscenes3D=0, GunGrip, Foregrip, EmptyGripR, AbilityAnimation=0.
 [Input]: AimMode=1, SnapTurnDegrees, SmoothTurnSpeed, MoveByHead, TwoHanded, TwoHandReach/Radius, GrenadeGrab,
-GrenadeThrowScale=3, GrenadeGravity, GrenadeBelt, BeltOffset, MeleeGesture, MeleeSpeed=3, MeleeContact=0,
+GrenadeThrowScale=3, GrenadeGravity, GrenadeBelt, GrenadeScale=0.5, BeltOffset, MeleeGesture, MeleeSpeed=3, MeleeContact=0,
 MeleeReach, MeleeHitRadius, Pull, PullRange=12, PullCone=15, PullSpeed=0, PullAutoTake=1, PullTrace, Scope=0,
 GripAbilities=0, PhysicalAim. [HUD]: Minimal=1, Prompts, MarkersInEyes, ButtonHints, Distance, Width, FollowSpeed.
 [Weapon.<имя>]: GunGrip, GunGripL, Foregrip, Scope. [Debug]: Automation, LogFps, FakeHmd.
