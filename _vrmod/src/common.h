@@ -92,6 +92,7 @@ struct Config {
     float handScale = 0.6f;         // first person: size of the robot's hands
     float weaponScale = 0.6f;       // first person: size of the held weapon
     float muzzleFlashScale = 0.35f; // first person: size of the weapon's muzzle flash effects
+    int   english = 1;              // the mod's own text: 1 English, 0 Russian ([General] Language=auto|en|ru)
     int   bodyFollowHead = 1;       // first person: the body stays under the head when you walk around the room
     int   moveByHead = 1;           // left stick moves where the head looks (0 = where the right controller aims)
     int   vehicleCamera = 1;        // vehicle form: 0 = driver's seat, 1 = chase camera behind and above

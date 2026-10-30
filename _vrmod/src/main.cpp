@@ -51,6 +51,8 @@ static void LoadConfig()
                   "FpsLimit=120\n"
                   "; Cap while the headset is connected (the OpenXR runtime paces each tick via xrWaitFrame).\n"
                   "VRFpsLimit=300\n"
+                  "; Language of the mod's VR menu and weapon wheel: auto (from Windows), en or ru\n"
+                  "Language=auto\n"
                   "\n[VR]\n"
                   "Enabled=1\n"
                   "; 0 = theater: the game is always shown on a big virtual screen\n"
@@ -279,6 +281,15 @@ static void LoadConfig()
     g_cfg.handScale = IniFloat(ini, L"VR", L"HandScale", g_cfg.handScale);
     g_cfg.weaponScale = IniFloat(ini, L"VR", L"WeaponScale", g_cfg.weaponScale);
     g_cfg.muzzleFlashScale = IniFloat(ini, L"VR", L"MuzzleFlashScale", g_cfg.muzzleFlashScale);
+    {
+        // the mod's own text (VR menu, weapon wheel): en / ru, or auto = Russian for a Russian, Ukrainian or
+        // Belarusian Windows, English otherwise
+        wchar_t b[16] = {};
+        GetPrivateProfileStringW(L"General", L"Language", L"auto", b, 16, ini.c_str());
+        LANGID ui = PRIMARYLANGID(GetUserDefaultUILanguage());
+        bool ru = !_wcsicmp(b, L"ru") || (_wcsicmp(b, L"en") && (ui == LANG_RUSSIAN || ui == LANG_UKRAINIAN || ui == LANG_BELARUSIAN));
+        g_cfg.english = ru ? 0 : 1;
+    }
     g_cfg.bodyFollowHead = (int)IniFloat(ini, L"VR", L"BodyFollowHead", (float)g_cfg.bodyFollowHead);
     g_cfg.vehicleCamera = (int)IniFloat(ini, L"VR", L"VehicleCamera", (float)g_cfg.vehicleCamera);
     g_cfg.chaseDistance = IniFloat(ini, L"VR", L"ChaseDistance", g_cfg.chaseDistance);

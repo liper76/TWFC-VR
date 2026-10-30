@@ -1,0 +1,204 @@
+TRANSFORMERS: WAR FOR CYBERTRON - VR MOD (early version)
+========================================================
+
+(Русская версия: "VR-мод — инструкция.txt")
+
+TWO MODES
+  "Launch VR.bat" ............. MAIN: first person, aim with the right controller,
+                                crosshair in the headset, sharp square render, menus on a screen.
+  "Launch VR (classic).bat" ... the saved older version: third person, aim with your gaze.
+  ("Запуск VR.bat" and "Запуск VR (классика).bat" are the same launchers with Russian names.)
+
+HOW TO START
+1. Start Virtual Desktop (the Streamer on the PC + the app in the headset) and connect.
+2. Run the .bat you want from the game folder.
+3. Menus, the pause screen and movies are shown on a big virtual screen.
+   Gameplay switches to full 3D with head tracking.
+
+The normal non-VR game still starts from Binaries\TWFC.exe (with your ReShade/DLSS).
+The mod lives in the BinariesVR and BinariesVR_Classic folders and changes nothing in Binaries.
+The VR resolution (1800x1800) is used only by the VR version; the normal game's resolution
+setting in the registry is not changed.
+
+LANGUAGE
+  The mod's VR settings menu and weapon wheel are in English or Russian. By default the language follows
+  Windows (Russian, Ukrainian or Belarusian Windows - Russian, anything else - English).
+  Switch it in the headset: the first item of the VR settings menu, "Language / Язык".
+  Or in BinariesVR\twfcvr.ini, section [General]: Language=auto / en / ru.
+  (The game's own menus and subtitles stay in the game's language.)
+
+CONTROLS (main mode; the buttons work like an Xbox gamepad)
+  Right controller ................ AIM: the weapon fires where the controller points,
+                                    the ring crosshair shows the direction
+  Left stick ...................... move
+  Right stick ..................... turn (smooth; snap turn - SnapTurnDegrees=30 in the ini)
+  Right trigger ................... fire (with a melee weapon in the right hand: swing it)
+  Left trigger .................... as in the game: precise aim / the weapon's second action (detonating grenades);
+                                    in vehicle form - boost
+  Y: short press .................. main ability (RB)
+  Y: hold 0.35 s .................. second ability (LB), held while you hold Y
+  B: short press .................. grenade / action / skip a movie (like B in the game)
+  B: hold 0.35 s .................. the right hand's WEAPON WHEEL (like Half-Life: Alyx): point the hand at an item
+                                    and release B. Items: your weapons / "Empty hand". (The grips do not open the
+                                    wheel - they only grab.) In a vehicle, holding B switches the vehicle's weapon.
+  Left stick click ................ transform. The right stick click does nothing.
+                                    Empty right hand: the gun is put away and does not fire, the hand is free
+                                    (grenades from the belt, pulling, fingers); its position on the controller
+                                    is its own, set in "Weapon setup" while the hand is empty (EmptyGripR)
+  Melee ........................... a sharp punch FORWARD (where you look) with the left or the empty right hand -
+                                    the game's attack straight ahead (no melee weapon needed)
+  Left grip at the front of the gun  two-handed grip (the back of the gun follows the right controller,
+                                    the barrel turns to the left hand)
+  A - jump, X - reload / interact
+  (in a vehicle: Y - the vehicle's special move)
+  The old layout (grips = abilities, Y = next weapon): GripAbilities=1 in [Input].
+  (in the old layout the stick clicks are LS / RS)
+  Menu button (left): short press .. Start (pause)
+                      hold + press A (or hold 1.5 s) in gameplay ... SETUP MODE (the game gets no buttons
+                      meanwhile; a floating panel with the VR SETTINGS MENU appears in front of you):
+      - pick items with the right hand's ray + trigger (on a value: the left half lowers it, the right half
+        raises it), or with the left stick (up/down - item, left/right - value) and A; the right stick scrolls.
+        Changes apply at once;
+      - "Language / Язык" - English / Russian;
+      - "Vehicle camera position" (vehicle form only) - like Space Mover: hold a grip and drag the world with
+        your hand (forward/back, up/down), right trigger - save, B - cancel. The cockpit or the chase camera,
+        whichever is selected;
+      - "Vehicle: third-person view" - switches the vehicle view;
+      - "Weapon setup" (or Y) - the weapon page (Y - back to the menu). The hands work by role: the gun hand
+        and the other one;
+      - the gun hand's grip: hold it - the gun freezes; move your hand to where it is comfortable to hold
+        the gun, release (only the position changes; B - change the rotation too). The orange square is where
+        your hand is now. For a gun in the left hand each weapon has its own grip (GunGripL), not a mirror
+        of the right one;
+      - the green squares are zones: at the front of the gun (two-handed grip) and on the belt (grenades).
+        Grab a square with the other hand's grip and move it;
+      - A - reset this weapon's settings;
+      - press the menu button again (or the "Save and exit" item) - save and leave (it also leaves by itself
+        after 3 minutes). The grip and foregrip are stored per weapon ([Weapon.<name>] sections in
+        twfcvr.ini). Aiming is only along the barrel (the extra scope lens is removed; Scope=1 in [Input]
+        brings it back).
+  The game's interface (health, ammo, objectives) hangs on a panel in front of you and smoothly
+  follows your gaze. The game's own crosshair in the centre is removed - aim with the ring.
+
+  twfcvr.ini can be edited while the game runs - changes apply within a second
+  (except RenderWidth/RenderHeight). Handy for tuning WorldScale (the size of the world:
+  bigger = you are bigger) and FirstPersonEyeHeight (eye height), and in [HUD] - the Distance,
+  Width and FollowSpeed of the interface panel.
+
+SETTINGS - BinariesVR\twfcvr.ini (open with Notepad)
+  RenderWidth/RenderHeight=1800   render resolution of each eye in VR.
+                      Higher - sharper, but more GPU load (both eyes are drawn in one frame).
+  CameraMode=1        1 = first person, 0 = third person
+  AimMode=1           1 = aim with the controller, 0 = with your gaze
+  Reticle=1           crosshair; ReticleDistance=8 - how far (m)
+  FirstPersonEyeHeight=150   eye height in first person
+  WorldScale=200      head movement scale: bigger = you are "bigger", stronger depth
+  Mode=1              1 = 3D in gameplay, 0 = always the virtual screen
+  FpsLimit=120 / VRFpsLimit=300   FPS limit without / with the headset
+  ScreenDistance / ScreenWidth - size and distance of the virtual screen (metres)
+  Language=auto       [General]: the mod's language - auto, en or ru
+
+TIPS
+- Both eyes are drawn from the very same game instant (StereoPerFrame=1 by default): the vehicle in
+  third person, robots, hands and effects are always solid and 3D, with no "swimming" in motion.
+  If the GPU cannot keep up in heavy scenes, lower RenderWidth/RenderHeight (e.g. 1500-1600), the refresh
+  rate in Virtual Desktop (72/80 Hz), or go back to alternating eyes (StereoPerFrame=0 in [VR]).
+- To turn "forward" - the usual Virtual Desktop / Oculus recentre.
+
+HANDS (new, early version)
+  The robot's arms and weapon follow the controllers (HandIK=1 in the ini, 0 = off).
+  Your own robot's head is hidden so it does not block the view.
+  Robots near you no longer vanish (NoNearFade=600 - the radius; 0 = as in the game).
+  ShowBody=1 - arms and legs visible, the bulky torso hidden (0 = arms only, 2 = the whole body).
+  LimbThickness=0.5 - thinner arms, LegThickness=0.75 - thinner legs (1 = as in the game).
+  HandScale=0.6 / WeaponScale=0.6 - size of the robot's hands and of the weapon in hand.
+  HandOffsetForward / HandOffsetRight / HandOffsetUp - shift the robot's hands relative to yours, in cm
+    (e.g. the robot's hands are right of yours - HandOffsetRight=-4). Can be changed in game.
+  MuzzleFlashScale=0.35 - size of muzzle flashes (they are right at your eyes); also for turrets - mounted
+    and carried.
+  The aim ring sits where the shot will really land (on a wall, an enemy), not at a fixed distance.
+  StereoPerFrame=1 - both eyes are drawn in one engine tick from one state of the world and physics (a moving
+    vehicle, robots and hands are exactly in sync in both eyes; 0 - the old alternating eyes every other frame).
+  SingleThreadRender=1 - the game draws on its main thread, so every image goes to its own eye with its own
+    pose (does not slip after menus, movies, loads). 0 - as before (a separate render thread: slightly more
+    FPS, but the eyes can slip).
+  NearClip=10 - how close to the eyes things are still visible (the game had 100 - hands vanished at the face).
+  The gun hangs on the right forearm and points exactly along the right controller.
+  In a vehicle you can aim with your gaze (VehicleHeadAim=1; 0 = with the controller).
+  Vehicle camera: VehicleCamera=0 - from the cockpit, 1 - chase camera behind and above (ChaseDistance /
+    ChaseHeight).
+
+PHYSICAL CONTROLS (new)
+  Melee - only when a melee weapon is picked in the wheel: a sharp swing of the hand holding it.
+    A hit counts only when the weapon itself reaches another robot during the swing (strong vibration) -
+    then the game strikes exactly that robot. Swinging at the air does nothing: no animation, no lunge, you
+    walk freely. Swing threshold - MeleeSpeed=3.0 (m/s), weapon length - MeleeReach=0.55 (m), robot
+    "thickness" - MeleeHitRadius=90 ([Input] section); MeleeContact=0 - as before (any swing = a hit).
+    The trigger with a melee weapon in the right hand no longer strikes (only the swing does).
+  Two-handed grip - bring the left hand to the front of the gun (the grip point comes from the weapon model)
+    and squeeze the left grip: the robot's left hand goes onto the gun, the barrel turns so the foregrip is in
+    your left hand.
+  PhysicalAim=1 - the two-handed grip with the gun at your eyes also presses the left trigger (off by default:
+    on some guns the left trigger is the second action, e.g. detonating grenades).
+  Melee weapon: pick "Melee" in the weapon wheel - the robot's melee weapon (Megatron's hammer) stays in
+    the hand, strike by swinging (or with the right trigger if it is in the right hand). Put it away - pick
+    a gun in the wheel or briefly squeeze the right grip. In the left hand: a gun in the right, the melee
+    weapon in the left at the same time. Transforming puts it away.
+  Abilities (left trigger, Y) - for AbilityAnimation=1.2 s the arms are given to the game's animation (spins,
+    special attacks), then smoothly return to the controllers.
+  BodyFollowHead=1 - the body stays under your head when you walk around the room.
+  MoveByHead=1 ([Input] section) - the left stick moves where your head looks.
+  The vehicle drives and fires where the right controller points (VehicleHeadAim=1 - where you look);
+    the camera glides smoothly when you transform.
+  Grenade (like Half-Life: Alyx): squeeze the grip of the free left hand at your chest or belt - a grenade from
+    the "pouch" appears in the hand (light vibration; no grenades - a short click). Left trigger - arm it
+    (strong vibration). Release the grip mid-swing - the grenade flies with the hand's speed and direction,
+    in an arc. Released without arming it goes back to the pouch (the count is not spent). The B button throws
+    as in the game.
+    Settings in [Input]: GrenadeGrab=1 (0 - the old throwing gesture), GrenadeThrowScale (throw strength =
+    hand speed x this), GrenadeGravity=1 (the arc; 0 - flies almost straight, as in the game).
+  The free hand's fingers copy yours: trigger - index finger (finger off the trigger - pointing), grip - middle
+    and ring fingers, the thumb rests while it touches the stick/buttons (raised - "thumbs up"). With a grenade
+    or a melee weapon - a fist, on the gun's foregrip - wrapped around it. [VR] FingerPoses=0 - off;
+    FingerPalmSign=-1 - if the fingers bend the wrong way.
+  Pulling (like the gravity gloves in Alyx/Boneworks): point a free hand (the left; the right one if "Empty
+    hand" is picked) at a health pack / ammo / weapon - a light click of vibration - and SQUEEZE THE GRIP: like
+    in Boneworks, the item flies smoothly right into your hand (about a second) and is taken. Ammo and health
+    count by themselves (if you are short of them); the mod takes weapons itself (holds X; PullAutoTake=0 -
+    take with the X button). A weapon rack returns to its place when you walk away.
+    Does not work while the left hand holds a melee weapon or the foregrip. [Input]: Pull=1, PullRange=12 (m),
+    PullCone=15 (degrees), PullSpeed=0 (above 0 - jerking the hand towards you at that speed, m/s, also pulls).
+  Only visible items are pulled (not through walls, PullTrace=1), and only ones not taken yet.
+  Interface: only health, abilities, weapon, ammo and button hints ([HUD] Prompts=1) ([HUD] Minimal=1;
+    0 - the whole game interface).
+  Hints and tutorial pages name the VR controller buttons instead of keys: "Press A to Jump", "Hold X...",
+    "R Grip", "L Stick" (left stick click), "Trigger" / "L Trigger". [HUD] ButtonHints=0 - as in the game.
+  While the headset is on, the game gets no mouse and keyboard (a mouse bumped by accident does not turn
+    the view; BlockMouseKeyboard=0 in [Input] - turn this off).
+  The sniper zoom (left trigger with a sniper rifle) is shown in a lens above the barrel.
+  In vehicle form the camera is third person by default (VehicleCamera=1, ChaseDistance / ChaseHeight);
+    VehicleCamera=0 - from the cockpit (VehicleEyeHeight / VehicleEyeForward).
+  Video movies, in-engine cutscenes and menus are on the virtual screen ([VR] Cutscenes3D=1 - cutscenes in 3D
+    around you).
+  Interface markers (where to go, names over allies, target lock) are drawn right in the 3D view
+    ([HUD] MarkersInEyes); translucent ability effects and text (hints, "reloading") are not - the text stays
+    on the panel. The panel with health, abilities and weapon is as before.
+  The aim ring shows the game's own crosshair (changes per weapon, turns red on an enemy): [VR] ReticleStyle=1
+    (0 - a plain ring). Size and offset - in setup mode.
+  Ability animations no longer take over the arms (AbilityAnimation=0). The arms stretch only at the shoulder.
+  A grenade in the hand does not spin and stays silent until armed; a grenade is visible on the belt while you
+    have any (GrenadeBelt); the size of the grenade on the belt and in the hand - GrenadeScale (0.5).
+  Sharpness: 16x anisotropic filtering is enabled in BinariesVR\dgVoodoo.conf.
+
+NOT DONE YET
+- Turning off camera shake, HUD markers in the world.
+
+FIX FOR HANGS AND CRASHES
+The mod fixes the game hanging at start-up / on window focus changes (a deadlock between dgVoodoo and the engine).
+BinariesVR\TWFC.exe is marked Large Address Aware (4 GB of memory instead of 2): without it the VR version
+crashed on heavy levels with "You ran out of memory". The original without the flag is BinariesVR\TWFC.exe.noLAA;
+Binaries is untouched.
+
+UNINSTALLING
+Delete the BinariesVR and BinariesVR_Classic folders, all the "Launch VR*.bat" / "Запуск VR*.bat" files and both
+guides. The _vrmod folder is the mod's sources and _vrmod_tools the build tools; they can be deleted too.

@@ -1204,6 +1204,8 @@ static Wheel g_wheel;
 static Chain g_wheelChain;
 static bool WheelIsOpen() { return g_wheel.open; }
 static const UINT kWheelPx = 384;
+// The mod's own text: Russian or English ([General] Language, the menu's first item)
+static const wchar_t* Tr(const wchar_t* ru, const wchar_t* en) { return g_cfg.english ? en : ru; }
 static const wchar_t kLabelNext[] = L"\x0421\x043B\x0435\x0434. \x043E\x0440\x0443\x0436\x0438\x0435";     // "След. оружие"
 static const wchar_t kLabelEmpty[] = L"\x041F\x0443\x0441\x0442\x0430\x044F \x0440\x0443\x043A\x0430";    // "Пустая рука"
 
@@ -1229,13 +1231,13 @@ static void WheelOpen(XrTime t, int handIndex)
             if (i == wl.current && melee != 1 && VRGunHand() == 1) w.current = w.count;
             WheelAdd(w, i, wl.name[i]);
         }
-        if (!wl.count) WheelAdd(w, kItemNext, kLabelNext);   // inventory unknown: still offer "next weapon"
+        if (!wl.count) WheelAdd(w, kItemNext, Tr(kLabelNext, L"Next weapon"));   // inventory unknown: still offer "next weapon"
         if (VRGunHand() != 1) w.current = w.count;
-        WheelAdd(w, kItemEmpty, kLabelEmpty);   // (the right hand: guns or empty - the melee weapon is the left's)
+        WheelAdd(w, kItemEmpty, Tr(kLabelEmpty, L"Empty hand"));   // (the right hand: guns or empty - the melee weapon is the left's)
     } else {
         // the left hand: empty (no melee weapon here - a punch with the empty left hand shows the attack's weapon in it)
         if (VRGunHand() != 0) w.current = w.count;
-        WheelAdd(w, kItemEmpty, kLabelEmpty);
+        WheelAdd(w, kItemEmpty, Tr(kLabelEmpty, L"Empty hand"));
     }
     // the ring faces the head, upright
     w.center = hand.position;
@@ -1726,41 +1728,42 @@ static void UpdateSetup(XINPUT_GAMEPAD& p, const float grip[2], DWORD now)
 // (applied within a second), and actions - the weapon page, the T-pose calibration, leave. Pointed at with a ray from
 // the right hand and pressed with its trigger (on a value: its left half lowers, its right half raises it), or the left
 // stick (up/down picks, left/right changes) and A; the right stick scrolls.
-struct SettingItem { const wchar_t* sec; const wchar_t* key; const wchar_t* label; float def, step, lo, hi; };   // sec null: an action
+struct SettingItem { const wchar_t* sec; const wchar_t* key; const wchar_t* label; const wchar_t* en; float def, step, lo, hi; };   // sec null: an action; label Russian, en English
 static const SettingItem kSettings[] = {
-    { nullptr, L"@weapon", L"\x041D\x0430\x0441\x0442\x0440\x043E\x0439\x043A\x0430 \x043E\x0440\x0443\x0436\x0438\x044F: \x0445\x0432\x0430\x0442, \x0446\x0435\x0432\x044C\x0451, \x043B\x0438\x043D\x0437\x0430, \x043F\x043E\x0434\x0441\x0443\x043C\x043E\x043A", 0, 0, 0, 0 },   // ��������� ������: ����, �����, �����, ��������
-    { nullptr, L"@camera", L"\x041F\x043E\x043B\x043E\x0436\x0435\x043D\x0438\x0435 \x043A\x0430\x043C\x0435\x0440\x044B \x043C\x0430\x0448\x0438\x043D\x044B (\x0442\x044F\x043D\x0443\x0442\x044C \x043C\x0438\x0440 \x0433\x0440\x0438\x043F\x043E\x043C)", 0, 0, 0, 0 },   // ����������: �-���� (������� ���� ��� ������)
-    { L"VR", L"WorldScale", L"\x041C\x0430\x0441\x0448\x0442\x0430\x0431 \x043C\x0438\x0440\x0430", 200, 10, 100, 400 },   // ������� ���� (��� ����������)
-    { L"VR", L"FirstPersonEyeHeight", L"\x0412\x044B\x0441\x043E\x0442\x0430 \x0433\x043B\x0430\x0437", 150, 5, 50, 300 },   // ������ ����
-    { L"VR", L"SyncEyeTime", L"\x041E\x0431\x0430 \x0433\x043B\x0430\x0437\x0430 \x2014 \x043E\x0434\x0438\x043D \x043C\x043E\x043C\x0435\x043D\x0442 \x0438\x0433\x0440\x044B", 1, 1, 0, 1 },   // ��� ����� � ���� ������ ����
-    { L"VR", L"HandScale", L"\x0420\x0430\x0437\x043C\x0435\x0440 \x043A\x0438\x0441\x0442\x0435\x0439", 0.6f, 0.05f, 0.2f, 1.5f },   // ������ ������
-    { L"VR", L"WeaponScale", L"\x0420\x0430\x0437\x043C\x0435\x0440 \x043E\x0440\x0443\x0436\x0438\x044F", 0.6f, 0.05f, 0.2f, 1.5f },   // ������ ������
-    { L"VR", L"LimbThickness", L"\x0422\x043E\x043B\x0449\x0438\x043D\x0430 \x0440\x0443\x043A", 0.5f, 0.05f, 0.2f, 1 },   // ������� ���
-    { L"VR", L"LegThickness", L"\x0422\x043E\x043B\x0449\x0438\x043D\x0430 \x043D\x043E\x0433", 0.75f, 0.05f, 0.2f, 1 },   // ������� ���
-    { L"VR", L"ShowBody", L"\x0422\x0435\x043B\x043E: 0 \x0440\x0443\x043A\x0438, 1 + \x043D\x043E\x0433\x0438, 2 \x0432\x0441\x0451", 1, 1, 0, 2 },   // ����: 0 ����, 1 + ����, 2 ��
-    { L"VR", L"FingerPoses", L"\x041F\x0430\x043B\x044C\x0446\x044B \x043F\x043E \x043A\x043E\x043D\x0442\x0440\x043E\x043B\x043B\x0435\x0440\x0443", 1, 1, 0, 1 },   // ������ �� �����������
-    { L"VR", L"Reticle", L"\x041A\x043E\x043B\x044C\x0446\x043E \x043F\x0440\x0438\x0446\x0435\x043B\x0430", 1, 1, 0, 1 },   // ������ �������
-    { L"VR", L"ReticleSize", L"\x0420\x0430\x0437\x043C\x0435\x0440 \x043F\x0440\x0438\x0446\x0435\x043B\x0430 \x0438\x0433\x0440\x044B", 0.6f, 0.1f, 0.2f, 3 },   // ������ ������� ����
-    { L"Input", L"SnapTurnDegrees", L"\x041F\x043E\x0432\x043E\x0440\x043E\x0442 \x0440\x044B\x0432\x043A\x043E\x043C (0 = \x043F\x043B\x0430\x0432\x043D\x043E)", 0, 15, 0, 90 },   // ������� ������ (0 = ������)
-    { L"Input", L"SmoothTurnSpeed", L"\x0421\x043A\x043E\x0440\x043E\x0441\x0442\x044C \x043F\x043E\x0432\x043E\x0440\x043E\x0442\x0430", 120, 15, 30, 360 },   // �������� ��������
-    { L"Input", L"MoveByHead", L"\x0418\x0434\x0442\x0438 \x043A\x0443\x0434\x0430 \x0441\x043C\x043E\x0442\x0440\x044E", 1, 1, 0, 1 },   // ���� ���� ������
-    { L"Input", L"TwoHanded", L"\x0414\x0432\x0443\x0440\x0443\x0447\x043D\x044B\x0439 \x0445\x0432\x0430\x0442", 1, 1, 0, 1 },   // ��������� ����
-    { L"Input", L"GrenadeGrab", L"\x0413\x0440\x0430\x043D\x0430\x0442\x044B \x0440\x0443\x043A\x043E\x0439 \x0441 \x043F\x043E\x044F\x0441\x0430", 1, 1, 0, 1 },   // ������� ����� � �����
-    { L"Input", L"GrenadeThrowScale", L"\x0421\x0438\x043B\x0430 \x0431\x0440\x043E\x0441\x043A\x0430 \x0433\x0440\x0430\x043D\x0430\x0442\x044B", 3, 0.25f, 0.5f, 8 },   // ���� ������ �������
-    { L"Input", L"GrenadeGravity", L"\x0412\x0435\x0441 \x0433\x0440\x0430\x043D\x0430\x0442\x044B", 1, 0.25f, 0, 3 },   // ��� �������
-    { L"Input", L"MeleeContact", L"\x0423\x0434\x0430\x0440 \x0442\x043E\x043B\x044C\x043A\x043E \x043F\x0440\x0438 \x043A\x0430\x0441\x0430\x043D\x0438\x0438", 0, 1, 0, 1 },   // ���� ������ ��� �������
-    { L"Input", L"MeleeSpeed", L"\x0423\x0434\x0430\x0440: \x0441\x043A\x043E\x0440\x043E\x0441\x0442\x044C \x0432\x0437\x043C\x0430\x0445\x0430 (\x043C/\x0441)", 3, 0.25f, 1, 8 },   // ����: �������� ������ (�/�)
-    { L"Input", L"MeleeReach", L"\x0414\x043B\x0438\x043D\x0430 \x0431\x043B\x0438\x0436\x043D\x0435\x0433\x043E \x043E\x0440\x0443\x0436\x0438\x044F (\x043C)", 0.55f, 0.05f, 0.2f, 1.2f },   // ����� �������� ������ (�)
-    { L"VR", L"VehicleCamera", L"\x041C\x0430\x0448\x0438\x043D\x0430: \x0432\x0438\x0434 \x043E\x0442 3-\x0433\x043E \x043B\x0438\x0446\x0430 (\x0441\x0437\x0430\x0434\x0438)", 1, 1, 0, 1 },   // ������: ������ �����
-    { L"VR", L"VehicleHeadAim", L"\x041C\x0430\x0448\x0438\x043D\x0430: \x043F\x0440\x0438\x0446\x0435\x043B \x0432\x0437\x0433\x043B\x044F\x0434\x043E\x043C", 0, 1, 0, 1 },   // ������: ������ ��������
-    { L"VR", L"Cutscenes3D", L"\x0417\x0430\x0441\x0442\x0430\x0432\x043A\x0438 \x0432 3D", 0, 1, 0, 1 },   // �������� � 3D
-    { L"VR", L"NearClip", L"\x0411\x043B\x0438\x0436\x043D\x044F\x044F \x0433\x0440\x0430\x043D\x0438\x0446\x0430 \x0432\x0438\x0434\x0438\x043C\x043E\x0441\x0442\x0438", 10, 5, 1, 100 },   // ������� ������� ���������
-    { L"VR", L"MuzzleFlashScale", L"\x0420\x0430\x0437\x043C\x0435\x0440 \x0432\x0441\x043F\x044B\x0448\x0435\x043A \x0432\x044B\x0441\x0442\x0440\x0435\x043B\x0430", 0.35f, 0.05f, 0, 1 },   // ������ ������� ��������
-    { L"HUD", L"Minimal", L"\x041A\x043E\x0440\x043E\x0442\x043A\x0438\x0439 HUD", 1, 1, 0, 1 },   // �������� HUD
-    { L"HUD", L"MarkersInEyes", L"\x041C\x0435\x0442\x043A\x0438 \x0432 \x0433\x043B\x0430\x0437\x0430", 1, 1, 0, 1 },   // ����� � �����
-    { L"HUD", L"ButtonHints", L"\x041F\x043E\x0434\x0441\x043A\x0430\x0437\x043A\x0438 \x043A\x043D\x043E\x043F\x043A\x0430\x043C\x0438 VR", 1, 1, 0, 1 },   // ��������� �������� VR
-    { L"HUD", L"Distance", L"\x041F\x0430\x043D\x0435\x043B\x044C HUD: \x0440\x0430\x0441\x0441\x0442\x043E\x044F\x043D\x0438\x0435", 1.6f, 0.1f, 0.5f, 4 },   // ������ HUD: ����������
-    { nullptr, L"@exit", L"\x0421\x043E\x0445\x0440\x0430\x043D\x0438\x0442\x044C \x0438 \x0432\x044B\x0439\x0442\x0438", 0, 0, 0, 0 },   // ��������� � �����
+    { nullptr, L"@lang", L"Language / \x042F\x0437\x044B\x043A", L"Language / \x042F\x0437\x044B\x043A", 0, 0, 0, 0 },
+    { nullptr, L"@weapon", L"\x041D\x0430\x0441\x0442\x0440\x043E\x0439\x043A\x0430 \x043E\x0440\x0443\x0436\x0438\x044F: \x0445\x0432\x0430\x0442, \x0446\x0435\x0432\x044C\x0451, \x043B\x0438\x043D\x0437\x0430, \x043F\x043E\x0434\x0441\x0443\x043C\x043E\x043A", L"Weapon setup: grip, foregrip, scope, pouch", 0, 0, 0, 0 },
+    { nullptr, L"@camera", L"\x041F\x043E\x043B\x043E\x0436\x0435\x043D\x0438\x0435 \x043A\x0430\x043C\x0435\x0440\x044B \x043C\x0430\x0448\x0438\x043D\x044B (\x0442\x044F\x043D\x0443\x0442\x044C \x043C\x0438\x0440 \x0433\x0440\x0438\x043F\x043E\x043C)", L"Vehicle camera position (drag the world with grip)", 0, 0, 0, 0 },
+    { L"VR", L"WorldScale", L"\x041C\x0430\x0441\x0448\x0442\x0430\x0431 \x043C\x0438\x0440\x0430", L"World scale", 200, 10, 100, 400 },
+    { L"VR", L"FirstPersonEyeHeight", L"\x0412\x044B\x0441\x043E\x0442\x0430 \x0433\x043B\x0430\x0437", L"Eye height", 150, 5, 50, 300 },
+    { L"VR", L"SyncEyeTime", L"\x041E\x0431\x0430 \x0433\x043B\x0430\x0437\x0430 \x2014 \x043E\x0434\x0438\x043D \x043C\x043E\x043C\x0435\x043D\x0442 \x0438\x0433\x0440\x044B", L"Both eyes \x2014 same game moment", 1, 1, 0, 1 },
+    { L"VR", L"HandScale", L"\x0420\x0430\x0437\x043C\x0435\x0440 \x043A\x0438\x0441\x0442\x0435\x0439", L"Hand size", 0.6f, 0.05f, 0.2f, 1.5f },
+    { L"VR", L"WeaponScale", L"\x0420\x0430\x0437\x043C\x0435\x0440 \x043E\x0440\x0443\x0436\x0438\x044F", L"Weapon size", 0.6f, 0.05f, 0.2f, 1.5f },
+    { L"VR", L"LimbThickness", L"\x0422\x043E\x043B\x0449\x0438\x043D\x0430 \x0440\x0443\x043A", L"Arm thickness", 0.5f, 0.05f, 0.2f, 1 },
+    { L"VR", L"LegThickness", L"\x0422\x043E\x043B\x0449\x0438\x043D\x0430 \x043D\x043E\x0433", L"Leg thickness", 0.75f, 0.05f, 0.2f, 1 },
+    { L"VR", L"ShowBody", L"\x0422\x0435\x043B\x043E: 0 \x0440\x0443\x043A\x0438, 1 + \x043D\x043E\x0433\x0438, 2 \x0432\x0441\x0451", L"Body: 0 arms, 1 + legs, 2 all", 1, 1, 0, 2 },
+    { L"VR", L"FingerPoses", L"\x041F\x0430\x043B\x044C\x0446\x044B \x043F\x043E \x043A\x043E\x043D\x0442\x0440\x043E\x043B\x043B\x0435\x0440\x0443", L"Fingers follow the controller", 1, 1, 0, 1 },
+    { L"VR", L"Reticle", L"\x041A\x043E\x043B\x044C\x0446\x043E \x043F\x0440\x0438\x0446\x0435\x043B\x0430", L"Aim ring", 1, 1, 0, 1 },
+    { L"VR", L"ReticleSize", L"\x0420\x0430\x0437\x043C\x0435\x0440 \x043F\x0440\x0438\x0446\x0435\x043B\x0430 \x0438\x0433\x0440\x044B", L"Game crosshair size", 0.6f, 0.1f, 0.2f, 3 },
+    { L"Input", L"SnapTurnDegrees", L"\x041F\x043E\x0432\x043E\x0440\x043E\x0442 \x0440\x044B\x0432\x043A\x043E\x043C (0 = \x043F\x043B\x0430\x0432\x043D\x043E)", L"Snap turn (0 = smooth)", 0, 15, 0, 90 },
+    { L"Input", L"SmoothTurnSpeed", L"\x0421\x043A\x043E\x0440\x043E\x0441\x0442\x044C \x043F\x043E\x0432\x043E\x0440\x043E\x0442\x0430", L"Turn speed", 120, 15, 30, 360 },
+    { L"Input", L"MoveByHead", L"\x0418\x0434\x0442\x0438 \x043A\x0443\x0434\x0430 \x0441\x043C\x043E\x0442\x0440\x044E", L"Walk where I look", 1, 1, 0, 1 },
+    { L"Input", L"TwoHanded", L"\x0414\x0432\x0443\x0440\x0443\x0447\x043D\x044B\x0439 \x0445\x0432\x0430\x0442", L"Two-handed grip", 1, 1, 0, 1 },
+    { L"Input", L"GrenadeGrab", L"\x0413\x0440\x0430\x043D\x0430\x0442\x044B \x0440\x0443\x043A\x043E\x0439 \x0441 \x043F\x043E\x044F\x0441\x0430", L"Grenades by hand from the belt", 1, 1, 0, 1 },
+    { L"Input", L"GrenadeThrowScale", L"\x0421\x0438\x043B\x0430 \x0431\x0440\x043E\x0441\x043A\x0430 \x0433\x0440\x0430\x043D\x0430\x0442\x044B", L"Grenade throw strength", 3, 0.25f, 0.5f, 8 },
+    { L"Input", L"GrenadeGravity", L"\x0412\x0435\x0441 \x0433\x0440\x0430\x043D\x0430\x0442\x044B", L"Grenade weight", 1, 0.25f, 0, 3 },
+    { L"Input", L"MeleeContact", L"\x0423\x0434\x0430\x0440 \x0442\x043E\x043B\x044C\x043A\x043E \x043F\x0440\x0438 \x043A\x0430\x0441\x0430\x043D\x0438\x0438", L"Melee hits only on contact", 0, 1, 0, 1 },
+    { L"Input", L"MeleeSpeed", L"\x0423\x0434\x0430\x0440: \x0441\x043A\x043E\x0440\x043E\x0441\x0442\x044C \x0432\x0437\x043C\x0430\x0445\x0430 (\x043C/\x0441)", L"Melee: swing speed (m/s)", 3, 0.25f, 1, 8 },
+    { L"Input", L"MeleeReach", L"\x0414\x043B\x0438\x043D\x0430 \x0431\x043B\x0438\x0436\x043D\x0435\x0433\x043E \x043E\x0440\x0443\x0436\x0438\x044F (\x043C)", L"Melee weapon length (m)", 0.55f, 0.05f, 0.2f, 1.2f },
+    { L"VR", L"VehicleCamera", L"\x041C\x0430\x0448\x0438\x043D\x0430: \x0432\x0438\x0434 \x043E\x0442 3-\x0433\x043E \x043B\x0438\x0446\x0430 (\x0441\x0437\x0430\x0434\x0438)", L"Vehicle: third-person view (behind)", 1, 1, 0, 1 },
+    { L"VR", L"VehicleHeadAim", L"\x041C\x0430\x0448\x0438\x043D\x0430: \x043F\x0440\x0438\x0446\x0435\x043B \x0432\x0437\x0433\x043B\x044F\x0434\x043E\x043C", L"Vehicle: aim with your gaze", 0, 1, 0, 1 },
+    { L"VR", L"Cutscenes3D", L"\x0417\x0430\x0441\x0442\x0430\x0432\x043A\x0438 \x0432 3D", L"Cutscenes in 3D", 0, 1, 0, 1 },
+    { L"VR", L"NearClip", L"\x0411\x043B\x0438\x0436\x043D\x044F\x044F \x0433\x0440\x0430\x043D\x0438\x0446\x0430 \x0432\x0438\x0434\x0438\x043C\x043E\x0441\x0442\x0438", L"Near clipping distance", 10, 5, 1, 100 },
+    { L"VR", L"MuzzleFlashScale", L"\x0420\x0430\x0437\x043C\x0435\x0440 \x0432\x0441\x043F\x044B\x0448\x0435\x043A \x0432\x044B\x0441\x0442\x0440\x0435\x043B\x0430", L"Muzzle flash size", 0.35f, 0.05f, 0, 1 },
+    { L"HUD", L"Minimal", L"\x041A\x043E\x0440\x043E\x0442\x043A\x0438\x0439 HUD", L"Short HUD", 1, 1, 0, 1 },
+    { L"HUD", L"MarkersInEyes", L"\x041C\x0435\x0442\x043A\x0438 \x0432 \x0433\x043B\x0430\x0437\x0430", L"Markers in the 3D view", 1, 1, 0, 1 },
+    { L"HUD", L"ButtonHints", L"\x041F\x043E\x0434\x0441\x043A\x0430\x0437\x043A\x0438 \x043A\x043D\x043E\x043F\x043A\x0430\x043C\x0438 VR", L"VR controller button hints", 1, 1, 0, 1 },
+    { L"HUD", L"Distance", L"\x041F\x0430\x043D\x0435\x043B\x044C HUD: \x0440\x0430\x0441\x0441\x0442\x043E\x044F\x043D\x0438\x0435", L"HUD panel distance", 1.6f, 0.1f, 0.5f, 4 },
+    { nullptr, L"@exit", L"\x0421\x043E\x0445\x0440\x0430\x043D\x0438\x0442\x044C \x0438 \x0432\x044B\x0439\x0442\x0438", L"Save and exit", 0, 0, 0, 0 },
 };
 static const int kSettingCount = sizeof(kSettings) / sizeof(kSettings[0]);
 static const int kMenuRows = 12;
@@ -1868,6 +1871,11 @@ static void SettingChange(int i, int dir)
         if (!wcscmp(it.key, L"@weapon")) { g_page = 0; g_setup.rightWas = g_setup.leftWas = g_setup.aWas = g_setup.bWas = true; }
         else if (!wcscmp(it.key, L"@tpose")) { g_tposeAt = GetTickCount() + 3000; g_tposeResult = 0; }
         else if (!wcscmp(it.key, L"@camera")) CameraAdjustStart();
+        else if (!wcscmp(it.key, L"@lang")) {   // English <-> Russian, kept in the ini
+            g_cfg.english = !g_cfg.english;
+            WritePrivateProfileStringW(L"General", L"Language", g_cfg.english ? L"en" : L"ru", IniPath().c_str());
+            g_wheel.dirty = true;
+        }
         else if (!wcscmp(it.key, L"@exit")) { SetupToggle(); return; }
         VRHaptic(1, 0.4f, 0.04f);
         g_setup.dirty = true;
@@ -2022,13 +2030,20 @@ static bool DrawPanel()
         SetBkMode(dc, TRANSPARENT);
         HGDIOBJ oldFont = SelectObject(dc, title);
         wchar_t line[200];
-        swprintf_s(line, L"\x041D\x0410\x0421\x0422\x0420\x041E\x0419\x041A\x0410: %ls", g_ws.name.empty() ? L"-" : g_ws.name.c_str());   // НАСТРОЙКА
+        swprintf_s(line, L"%ls: %ls", Tr(L"\x041D\x0410\x0421\x0422\x0420\x041E\x0419\x041A\x0410", L"SETUP"), g_ws.name.empty() ? L"-" : g_ws.name.c_str());   // НАСТРОЙКА
         CharUpperW(line);
         SetTextColor(dc, RGB(255, 147, 51));
         RECT r = { 18, 12, (LONG)kPanelW - 18, 50 };
         DrawTextW(dc, line, -1, &r, DT_LEFT | DT_SINGLELINE);
         SelectObject(dc, body);
         SetTextColor(dc, RGB(150, 222, 245));
+        const wchar_t* helpEn[] = {
+            L"Right grip: hold \x2014 the gun stays put, move your hand, release",
+            L"Left grip at the green cube \x2014 move the zone (foregrip, pouch)",
+            L"Right grip: the orange square \x2014 where your hand is now",
+            L"Gun in the left hand: the hands swap roles, each weapon keeps its own left grip",
+            L"B \x2014 rotate too, A \x2014 reset the weapon, Menu \x2014 save and exit",
+        };
         const wchar_t* help[] = {
             L"\x041F\x0440\x0430\x0432\x044B\x0439 \x0433\x0440\x0438\x043F: \x0434\x0435\x0440\x0436\x0438\x0442\x0435 \x2014 \x043F\x0443\x0448\x043A\x0430 \x0441\x0442\x043E\x0438\x0442, \x043F\x0435\x0440\x0435\x0434\x0432\x0438\x043D\x044C\x0442\x0435 \x0440\x0443\x043A\x0443, \x043E\x0442\x043F\x0443\x0441\x0442\x0438\x0442\x0435",
             L"\x041B\x0435\x0432\x044B\x0439 \x0433\x0440\x0438\x043F \x0443 \x0437\x0435\x043B\x0451\x043D\x043E\x0433\x043E \x043A\x0443\x0431\x0430 \x2014 \x043F\x0435\x0440\x0435\x043D\x0435\x0441\x0442\x0438 \x0437\x043E\x043D\x0443 (\x0446\x0435\x0432\x044C\x0451, \x043F\x043E\x0434\x0441\x0443\x043C\x043E\x043A)",
@@ -2045,7 +2060,7 @@ static bool DrawPanel()
             HBRUSH bg2 = CreateSolidBrush(RGB(10, 22, 28));
             FillRect(dc, &rt, bg2);
             DeleteObject(bg2);
-            DrawTextW(dc, L"\x041D\x0410\x0421\x0422\x0420\x041E\x0419\x041A\x0418 VR", -1, &rt, DT_LEFT | DT_SINGLELINE);
+            DrawTextW(dc, Tr(L"\x041D\x0410\x0421\x0422\x0420\x041E\x0419\x041A\x0418 VR", L"VR SETTINGS"), -1, &rt, DT_LEFT | DT_SINGLELINE);
             SelectObject(dc, body);
             if (!g_settingsLoaded) LoadSettings();
             y = kMenuTop;
@@ -2060,9 +2075,11 @@ static bool DrawPanel()
                 }
                 SetTextColor(dc, sel ? RGB(26, 16, 6) : !it.sec ? RGB(255, 214, 150) : RGB(150, 222, 245));
                 RECT rl = { 22, y, kMenuValueX, y + 26 };
-                DrawTextW(dc, it.label, -1, &rl, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+                DrawTextW(dc, Tr(it.label, it.en), -1, &rl, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
                 wchar_t v[32] = L"\x25B8";   // an action
-                if (it.sec && it.lo == 0 && it.hi == 1 && it.step == 1) wcscpy_s(v, g_settingValue[i] > 0.5f ? L"\x0412\x041A\x041B" : L"\x0412\x042B\x041A\x041B");
+                if (!wcscmp(it.key, L"@lang")) wcscpy_s(v, g_cfg.english ? L"English" : L"\x0420\x0443\x0441\x0441\x043A\x0438\x0439");   // Русский
+                else if (it.sec && it.lo == 0 && it.hi == 1 && it.step == 1)
+                    wcscpy_s(v, g_settingValue[i] > 0.5f ? Tr(L"\x0412\x041A\x041B", L"ON") : Tr(L"\x0412\x042B\x041A\x041B", L"OFF"));
                 else if (it.sec) swprintf_s(v, it.step >= 1.0f ? L"\x25C2  %.0f  \x25B8" : L"\x25C2  %.2f  \x25B8", g_settingValue[i]);
                 RECT rv2 = { kMenuValueX, y, (LONG)kPanelW - 22, y + 26 };
                 DrawTextW(dc, v, -1, &rv2, DT_CENTER | DT_SINGLELINE);
@@ -2082,32 +2099,41 @@ static bool DrawPanel()
                 SetTextColor(dc, RGB(255, 147, 51));
                 static const wchar_t* who[3] = { L"\x0440\x043E\x0431\x043E\x0442\x0430", L"\x043C\x0430\x0448\x0438\x043D\x044B (\x043A\x0430\x0431\x0438\x043D\x0430)",
                                                  L"\x043C\x0430\x0448\x0438\x043D\x044B (\x0441\x0437\x0430\x0434\x0438)" };
-                swprintf_s(line, L"\x041A\x0430\x043C\x0435\x0440\x0430 %ls: \x0432\x043F\x0435\x0440\x0451\x0434 %.0f, \x0432\x044B\x0441\x043E\x0442\x0430 %.0f",
-                           who[g_cam.kind], *CamParams(g_cam.kind, 0), *CamParams(g_cam.kind, 1));
+                static const wchar_t* whoEn[3] = { L"Robot camera", L"Vehicle camera (seat)", L"Vehicle camera (behind)" };
+                if (g_cfg.english) swprintf_s(line, L"%ls: forward %.0f, height %.0f", whoEn[g_cam.kind], *CamParams(g_cam.kind, 0), *CamParams(g_cam.kind, 1));
+                else swprintf_s(line, L"\x041A\x0430\x043C\x0435\x0440\x0430 %ls: \x0432\x043F\x0435\x0440\x0451\x0434 %.0f, \x0432\x044B\x0441\x043E\x0442\x0430 %.0f",
+                                who[g_cam.kind], *CamParams(g_cam.kind, 0), *CamParams(g_cam.kind, 1));
                 DrawTextW(dc, line, -1, &rs, DT_LEFT | DT_SINGLELINE);
-                wcscpy_s(line, L"\x0413\x0440\x0438\x043F + \x0434\x0432\x0438\x0436\x0435\x043D\x0438\x0435 \x0440\x0443\x043A\x0438 \x2014 \x0434\x0432\x0438\x0433\x0430\x0442\x044C \x043C\x0438\x0440; \x043A\x0443\x0440\x043E\x043A \x2014 \x0441\x043E\x0445\x0440\x0430\x043D\x0438\x0442\x044C, B \x2014 \x043E\x0442\x043C\x0435\x043D\x0430");
+                wcscpy_s(line, Tr(L"\x0413\x0440\x0438\x043F + \x0434\x0432\x0438\x0436\x0435\x043D\x0438\x0435 \x0440\x0443\x043A\x0438 \x2014 \x0434\x0432\x0438\x0433\x0430\x0442\x044C \x043C\x0438\x0440; \x043A\x0443\x0440\x043E\x043A \x2014 \x0441\x043E\x0445\x0440\x0430\x043D\x0438\x0442\x044C, B \x2014 \x043E\x0442\x043C\x0435\x043D\x0430",
+                                  L"Grip + move your hand \x2014 drag the world; trigger \x2014 save, B \x2014 cancel"));
                 rs.top += 32; rs.bottom += 32;
             } else if (GetTickCount() - g_camOnlyVehicleAt < 3000) {
                 SetTextColor(dc, RGB(255, 120, 100));
-                wcscpy_s(line, L"\x041F\x043E\x043B\x043E\x0436\x0435\x043D\x0438\x0435 \x043A\x0430\x043C\x0435\x0440\x044B \x2014 \x0442\x043E\x043B\x044C\x043A\x043E \x0432 \x043C\x0430\x0448\x0438\x043D\x0435 (\x043F\x0440\x0435\x0432\x0440\x0430\x0442\x0438\x0442\x0435\x0441\x044C)");
+                wcscpy_s(line, Tr(L"\x041F\x043E\x043B\x043E\x0436\x0435\x043D\x0438\x0435 \x043A\x0430\x043C\x0435\x0440\x044B \x2014 \x0442\x043E\x043B\x044C\x043A\x043E \x0432 \x043C\x0430\x0448\x0438\x043D\x0435 (\x043F\x0440\x0435\x0432\x0440\x0430\x0442\x0438\x0442\x0435\x0441\x044C)",
+                                  L"Camera position \x2014 vehicle form only (transform first)"));
                 g_setup.dirty = true;
             } else if (g_tposeAt) {
                 SetTextColor(dc, RGB(255, 147, 51));
-                swprintf_s(line, L"\x0422-\x043F\x043E\x0437\x0430: \x0432\x0441\x0442\x0430\x043D\x044C\x0442\x0435 \x043F\x0440\x044F\x043C\x043E, \x0440\x0443\x043A\x0438 \x0432 \x0441\x0442\x043E\x0440\x043E\x043D\x044B (%d)",
+                swprintf_s(line, Tr(L"\x0422-\x043F\x043E\x0437\x0430: \x0432\x0441\x0442\x0430\x043D\x044C\x0442\x0435 \x043F\x0440\x044F\x043C\x043E, \x0440\x0443\x043A\x0438 \x0432 \x0441\x0442\x043E\x0440\x043E\x043D\x044B (%d)",
+                                    L"T-pose: stand straight, arms out to the sides (%d)"),
                            (int)((g_tposeAt - GetTickCount()) / 1000) + 1);
             } else if (g_tposeResult < 0) {
                 SetTextColor(dc, RGB(255, 120, 100));
-                wcscpy_s(line, L"\x0422-\x043F\x043E\x0437\x0430 \x043D\x0435 \x0440\x0430\x0441\x043F\x043E\x0437\x043D\x0430\x043D\x0430 \x2014 \x0440\x0443\x043A\x0438 \x0448\x0438\x0440\x0435 \x0438 \x043D\x0430 \x0443\x0440\x043E\x0432\x043D\x0435 \x043F\x043B\x0435\x0447");
+                wcscpy_s(line, Tr(L"\x0422-\x043F\x043E\x0437\x0430 \x043D\x0435 \x0440\x0430\x0441\x043F\x043E\x0437\x043D\x0430\x043D\x0430 \x2014 \x0440\x0443\x043A\x0438 \x0448\x0438\x0440\x0435 \x0438 \x043D\x0430 \x0443\x0440\x043E\x0432\x043D\x0435 \x043F\x043B\x0435\x0447",
+                                  L"T-pose not recognised \x2014 arms wider and at shoulder height"));
             } else {
                 SetTextColor(dc, RGB(255, 214, 150));
-                swprintf_s(line, L"\x0420\x043E\x0441\x0442: %.2f \x043C (\x0433\x043B\x0430\x0437\x0430)   \x0420\x043E\x0431\x043E\x0442: %.0f   \x041C\x0430\x0441\x0448\x0442\x0430\x0431: %.0f%ls",
-                           g_cfg.userEyeHeight, IKRobotEyeHeight(), g_cfg.worldScale, g_cfg.autoScale && g_cfg.userEyeHeight > 0.8f ? L" (\x0430\x0432\x0442\x043E)" : L"");
+                swprintf_s(line, Tr(L"\x0420\x043E\x0441\x0442: %.2f \x043C (\x0433\x043B\x0430\x0437\x0430)   \x0420\x043E\x0431\x043E\x0442: %.0f   \x041C\x0430\x0441\x0448\x0442\x0430\x0431: %.0f%ls",
+                                    L"Height: %.2f m (eyes)   Robot: %.0f   Scale: %.0f%ls"),
+                           g_cfg.userEyeHeight, IKRobotEyeHeight(), g_cfg.worldScale,
+                           g_cfg.autoScale && g_cfg.userEyeHeight > 0.8f ? Tr(L" (\x0430\x0432\x0442\x043E)", L" (auto)") : L"");
             }
             DrawTextW(dc, line, -1, &rs, DT_LEFT | DT_SINGLELINE);
             SetTextColor(dc, RGB(110, 170, 190));
             RECT rh = { 18, y + 32, (LONG)kPanelW - 18, y + 60 };
-            if (!g_cam.active) DrawTextW(dc,L"\x041B\x0443\x0447 \x043F\x0440\x0430\x0432\x043E\x0439 \x0440\x0443\x043A\x0438 + \x043A\x0443\x0440\x043E\x043A, \x0438\x043B\x0438 \x0441\x0442\x0438\x043A \x0438 A; \x043F\x0440\x0430\x0432\x044B\x0439 \x0441\x0442\x0438\x043A \x2014 \x043F\x0440\x043E\x043A\x0440\x0443\x0442\x043A\x0430",
-                      -1, &rh, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            if (!g_cam.active) DrawTextW(dc, Tr(L"\x041B\x0443\x0447 \x043F\x0440\x0430\x0432\x043E\x0439 \x0440\x0443\x043A\x0438 + \x043A\x0443\x0440\x043E\x043A, \x0438\x043B\x0438 \x0441\x0442\x0438\x043A \x0438 A; \x043F\x0440\x0430\x0432\x044B\x0439 \x0441\x0442\x0438\x043A \x2014 \x043F\x0440\x043E\x043A\x0440\x0443\x0442\x043A\x0430",
+                                                L"Right hand ray + trigger, or left stick and A; right stick \x2014 scroll"),
+                                         -1, &rh, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
             if (g_pointer.valid) {   // the ray's dot
                 int cx = (int)(g_pointer.u * kPanelW), cy = (int)(g_pointer.v * kPanelH);
                 HBRUSH hb = CreateSolidBrush(RGB(255, 255, 255));
@@ -2119,16 +2145,17 @@ static bool DrawPanel()
                 DeleteObject(hb);
             }
         } else {
-        for (const wchar_t* h : help) { RECT rr = { 18, y, (LONG)kPanelW - 18, y + 30 }; DrawTextW(dc, h, -1, &rr, DT_LEFT | DT_SINGLELINE); y += 32; }
+        for (const wchar_t* h : g_cfg.english ? helpEn : help) { RECT rr = { 18, y, (LONG)kPanelW - 18, y + 30 }; DrawTextW(dc, h, -1, &rr, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS); y += 32; }
         // Поворот: вкл/выкл
-        swprintf_s(line, L"\x041F\x043E\x0432\x043E\x0440\x043E\x0442: %ls", g_setup.rotate ? L"\x0412\x041A\x041B" : L"\x0412\x042B\x041A\x041B");
+        swprintf_s(line, L"%ls: %ls", Tr(L"\x041F\x043E\x0432\x043E\x0440\x043E\x0442", L"Rotation"),
+                   g_setup.rotate ? Tr(L"\x0412\x041A\x041B", L"ON") : Tr(L"\x0412\x042B\x041A\x041B", L"OFF"));
         SetTextColor(dc, RGB(255, 214, 150));
         RECT rv = { 18, y + 14, (LONG)kPanelW - 18, y + 48 };
         DrawTextW(dc, line, -1, &rv, DT_LEFT | DT_SINGLELINE);
         {   // Y — меню
             SetTextColor(dc, RGB(150, 222, 245));
             RECT ry = { 18, y + 54, (LONG)kPanelW - 18, y + 84 };
-            DrawTextW(dc, L"Y \x2014 \x043C\x0435\x043D\x044E", -1, &ry, DT_LEFT | DT_SINGLELINE);
+            DrawTextW(dc, Tr(L"Y \x2014 \x043C\x0435\x043D\x044E", L"Y \x2014 menu"), -1, &ry, DT_LEFT | DT_SINGLELINE);
         }
         }
         GdiFlush();
