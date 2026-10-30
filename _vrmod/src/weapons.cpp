@@ -267,9 +267,39 @@ void UpdateMelee(uint8_t* mesh, bool vehicle, DWORD now)
     g_meleeHeld = want;
 }
 
+// A punch with the empty left hand is a normal melee attack of the game, which attaches its meshes to the right
+// side of the skeleton: while that attack lasts, the meshes it attached go to the mirrored (left) bones.
+volatile DWORD g_strikeAt;
+volatile long g_strikeHand = -1;
+uint8_t* g_flipped[8];
+unsigned g_flippedBone[8];   // their original (right side) bones
+int g_flipCount;
+
+void MirrorStrike(uint8_t* mesh, DWORD now)
+{
+    if (g_meleeState != kIdle || g_strikeHand != 0 || now - g_strikeAt > 2000) { g_flipCount = 0; return; }
+    uint8_t* att = *(uint8_t**)(mesh + kMeshAttachments);
+    int count = *(int*)(mesh + kMeshAttachments + 4);
+    for (int i = 0; att && i < count && i < 64; i++) {
+        uint8_t* e = att + i * 0x30;
+        uint8_t* c = *(uint8_t**)e;
+        int k = 0;
+        while (k < g_flipCount && g_flipped[k] != c) k++;
+        if (k == g_flipCount) {
+            // a skeletal mesh attached since the strike (the attack's melee set)
+            bool fresh = false;
+            for (int j = 0; j < g_seenCount; j++) if (g_seen[j].comp == c && g_seen[j].since + 30 >= g_strikeAt) fresh = true;
+            if (!fresh || g_flipCount >= 8) continue;
+            g_flipped[g_flipCount] = c;
+            g_flippedBone[g_flipCount++] = *(unsigned*)(e + 4);
+        }
+        unsigned m = IKMirrorBone(g_flippedBone[k]);
+        if (m) *(unsigned*)(e + 4) = m;
+    }
+}
+
 // A melee attack makes the robot lunge at the target; in VR you swing where you stand. During the attack the
 // robot moves no faster than walking (horizontally), so the lunge is gone but you can still walk.
-volatile DWORD g_strikeAt;
 bool g_prevValid;
 float g_prevPos[2];
 LARGE_INTEGER g_prevT;
@@ -378,6 +408,7 @@ void WeaponsUpdate(void* pawnPtr)
         bool vehicle = IKPawnIsVehicle();
         TrackAttachments(mesh, now);
         UpdateMelee(mesh, vehicle, now);
+        MirrorStrike(mesh, now);
         if (!vehicle) HoldInPlace(pawn, now);
         static DWORD listAt;
         if (now - listAt > 200) { listAt = now; UpdateList(pawn, vehicle, now); }
@@ -412,7 +443,7 @@ void WeaponsSetMeleeHand(int hand)
 }
 
 int WeaponsMeleeHand() { return g_meleeHand; }
-void WeaponsStrike() { g_strikeAt = GetTickCount(); }
+void WeaponsStrike(int hand) { g_strikeHand = hand; g_strikeAt = GetTickCount(); }
 int WeaponsMeleeHeld() { return g_meleeHeld; }
 
 bool WeaponsWantPress(bool melee)

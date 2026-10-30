@@ -60,18 +60,32 @@ float4 PS(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     float cmax = max(c.r, max(c.g, c.b));
     bool blueMark = c.b > 0.2 && c.b >= 0.75 * cmax && c.b > 1.6 * c.r;
     bool redMark = c.r > 0.2 && c.r > 1.8 * max(c.g, c.b);
-    if (scope > 1.5 && blueMark) return float4(0, 0, 0, 0);   // the crosshair cut: no markers or names in it
+    // the crosshair cut: only the crosshair (white/grey, red over an enemy); markers and names - also their dim
+    // anti-aliased edges - go
+    float lo0 = min(c.r, min(c.g, c.b));
+    bool greyPx = cmax - lo0 < 0.3 * cmax + 0.02;
+    bool redPx = c.r >= cmax - 0.01 && abs(c.g - c.b) < 0.2 * c.r + 0.03;
+    if (scope > 1.5 && (blueMark || (!greyPx && !redPx))) return float4(0, 0, 0, 0);
+    // the panel shows only health and ammo: markers and names that pass over its corners go (their colours, also
+    // dim, except in the health bar - it is cyan too)
+    bool hpBar = uv.x < 0.4 && uv.y > 0.07 && uv.y < 0.16;
+    bool markTint = (c.b > 0.03 && c.b >= 0.75 * cmax && c.b > 1.3 * c.r) || (c.r > 0.03 && c.r > 1.8 * max(c.g, c.b));
+    if (hud > 1.5 && hud < 3.5 && markTint && !hpBar) return float4(0, 0, 0, 0);
     // "LOW AMMO" (red) and "X RELOAD" below it, right of the crosshair: not shown at all in gameplay (only blue
     // markers are kept there)
     if (hud > 1.5 && (scope < 1.5 || length(uv - 0.5) > 0.06) && !blueMark && uv.x > 0.555 && uv.x < 0.73 && uv.y > 0.44 && uv.y < 0.535) return float4(0, 0, 0, 0);
     if (hud > 3.5 && !blueMark && !redMark) return float4(0, 0, 0, 0);   // into the eyes: only the markers' colours
     // the panel's parts: the top corners - health and ability (left), weapon, ammo and ability (right) - and
     // (scope < 0: HudPrompts) the middle band of texts: button hints, "reload", "no ammo"
-    bool panelPart = (uv.y < 0.26 && (uv.x < 0.4 || uv.x > 0.6)) || (scope < -0.5 && uv.y > 0.55 && uv.y < 0.76 && uv.x > 0.2 && uv.x < 0.8);
+    bool prompts = scope < -0.5 && uv.y > 0.55 && uv.y < 0.76 && uv.x > 0.2 && uv.x < 0.8;
+    bool panelPart = (uv.y < 0.26 && (uv.x < 0.4 || uv.x > 0.6)) || prompts;
     // into the eye: the rest, but only what is drawn solid (markers, names, lock-on marks) - the see-through
     // full-screen effects of abilities and aiming stay out
     if (hud > 3.5 && (panelPart || max(sqrt(saturate(s.a)), max(s.r, max(s.g, s.b))) < 0.5)) return float4(0, 0, 0, 0);
-    if (hud > 1.5 && hud < 3.5 && !panelPart) return float4(0, 0, 0, 0);   // minimal HUD (panel)
+    // minimal HUD (panel): only the health bar (top left) and the ammo bar with its count (top right) - not the
+    // ability icons and grenades below them
+    bool hpAmmo = uv.y < 0.155 && (uv.x < 0.36 || (uv.x > 0.6 && uv.x < 0.9));
+    if (hud > 1.5 && hud < 3.5 && !(hpAmmo || prompts)) return float4(0, 0, 0, 0);
     if (hud > 2.5 && hud < 3.5 && s.a < 0.85) return float4(0, 0, 0, 0);   // zoomed: the scope overlay's tint goes
     if (hud > 0.5) {
         // HUD drawn onto transparent black with SRCALPHA/INVSRCALPHA: rgb is premultiplied and alpha ends up
@@ -811,6 +825,7 @@ static void UpdateGestures(XINPUT_GAMEPAD& p, DWORD now)
     // a punch forward (where you look) with a hand that holds no gun - the left one (melee weapon or empty), the
     // right one when it is empty - is the game's melee attack right away (no weapon needed, no contact needed)
     int meleeHand = -1;
+    static int strikeHand = 1;   // hand of the last strike (a left one shows the attack's weapon in the left hand)
     XrPosef mh;
     if (g_cfg.meleeGesture && !WheelIsOpen() && !IKPawnIsVehicle() && xr.viewSpace && LocateHand(xr.viewSpace, t, mh)) {
         XrVector3f hf = Rotate(mh.orientation, { 0, 0, -1 });
@@ -829,6 +844,7 @@ static void UpdateGestures(XINPUT_GAMEPAD& p, DWORD now)
         if (strike && now - xr.meleeAt > 600) {
             xr.meleeAt = now;
             xr.meleePulse = 10;
+            strikeHand = h;
             g_meleeDir[0] = velocity[h].x;   // horizontal swing direction (LOCAL space): the attack goes that way
             g_meleeDir[1] = velocity[h].z;
             VRHaptic(h, 1.0f, g_cfg.meleeContact ? 0.12f : 0.08f);
@@ -849,7 +865,7 @@ static void UpdateGestures(XINPUT_GAMEPAD& p, DWORD now)
     }
     if (GrenadeWantPress()) xr.throwPulse = 10;
     if (xr.throwPulse > 0) { p.wButtons |= XINPUT_GAMEPAD_B; xr.throwPulse--; }
-    if (xr.meleePulse == 10) WeaponsStrike();
+    if (xr.meleePulse == 10) WeaponsStrike(WeaponsMeleeHeld() >= 0 ? WeaponsMeleeHeld() : strikeHand);
     if (xr.meleePulse > 0) { p.wButtons |= XINPUT_GAMEPAD_RIGHT_THUMB; xr.meleePulse--; }
 }
 
@@ -1186,7 +1202,6 @@ static Wheel g_wheel;
 static Chain g_wheelChain;
 static bool WheelIsOpen() { return g_wheel.open; }
 static const UINT kWheelPx = 384;
-static const wchar_t kLabelMelee[] = L"\x0411\x043B\x0438\x0436\x043D\x0438\x0439 \x0431\x043E\x0439";      // "Ближний бой"
 static const wchar_t kLabelNext[] = L"\x0421\x043B\x0435\x0434. \x043E\x0440\x0443\x0436\x0438\x0435";     // "След. оружие"
 static const wchar_t kLabelEmpty[] = L"\x041F\x0443\x0441\x0442\x0430\x044F \x0440\x0443\x043A\x0430";    // "Пустая рука"
 
@@ -1216,10 +1231,8 @@ static void WheelOpen(XrTime t, int handIndex)
         if (VRGunHand() != 1) w.current = w.count;
         WheelAdd(w, kItemEmpty, kLabelEmpty);   // (the right hand: guns or empty - the melee weapon is the left's)
     } else {
-        // the left hand: the melee weapon or empty
-        if (melee == 0) w.current = w.count;
-        WheelAdd(w, kItemMelee, kLabelMelee);
-        if (melee != 0 && VRGunHand() != 0) w.current = w.count;
+        // the left hand: empty (no melee weapon here - a punch with the empty left hand shows the attack's weapon in it)
+        if (VRGunHand() != 0) w.current = w.count;
         WheelAdd(w, kItemEmpty, kLabelEmpty);
     }
     // the ring faces the head, upright
@@ -1714,37 +1727,7 @@ static const SettingItem kSettings[] = {
     { nullptr, L"@weapon", L"\x041D\x0430\x0441\x0442\x0440\x043E\x0439\x043A\x0430 \x043E\x0440\x0443\x0436\x0438\x044F: \x0445\x0432\x0430\x0442, \x0446\x0435\x0432\x044C\x0451, \x043B\x0438\x043D\x0437\x0430, \x043F\x043E\x0434\x0441\x0443\x043C\x043E\x043A", 0, 0, 0, 0 },   // ��������� ������: ����, �����, �����, ��������
     { nullptr, L"@tpose", L"\x041A\x0430\x043B\x0438\x0431\x0440\x043E\x0432\x043A\x0430: \x0422-\x043F\x043E\x0437\x0430 (\x043C\x0430\x0441\x0448\x0442\x0430\x0431 \x043C\x0438\x0440\x0430 \x043F\x043E\x0434 \x0440\x043E\x0431\x043E\x0442\x0430)", 0, 0, 0, 0 },
     { nullptr, L"@camera", L"\x041F\x043E\x043B\x043E\x0436\x0435\x043D\x0438\x0435 \x043A\x0430\x043C\x0435\x0440\x044B \x043C\x0430\x0448\x0438\x043D\x044B (\x0442\x044F\x043D\x0443\x0442\x044C \x043C\x0438\x0440 \x0433\x0440\x0438\x043F\x043E\x043C)", 0, 0, 0, 0 },   // ����������: �-���� (������� ���� ��� ������)
-    { L"VR", L"AutoScale", L"\x041C\x0430\x0441\x0448\x0442\x0430\x0431 \x043C\x0438\x0440\x0430 \x043F\x043E\x0434 \x0440\x043E\x0431\x043E\x0442\x0430 (\x043F\x043E \x0422-\x043F\x043E\x0437\x0435)", 1, 1, 0, 1 },   // ������� ���� ��� ������ (�� �-����)
-    { L"VR", L"WorldScale", L"\x041C\x0430\x0441\x0448\x0442\x0430\x0431 \x043C\x0438\x0440\x0430 (\x0431\x0435\x0437 \x043A\x0430\x043B\x0438\x0431\x0440\x043E\x0432\x043A\x0438)", 200, 10, 100, 400 },   // ������� ���� (��� ����������)
-    { L"VR", L"FirstPersonEyeHeight", L"\x0412\x044B\x0441\x043E\x0442\x0430 \x0433\x043B\x0430\x0437", 150, 5, 50, 300 },   // ������ ����
-    { L"VR", L"SyncEyeTime", L"\x041E\x0431\x0430 \x0433\x043B\x0430\x0437\x0430 \x2014 \x043E\x0434\x0438\x043D \x043C\x043E\x043C\x0435\x043D\x0442 \x0438\x0433\x0440\x044B", 1, 1, 0, 1 },   // ��� ����� � ���� ������ ����
-    { L"VR", L"HandScale", L"\x0420\x0430\x0437\x043C\x0435\x0440 \x043A\x0438\x0441\x0442\x0435\x0439", 0.6f, 0.05f, 0.2f, 1.5f },   // ������ ������
-    { L"VR", L"WeaponScale", L"\x0420\x0430\x0437\x043C\x0435\x0440 \x043E\x0440\x0443\x0436\x0438\x044F", 0.6f, 0.05f, 0.2f, 1.5f },   // ������ ������
-    { L"VR", L"LimbThickness", L"\x0422\x043E\x043B\x0449\x0438\x043D\x0430 \x0440\x0443\x043A", 0.5f, 0.05f, 0.2f, 1 },   // ������� ���
-    { L"VR", L"LegThickness", L"\x0422\x043E\x043B\x0449\x0438\x043D\x0430 \x043D\x043E\x0433", 0.75f, 0.05f, 0.2f, 1 },   // ������� ���
-    { L"VR", L"ShowBody", L"\x0422\x0435\x043B\x043E: 0 \x0440\x0443\x043A\x0438, 1 + \x043D\x043E\x0433\x0438, 2 \x0432\x0441\x0451", 1, 1, 0, 2 },   // ����: 0 ����, 1 + ����, 2 ��
-    { L"VR", L"FingerPoses", L"\x041F\x0430\x043B\x044C\x0446\x044B \x043F\x043E \x043A\x043E\x043D\x0442\x0440\x043E\x043B\x043B\x0435\x0440\x0443", 1, 1, 0, 1 },   // ������ �� �����������
-    { L"VR", L"Reticle", L"\x041A\x043E\x043B\x044C\x0446\x043E \x043F\x0440\x0438\x0446\x0435\x043B\x0430", 1, 1, 0, 1 },   // ������ �������
-    { L"VR", L"ReticleSize", L"\x0420\x0430\x0437\x043C\x0435\x0440 \x043F\x0440\x0438\x0446\x0435\x043B\x0430 \x0438\x0433\x0440\x044B", 0.6f, 0.1f, 0.2f, 3 },   // ������ ������� ����
-    { L"Input", L"SnapTurnDegrees", L"\x041F\x043E\x0432\x043E\x0440\x043E\x0442 \x0440\x044B\x0432\x043A\x043E\x043C (0 = \x043F\x043B\x0430\x0432\x043D\x043E)", 0, 15, 0, 90 },   // ������� ������ (0 = ������)
-    { L"Input", L"SmoothTurnSpeed", L"\x0421\x043A\x043E\x0440\x043E\x0441\x0442\x044C \x043F\x043E\x0432\x043E\x0440\x043E\x0442\x0430", 120, 15, 30, 360 },   // �������� ��������
-    { L"Input", L"MoveByHead", L"\x0418\x0434\x0442\x0438 \x043A\x0443\x0434\x0430 \x0441\x043C\x043E\x0442\x0440\x044E", 1, 1, 0, 1 },   // ���� ���� ������
-    { L"Input", L"TwoHanded", L"\x0414\x0432\x0443\x0440\x0443\x0447\x043D\x044B\x0439 \x0445\x0432\x0430\x0442", 1, 1, 0, 1 },   // ��������� ����
-    { L"Input", L"GrenadeGrab", L"\x0413\x0440\x0430\x043D\x0430\x0442\x044B \x0440\x0443\x043A\x043E\x0439 \x0441 \x043F\x043E\x044F\x0441\x0430", 1, 1, 0, 1 },   // ������� ����� � �����
-    { L"Input", L"GrenadeThrowScale", L"\x0421\x0438\x043B\x0430 \x0431\x0440\x043E\x0441\x043A\x0430 \x0433\x0440\x0430\x043D\x0430\x0442\x044B", 3, 0.25f, 0.5f, 8 },   // ���� ������ �������
-    { L"Input", L"GrenadeGravity", L"\x0412\x0435\x0441 \x0433\x0440\x0430\x043D\x0430\x0442\x044B", 1, 0.25f, 0, 3 },   // ��� �������
-    { L"Input", L"MeleeContact", L"\x0423\x0434\x0430\x0440 \x0442\x043E\x043B\x044C\x043A\x043E \x043F\x0440\x0438 \x043A\x0430\x0441\x0430\x043D\x0438\x0438", 0, 1, 0, 1 },   // ���� ������ ��� �������
-    { L"Input", L"MeleeSpeed", L"\x0423\x0434\x0430\x0440: \x0441\x043A\x043E\x0440\x043E\x0441\x0442\x044C \x0432\x0437\x043C\x0430\x0445\x0430 (\x043C/\x0441)", 3, 0.25f, 1, 8 },   // ����: �������� ������ (�/�)
-    { L"Input", L"MeleeReach", L"\x0414\x043B\x0438\x043D\x0430 \x0431\x043B\x0438\x0436\x043D\x0435\x0433\x043E \x043E\x0440\x0443\x0436\x0438\x044F (\x043C)", 0.55f, 0.05f, 0.2f, 1.2f },   // ����� �������� ������ (�)
-    { L"VR", L"VehicleCamera", L"\x041C\x0430\x0448\x0438\x043D\x0430: \x0432\x0438\x0434 \x043E\x0442 3-\x0433\x043E \x043B\x0438\x0446\x0430 (\x0441\x0437\x0430\x0434\x0438)", 1, 1, 0, 1 },   // ������: ������ �����
-    { L"VR", L"VehicleHeadAim", L"\x041C\x0430\x0448\x0438\x043D\x0430: \x043F\x0440\x0438\x0446\x0435\x043B \x0432\x0437\x0433\x043B\x044F\x0434\x043E\x043C", 0, 1, 0, 1 },   // ������: ������ ��������
     { L"VR", L"Cutscenes3D", L"\x0417\x0430\x0441\x0442\x0430\x0432\x043A\x0438 \x0432 3D", 0, 1, 0, 1 },   // �������� � 3D
-    { L"VR", L"NearClip", L"\x0411\x043B\x0438\x0436\x043D\x044F\x044F \x0433\x0440\x0430\x043D\x0438\x0446\x0430 \x0432\x0438\x0434\x0438\x043C\x043E\x0441\x0442\x0438", 10, 5, 1, 100 },   // ������� ������� ���������
-    { L"VR", L"MuzzleFlashScale", L"\x0420\x0430\x0437\x043C\x0435\x0440 \x0432\x0441\x043F\x044B\x0448\x0435\x043A \x0432\x044B\x0441\x0442\x0440\x0435\x043B\x0430", 0.35f, 0.05f, 0, 1 },   // ������ ������� ��������
-    { L"HUD", L"Minimal", L"\x041A\x043E\x0440\x043E\x0442\x043A\x0438\x0439 HUD", 1, 1, 0, 1 },   // �������� HUD
-    { L"HUD", L"MarkersInEyes", L"\x041C\x0435\x0442\x043A\x0438 \x0432 \x0433\x043B\x0430\x0437\x0430", 1, 1, 0, 1 },   // ����� � �����
-    { L"HUD", L"ButtonHints", L"\x041F\x043E\x0434\x0441\x043A\x0430\x0437\x043A\x0438 \x043A\x043D\x043E\x043F\x043A\x0430\x043C\x0438 VR", 1, 1, 0, 1 },   // ��������� �������� VR
-    { L"HUD", L"Distance", L"\x041F\x0430\x043D\x0435\x043B\x044C HUD: \x0440\x0430\x0441\x0441\x0442\x043E\x044F\x043D\x0438\x0435", 1.6f, 0.1f, 0.5f, 4 },   // ������ HUD: ����������
     { nullptr, L"@exit", L"\x0421\x043E\x0445\x0440\x0430\x043D\x0438\x0442\x044C \x0438 \x0432\x044B\x0439\x0442\x0438", 0, 0, 0, 0 },   // ��������� � �����
 };
 static const int kSettingCount = sizeof(kSettings) / sizeof(kSettings[0]);
