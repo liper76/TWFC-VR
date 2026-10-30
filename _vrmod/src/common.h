@@ -172,7 +172,7 @@ void IKSetPawn(void* pawn, const float viewPos[3]);   // first-person player paw
 // eye of this frame; latched head offset (body frame, horizontal), body yaw (world) and head yaw (vs body), radians
 void IKSetFrame(int eye, const float headOffset[3], float bodyYaw, float headYaw);
 bool IKPawnIsVehicle();                     // the player's current skeleton has no arms (vehicle form)
-void IKSetBelt(void* comp);                 // a component attached to the hips, placed each frame on the belt (or null)
+void IKSetBelt(void* comp, float size = 0); // a component attached to the hips, placed each frame on the belt (or null); its world size (0 = weapons')
 bool IKWeaponHasScope();                    // first person, holding a weapon from ScopeWeapons
 float CameraVehicleSteer();                 // vehicle form: right stick (-1..1) that turns it towards the aim
 float CameraMoveYawDelta();                // radians to rotate the left stick so movement follows the head
