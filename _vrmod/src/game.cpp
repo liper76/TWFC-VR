@@ -394,6 +394,8 @@ int g_debugWindowEye;    // debug "windoweye <0|1|2>": the game window shows onl
 int g_debugRightVS = 1;  // debug "rightvs <0|1>": the second drawing uses its own FSceneViewState
 int g_debugEyeSwap;      // debug "eyeswap <0|1>": the first drawing gets the right-eye view, the second the left
 static volatile bool g_drawingRightEye;
+static volatile bool g_inStereoPair;   // both drawings of a stereo pair are under way
+static long g_occTests[2], g_occHidden[2];   // shared occlusion test per eye in 5 s: calls, "not visible" results
 
 void GameSetRightEyeView(const TPOV& pov)
 {
@@ -454,8 +456,10 @@ static void __stdcall HookDrawViewport(void* viewport)
     }
     if (twice) doubles++;
     if (g_cfg.logFps && GetTickCount() - t0 > 5000) {
-        Log("game: %ld viewport draws in 5 s, %ld drawn for both eyes (frame %ld)", draws, doubles, g_frameCount);
+        Log("game: %ld viewport draws in 5 s, %ld drawn for both eyes (frame %ld); occlusion tests L %ld/%ld hidden, R %ld/%ld hidden",
+            draws, doubles, g_frameCount, g_occHidden[0], g_occTests[0], g_occHidden[1], g_occTests[1]);
         draws = doubles = 0;
+        g_occTests[0] = g_occTests[1] = g_occHidden[0] = g_occHidden[1] = 0;
         t0 = GetTickCount();
     }
     if (!twice) { g_origDrawViewport(viewport); return; }
@@ -479,10 +483,12 @@ static void __stdcall HookDrawViewport(void* viewport)
     }
 
     // Pass 1: Left Eye
+    g_inStereoPair = true;
     g_origDrawViewport(viewport);
 
     // Pass 2: Right Eye (same world state, separate FSceneViewState for per-eye motion blur & occlusion queries)
     __try { SetCameraView(right); } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_inStereoPair = false;
         if (haveCamFlags) __try { *(uint32_t*)(cam + 0x1D4) = savedCamFlags; } __except (EXCEPTION_EXECUTE_HANDLER) {}
         return;
     }
@@ -512,6 +518,7 @@ static void __stdcall HookDrawViewport(void* viewport)
     }
     g_origDrawViewport(viewport);
     g_drawingRightEye = false;
+    g_inStereoPair = false;
 
     __try {
         if (savedVS && lp) {
@@ -524,6 +531,33 @@ static void __stdcall HookDrawViewport(void* viewport)
 }
 
 bool GameDrawingRightEye() { return g_drawingRightEye; }
+
+// Occlusion test shared by both eyes (0x113C75A0, __stdcall, ret 0x14; called from the scene renderer, e.g.
+// 0x113CE0D6). Its per-object records live in a container that both drawings share (24-byte entries indexed by
+// object+0x48: {frame, result} for the two frame parities of 0x12B109EC, +0x14 = query index), while the query
+// itself is issued into the view's FSceneViewState pool (+0x200). With two drawings per tick the right eye read the
+// left eye's query index from its own pool: wrong results (things vanish or flicker in one eye) or, with the fresh
+// right-eye pool, a crash at 0x1151BFFB. During a stereo pair the test is skipped: "visible", no query - the
+// same as the engine's own early exit for objects with flag 0x40 at +0x30.
+namespace addr {
+    const uintptr_t kSharedOcclusionTest = 0x113C75A0;
+}
+typedef void(__stdcall* PFN_SharedOcclusionTest)(void*, void*, void*, int*, int*);
+static PFN_SharedOcclusionTest g_origSharedOcclusionTest;
+int g_debugPairOcclusion;   // debug "pairocc <0|1>": 1 = keep the shared occlusion test in stereo pairs (old bug)
+
+static void __stdcall HookSharedOcclusionTest(void* records, void* obj, void* viewState, int* visible, int* issueQuery)
+{
+    int eye = g_drawingRightEye ? 1 : 0;
+    g_occTests[eye]++;
+    if (g_inStereoPair && !g_debugPairOcclusion) {
+        *visible = 1;
+        *issueQuery = 0;
+        return;
+    }
+    g_origSharedOcclusionTest(records, obj, viewState, visible, issueQuery);
+    if (!*visible) g_occHidden[eye]++;
+}
 
 // debug: the player camera actor of the last camera update
 void* GameCameraActor() { return g_frameView ? (uint8_t*)g_frameView - 0x324 : nullptr; }
@@ -639,6 +673,9 @@ void GameStartPatchThread()
     if (MH_CreateHook((void*)addr::kDrawViewport, (void*)HookDrawViewport, (void**)&g_origDrawViewport) == MH_OK &&
         MH_EnableHook((void*)addr::kDrawViewport) == MH_OK)
         Log("game: DrawViewport hook installed (both eyes per frame)");
+    if (MH_CreateHook((void*)addr::kSharedOcclusionTest, (void*)HookSharedOcclusionTest, (void**)&g_origSharedOcclusionTest) == MH_OK &&
+        MH_EnableHook((void*)addr::kSharedOcclusionTest) == MH_OK)
+        Log("game: shared occlusion test hook installed (skipped in stereo pairs)");
     if (g_cfg.probeCamera) {
         if (MH_CreateHook((void*)addr::kCameraFovBlend, (void*)HookFovBlend, (void**)&g_origFovBlend) == MH_OK &&
             MH_EnableHook((void*)addr::kCameraFovBlend) == MH_OK)

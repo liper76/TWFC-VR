@@ -191,6 +191,12 @@ static void RunLine(const char* line)
     } else if (sscanf_s(line, "pass2frame %f", &v) == 1) {
         extern int g_debugPass2Frame;
         g_debugPass2Frame = (int)v;
+    } else if (sscanf_s(line, "pairocc %f", &v) == 1) {
+        extern int g_debugPairOcclusion;
+        g_debugPairOcclusion = (int)v;
+    } else if (sscanf_s(line, "eyebright %f", &v) == 1) {
+        extern volatile long g_eyeBrightFrames;
+        g_eyeBrightFrames = (long)v;
     } else if (sscanf_s(line, "skipdraw %f", &v) == 1) {
         extern int g_debugSkipDraw;
         g_debugSkipDraw = (int)v;
