@@ -9,22 +9,11 @@ It runs through OpenXR (tested with Virtual Desktop and Quest controllers).
 - the robot's arms follow your controllers (IK), aiming with the controller, two-handed grip;
 - weapon wheel, grenades from the belt, pulling items to your hand, melee by swinging;
 - HUD on a floating panel, VR button hints, a settings menu inside the headset;
-- movies and menus on a virtual screen;
-- the mod's own interface in English and Russian (the switch is the first item of the VR settings menu).
+- movies and menus on a virtual screen.
 
 ## Language
 
-The VR settings menu and the weapon wheel come in English and Russian. By default the language follows Windows
-(Russian, Ukrainian or Belarusian Windows → Russian, anything else → English). To switch it, open the settings
-menu in the headset (hold the menu button + A) and press the first item, **Language / Язык**, or set it in
-`BinariesVR\twfcvr.ini`:
-
-```
-[General]
-Language=en        ; auto | en | ru
-```
-
-The player guide is available in both languages: `VR mod - instructions.txt` and `VR-мод — инструкция.txt`.
+English and Russian. Switch in the VR settings menu: **Language / Язык**.
 
 ## How it works
 
