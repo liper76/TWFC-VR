@@ -277,6 +277,9 @@ static void RunLine(const char* line)
         WeaponsGetList(wl);
         for (int i = 0; i < wl.count; i++) Log("debug: weapon %d %ls%s", i, wl.name[i], i == wl.current ? " (in hand)" : "");
         Log("debug: melee hand %d held %d", WeaponsMeleeHand(), WeaponsMeleeHeld());
+    } else if (!strncmp(line, "turretfx", 8)) {
+        void WeaponsDebugTurretFx();
+        WeaponsDebugTurretFx();
     } else if (!strncmp(line, "ability", 7)) {
         void VRDebugAbility();
         VRDebugAbility();

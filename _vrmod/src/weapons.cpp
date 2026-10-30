@@ -376,6 +376,115 @@ void UpdateSwitch(uint8_t* pawn, DWORD now)
     g_tries--;
 }
 
+// Turrets (mounted ones and the ones ripped off and carried: TnMountableTurret..., TnWeapon...Turret,
+// TnWeaponMounted...): their firing effects are made for a camera far behind - in VR they go off right at the eyes.
+// The particle systems of the turrets near the player are drawn at MuzzleFlashScale, like the hand guns' muzzle
+// flashes (ik.cpp). The turrets are looked up twice a second; the sizes are set every frame (a flash attached anew
+// for a shot comes at full size). Never made bigger (a hidden gun's flashes stay hidden).
+const uintptr_t kGWorld = 0x12B10A9C;
+const int kWorldLevels = 0x34, kLevelActors = 0x28, kActorLocation = 0xD8, kActorComponents = 0x50, kActorInstigator = 0x94;
+const int kWeaponMesh = 0x20C, kWeaponMesh2 = 0x208;
+const float kTurretRange = 800.0f;
+uint8_t* g_turrets[8];
+int g_turretCount;
+
+bool IsTurret(const wchar_t* n)
+{
+    if (!wcsncmp(n, L"TnMountable", 11)) return true;
+    return !wcsncmp(n, L"TnWeapon", 8) && (wcsstr(n, L"Turret") || !wcsncmp(n, L"TnWeaponMounted", 15));
+}
+
+int ShrinkAttachedFx(uint8_t* mesh, float s, int depth)
+{
+    const wchar_t* mn = mesh ? NameOf(*(unsigned*)(mesh + 4)) : nullptr;
+    if (!mn || !wcsstr(mn, L"SkeletalMeshComponent")) return 0;
+    uint8_t* att = *(uint8_t**)(mesh + kMeshAttachments);
+    int n = *(int*)(mesh + kMeshAttachments + 4), k = 0;
+    for (int i = 0; att && i < n && i < 32; i++) {
+        uint8_t* e = att + i * 0x30;
+        uint8_t* c = *(uint8_t**)e;
+        const wchar_t* nm = c ? NameOf(*(unsigned*)(c + 4)) : nullptr;
+        if (!nm) continue;
+        if (wcsstr(nm, L"ParticleSystemComponent")) {
+            float* sc = (float*)(e + 0x20);
+            for (int a = 0; a < 3; a++) sc[a] = fminf(sc[a], s);
+            k++;
+        } else if (depth > 0) {
+            k += ShrinkAttachedFx(c, s, depth - 1);
+        }
+    }
+    return k;
+}
+
+int ShrinkTurretFx(uint8_t* a, float s)
+{
+    int k = 0;
+    const wchar_t* n = NameOf(*(unsigned*)(a + 4));
+    if (n && !wcsncmp(n, L"TnWeapon", 8)) {
+        uint8_t* m1 = *(uint8_t**)(a + kWeaponMesh);
+        uint8_t* m2 = *(uint8_t**)(a + kWeaponMesh2);
+        k += ShrinkAttachedFx(m1, s, 1);
+        if (m2 != m1) k += ShrinkAttachedFx(m2, s, 1);
+    }
+    uint8_t** comps = *(uint8_t***)(a + kActorComponents);
+    int cn = *(int*)(a + kActorComponents + 4);
+    for (int i = 0; comps && i < cn && i < 32; i++) {
+        uint8_t* c = comps[i];
+        const wchar_t* nm = c ? NameOf(*(unsigned*)(c + 4)) : nullptr;
+        if (!nm) continue;
+        if (wcsstr(nm, L"ParticleSystemComponent")) {
+            float* sc = (float*)(c + kCompScale);
+            *sc = fminf(*sc, s);
+            k++;
+        } else {
+            k += ShrinkAttachedFx(c, s, 1);
+        }
+    }
+    return k;
+}
+
+void UpdateTurrets(uint8_t* pawn, DWORD now)
+{
+    static DWORD findAt;
+    if (now - findAt > 500) {
+        findAt = now;
+        const float* p = (const float*)(pawn + kActorLocation);
+        uint8_t* found[8];
+        int n = 0;
+        uint8_t* world = *(uint8_t**)kGWorld;
+        uint8_t** levels = world ? *(uint8_t***)(world + kWorldLevels) : nullptr;
+        int levelCount = world ? *(int*)(world + kWorldLevels + 4) : 0;
+        for (int l = 0; levels && l < levelCount && l < 64; l++) {
+            uint8_t* level = levels[l];
+            uint8_t** actors = level ? *(uint8_t***)(level + kLevelActors) : nullptr;
+            int count = level ? *(int*)(level + kLevelActors + 4) : 0;
+            for (int i = 0; actors && i < count && i < 20000 && n < 8; i++) {
+                uint8_t* a = actors[i];
+                const wchar_t* name = a ? NameOf(*(unsigned*)(a + 4)) : nullptr;
+                if (!name || !IsTurret(name)) continue;
+                if (!wcsncmp(name, L"TnWeapon", 8)) {   // the player's or a mounted turret's, not the squad's
+                    uint8_t* by = *(uint8_t**)(a + kActorInstigator);
+                    const wchar_t* bn = by ? NameOf(*(unsigned*)(by + 4)) : nullptr;
+                    if (by != pawn && !(bn && !wcsncmp(bn, L"TnMountable", 11))) continue;
+                }
+                const float* q = (const float*)(a + kActorLocation);
+                float dx = q[0] - p[0], dy = q[1] - p[1], dz = q[2] - p[2];
+                if (dx * dx + dy * dy + dz * dz < kTurretRange * kTurretRange) found[n++] = a;
+            }
+        }
+        bool changed = n != g_turretCount || memcmp(found, g_turrets, n * sizeof(found[0]));
+        memcpy(g_turrets, found, n * sizeof(found[0]));
+        g_turretCount = n;
+        if (changed) {
+            for (int i = 0; i < n; i++)
+                Log("weapons: turret %ls nearby: %d particle systems at %.2f", NameOf(*(unsigned*)(found[i] + 4)),
+                    ShrinkTurretFx(found[i], g_cfg.muzzleFlashScale), g_cfg.muzzleFlashScale);
+            if (!n) Log("weapons: no turret nearby");
+        }
+    }
+    for (int i = 0; i < g_turretCount; i++) ShrinkTurretFx(g_turrets[i], g_cfg.muzzleFlashScale);
+}
+
 }   // namespace
 
 void WeaponsInstall()
@@ -405,6 +514,7 @@ void WeaponsUpdate(void* pawnPtr)
             if (!pawn) { g_meleeHand = -1; g_want = nullptr; }
         }
         if (!pawn || !mesh || !g_origDetach) return;
+        UpdateTurrets(pawn, now);
         bool vehicle = IKPawnIsVehicle();
         TrackAttachments(mesh, now);
         UpdateMelee(mesh, vehicle, now);
@@ -419,6 +529,17 @@ void WeaponsUpdate(void* pawnPtr)
         g_meleeState = kIdle;
         g_keptCount = 0;
         g_meleeHeld = -1;
+    }
+}
+
+// debug: the turret effects code run on the weapon in hand (how many particle systems it reaches)
+void WeaponsDebugTurretFx()
+{
+    __try {
+        uint8_t* w = g_pawn ? *(uint8_t**)((uint8_t*)g_pawn + kPawnWeapon) : nullptr;
+        if (w) Log("debug: %ls: %d particle systems at %.2f", NameOf(*(unsigned*)(w + 4)), ShrinkTurretFx(w, g_cfg.muzzleFlashScale), g_cfg.muzzleFlashScale);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("debug: turretfx failed");
     }
 }
 
