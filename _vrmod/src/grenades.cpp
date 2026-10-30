@@ -60,6 +60,14 @@ const wchar_t* NameOf(unsigned fname)
     return (const wchar_t*)(names[i] + 8);
 }
 
+// thrown things: TnProjectileGrenade, ...KamikazeMine(Placeable), ...EmpGrenade - not the grenade launcher's shells,
+// the space mines' spikes, nor the ones dying robots drop (Martyrdom) or the killstreak's
+bool GrenadeProjectileClass(const wchar_t* n)
+{
+    if (wcsncmp(n, L"TnProjectile", 12) || (!wcsstr(n, L"Grenade") && !wcsstr(n, L"Mine"))) return false;
+    return !wcsstr(n, L"Launcher") && !wcsstr(n, L"Spike") && !wcsstr(n, L"Martyr") && !wcsstr(n, L"Killstreak") && !wcsstr(n, L"Data");
+}
+
 // the flying grenades of the world's levels
 void FindGrenades(Grenades& out)
 {
@@ -76,7 +84,7 @@ void FindGrenades(Grenades& out)
             for (int i = 0; actors && i < count && i < 20000; i++) {
                 uint8_t* a = actors[i];
                 const wchar_t* name = a ? NameOf(*(unsigned*)(a + 4)) : nullptr;
-                if (name && !wcsncmp(name, L"TnProjectile", 12) && wcsstr(name, L"Grenade") && out.n < 64) out.a[out.n++] = a;
+                if (name && GrenadeProjectileClass(name) && out.n < 64) out.a[out.n++] = a;
             }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -106,7 +114,7 @@ uint8_t* GrenadeWeapon(uint8_t* pawn, int* count)
         uint8_t* it = inv ? *(uint8_t**)(inv + kInvFirst) : nullptr;
         for (int n = 0; it && n < 32; n++, it = *(uint8_t**)(it + kInvNext)) {
             const wchar_t* name = NameOf(*(unsigned*)(it + 4));
-            if (!name || wcsncmp(name, L"TnWeapon", 8) || !wcsstr(name, L"Grenades")) continue;
+            if (!name || !GrenadeWeaponClass(name)) continue;
             *count = *(int*)(it + kWeaponReserve);
             return it;
         }
@@ -320,6 +328,10 @@ void GrenadeRelease() { g_reqRelease = 1; }
 bool GrenadeHeld() { return g_state != Idle; }
 int GrenadeHand() { return g_state != Idle ? g_hand : -1; }
 bool GrenadeWantPress() { return InterlockedExchange(&g_wantPress, 0) != 0; }
+bool GrenadeWeaponClass(const wchar_t* cls)
+{
+    return !wcsncmp(cls, L"TnWeapon", 8) && (wcsstr(cls, L"Grenades") || wcsstr(cls, L"Mines")) && !wcsstr(cls, L"Launcher");
+}
 
 // game thread, once per frame; pawn = first-person player pawn (null = none)
 void GrenadesUpdate(void* pawnPtr)

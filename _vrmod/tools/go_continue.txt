@@ -1,0 +1,11 @@
+# from the Accounts popup on the main menu: OK, Campaign, Solo, Continue (the user's checkpoint), first character
+press A 150
+wait 2500
+press A 150
+wait 2500
+press A 150
+wait 2500
+press A 150
+wait 6000
+press A 150
+wait 2000
