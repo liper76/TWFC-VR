@@ -20,6 +20,9 @@ float g_debugViewOffset[4];          // debug.cpp "viewoffset"
 static Vec3f g_latchHead;            // head position in the room (body frame, horizontal) latched for the eye pair
 static float g_latchHeadYaw;         // head yaw relative to the body (radians) latched for the eye pair
 static float g_moveYawDelta;         // head yaw - aim yaw (radians), for the left stick
+static float g_vehicleSteer;         // vehicle form: right stick that turns the vehicle towards the aim (-1..1)
+static volatile DWORD g_vehicleSteerTick;
+static bool CameraVehicleAimFresh() { return GetTickCount() - g_vehicleSteerTick < 250; }
 static DWORD g_moveTick;
 static bool g_chaseValid;            // the latched base is a chase camera position (smoothed)
 static float g_baseFwd, g_baseUp;    // eye base relative to the pawn (forward, up), gliding when transforming
@@ -360,6 +363,12 @@ void CameraOnUpdate(TPOV* pov, void* viewTarget, void* pc, float dt)
         int ay = (int)(atan2f(t.y, t.x) / kUURotToRad) & 0xFFFF;
         GameSetAim(true, ap, ay, o.x, o.y, o.z);
         UpdateAimHit(pc, rayO.x, rayO.y, rayO.z);   // distance along the VR ray: the ring
+        // boosting cars ignore the controller rotation and steer with the right stick only: steer towards the aim
+        __try {
+            int err = (short)(uint16_t)((ay - *(int*)((uint8_t*)viewTarget + 0xE8)) & 0xFFFF);
+            g_vehicleSteer = fminf(fmaxf(err * kUURotToRad / (25.0f * 0.0174533f), -1.0f), 1.0f);
+            g_vehicleSteerTick = GetTickCount();
+        } __except (EXCEPTION_EXECUTE_HANDLER) { g_vehicleSteer = 0.0f; }
         g_moveYawDelta = 0.0f;
         g_moveTick = GetTickCount();
     } else if (g_cfg.aimMode == 1 && eye.aim[VRGunHand() == 0 ? 0 : 1].valid) {
@@ -420,6 +429,11 @@ float CameraAimHitMeters()
 bool CameraVehicleAim()
 {
     return GetTickCount() - g_vehicleAimTick < 250;
+}
+
+float CameraVehicleSteer()
+{
+    return CameraVehicleAimFresh() ? g_vehicleSteer : 0.0f;
 }
 
 float CameraMoveYawDelta()

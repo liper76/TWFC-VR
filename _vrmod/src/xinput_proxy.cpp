@@ -91,6 +91,9 @@ static void RouteTurning(DWORD user, XINPUT_STATE* st)
     if (CameraOwnsTurning()) {
         st->Gamepad.sThumbRX = 0;
         st->Gamepad.sThumbRY = 0;
+        // a boosting car (left trigger) steers with the right stick only, not towards the controller rotation
+        if (st->Gamepad.bLeftTrigger > 30 && IKPawnIsVehicle())
+            st->Gamepad.sThumbRX = (SHORT)(CameraVehicleSteer() * 32767.0f);
     }
     // walk where the head looks: rotate the left stick by the head-vs-aim yaw (stick x = right, y = forward)
     float d = CameraMoveYawDelta();

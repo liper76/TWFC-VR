@@ -1,5 +1,6 @@
 // Debug automation: commands written to twfcvr_cmd.txt (next to the DLL) drive a virtual gamepad.
-// Lines: "press <A|B|X|Y|START|BACK|LB|RB|LS|RS|UP|DOWN|LEFT|RIGHT|LT|RT> <ms>", "stick <LX|LY|RX|RY> <-1..1> <ms>", "wait <ms>"
+// Lines: "press <A|B|X|Y|START|BACK|LB|RB|LS|RS|UP|DOWN|LEFT|RIGHT|LT|RT> <ms>", "stick <LX|LY|RX|RY> <-1..1> <ms>", "wait <ms>",
+// "pad <LX> <LY> <RX> <RY> <LT 0..1> <RT 0..1> <ms>"
 #include "common.h"
 #include <stdio.h>
 #include <string.h>
@@ -125,7 +126,7 @@ __declspec(naked) static void CountStub()
 static void RunLine(const char* line)
 {
     char cmd[32] = {}, a[32] = {};
-    float v = 0, ms = 0;
+    float v = 0, ms = 0, s[6] = {};
     XINPUT_GAMEPAD p = {};
     if (sscanf_s(line, "press %31s %f", a, (unsigned)sizeof(a), &ms) == 2) {
         if (!_stricmp(a, "LT")) p.bLeftTrigger = 255;
@@ -141,6 +142,14 @@ static void RunLine(const char* line)
         else if (!_stricmp(a, "LY")) p.sThumbLY = s;
         else if (!_stricmp(a, "RX")) p.sThumbRX = s;
         else if (!_stricmp(a, "RY")) p.sThumbRY = s;
+        SetPad(p, true);
+        Sleep((DWORD)ms);
+        SetPad({}, true);
+    } else if (sscanf_s(line, "pad %f %f %f %f %f %f %f", &s[0], &s[1], &s[2], &s[3], &s[4], &s[5], &ms) == 7) {
+        // pad <LX> <LY> <RX> <RY> <LT> <RT> <ms>: sticks and triggers at once (e.g. steering while boosting)
+        p.sThumbLX = (SHORT)(s[0] * 32767.0f); p.sThumbLY = (SHORT)(s[1] * 32767.0f);
+        p.sThumbRX = (SHORT)(s[2] * 32767.0f); p.sThumbRY = (SHORT)(s[3] * 32767.0f);
+        p.bLeftTrigger = (BYTE)(s[4] * 255.0f); p.bRightTrigger = (BYTE)(s[5] * 255.0f);
         SetPad(p, true);
         Sleep((DWORD)ms);
         SetPad({}, true);
