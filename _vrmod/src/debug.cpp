@@ -163,6 +163,30 @@ static void RunLine(const char* line)
     } else if (sscanf_s(line, "watchseq %31s %f", a, (unsigned)sizeof(a), &v) == 2) {
         g_watchSeq = (long)v;
         SetWatch((uintptr_t)strtoul(a, nullptr, 16), true);
+    } else if (sscanf_s(line, "dump %31s %f", a, (unsigned)sizeof(a), &v) == 2) {   // dump <hex addr> <bytes>
+        const uint8_t* base = (const uint8_t*)strtoul(a, nullptr, 16);
+        __try {
+            for (int o = 0; o < (int)v; o += 16) {
+                const uint32_t* d = (const uint32_t*)(base + o);
+                Log("dump %p+%03X: %08X %08X %08X %08X | %g %g %g %g", base, o, d[0], d[1], d[2], d[3],
+                    *(const float*)&d[0], *(const float*)&d[1], *(const float*)&d[2], *(const float*)&d[3]);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) { Log("dump: bad address"); }
+    } else if (sscanf_s(line, "objscan %31s %f", a, (unsigned)sizeof(a), &v) == 2) {   // objscan <hex addr> <bytes>
+        // the fields of an object that point at other objects (names from GNames, the FName at +4)
+        const uint8_t* base = (const uint8_t*)strtoul(a, nullptr, 16);
+        uint8_t** names = *(uint8_t***)0x12B2F0F4;
+        int nameCount = *(int*)(0x12B2F0F4 + 4);
+        for (int o = 0; o < (int)v; o += 4) {
+            __try {
+                const uint8_t* p = *(const uint8_t* const*)(base + o);
+                if ((uintptr_t)p < 0x10000) continue;
+                unsigned fn = *(const unsigned*)(p + 4);
+                int i = (int)(fn >> 14);
+                if (!names || i <= 0 || i >= nameCount || !names[i]) continue;
+                Log("objscan %p+%03X -> %p %ls", base, o, p, (const wchar_t*)(names[i] + 8));
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        }
     } else if (sscanf_s(line, "watchrw %31s", a, (unsigned)sizeof(a)) == 1) {
         SetWatch((uintptr_t)strtoul(a, nullptr, 16), true);
     } else if (sscanf_s(line, "watch %31s", a, (unsigned)sizeof(a)) == 1) {

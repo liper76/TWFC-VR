@@ -60,11 +60,11 @@ const wchar_t* NameOf(unsigned fname)
     return (const wchar_t*)(names[i] + 8);
 }
 
-// thrown things: TnProjectileGrenade, ...KamikazeMine(Placeable), ...EmpGrenade - not the grenade launcher's shells,
+// thrown things: TnProjectileGrenade, ...KamikazeMine(Placeable), ...EmpGrenade, ...FlashBang - not the grenade launcher's shells,
 // the space mines' spikes, nor the ones dying robots drop (Martyrdom) or the killstreak's
 bool GrenadeProjectileClass(const wchar_t* n)
 {
-    if (wcsncmp(n, L"TnProjectile", 12) || (!wcsstr(n, L"Grenade") && !wcsstr(n, L"Mine"))) return false;
+    if (wcsncmp(n, L"TnProjectile", 12) || (!wcsstr(n, L"Grenade") && !wcsstr(n, L"Mine") && !wcsstr(n, L"Flash"))) return false;
     return !wcsstr(n, L"Launcher") && !wcsstr(n, L"Spike") && !wcsstr(n, L"Martyr") && !wcsstr(n, L"Killstreak") && !wcsstr(n, L"Data");
 }
 
@@ -245,6 +245,63 @@ const uint32_t kHiddenGame = 0x4;
 typedef void(__fastcall* AttachFn)(uint8_t* mesh, uint8_t* comp, unsigned bone, const float* loc, const int* rot, const float* scale);
 uint8_t* g_belt;            // the model on the belt
 uint8_t* g_beltMesh;        // ... attached to this skeletal mesh
+uint8_t* g_beltWeapon;      // ... for this grenade weapon
+uint8_t* g_beltOldMesh;     // the mesh the belt model had before it was given the single grenade's
+int g_beltMeshAt;           // ... at this offset (kCompSkelMesh / kCompStaticMesh; 0 = not changed)
+
+// The weapon's own model is its pickup: several grenades (three mines). The grenade it throws is one - the projectile
+// class's (WEPDATA +0x34 -> class, +0x9C its defaults) mesh template. A skeletal one goes on the weapon's spare
+// skeletal component (its TnWeaponMesh's HmAnimatedMesh: a grenade launcher model never drawn for grenades),
+// a static one in place of the pickup model's mesh. Null when not found: the pickup model then.
+const int kCompStaticMesh = 0x1C4, kWeaponData = 0x240, kDataProjectiles = 0x34, kClassDefaults = 0x9C;
+const int kWeaponMeshActor = 0x39C, kWeaponMeshAnimated = 0x3C, kAnimatedMeshComp = 0x30;
+
+bool NameStarts(uint8_t* o, const wchar_t* s)
+{
+    const wchar_t* n = o ? NameOf(*(unsigned*)(o + 4)) : nullptr;
+    return n && !wcsncmp(n, s, wcslen(s));
+}
+
+bool NameEnds(uint8_t* o, const wchar_t* s)
+{
+    const wchar_t* n = o ? NameOf(*(unsigned*)(o + 4)) : nullptr;
+    size_t ln = n ? wcslen(n) : 0, ls = wcslen(s);
+    return n && ln >= ls && !wcscmp(n + ln - ls, s);
+}
+
+uint8_t* OneGrenadeComp(uint8_t* w, uint8_t* model, uint8_t** mesh, int* at)
+{
+    __try {
+        uint8_t* data = *(uint8_t**)(w + kWeaponData);
+        uint8_t* arr = data && NameEnds(data, L"WEPDATA") ? *(uint8_t**)(data + kDataProjectiles) : nullptr;
+        uint8_t* cls = arr && *(int*)(data + kDataProjectiles + 4) > 0 ? *(uint8_t**)arr : nullptr;
+        const wchar_t* cn = cls ? NameOf(*(unsigned*)(cls + 4)) : nullptr;
+        if (!cn || !GrenadeProjectileClass(cn)) return nullptr;
+        uint8_t* def = *(uint8_t**)(cls + kClassDefaults);
+        if (!NameStarts(def, L"Default__")) return nullptr;
+        for (int off = 0x100; off < 0x400; off += 4) {
+            uint8_t* t = *(uint8_t**)(def + off);   // its mesh component templates (other fields: anything)
+            if ((uintptr_t)t < 0x10000) continue;
+            __try {
+                if (!NameStarts(t, L"Mesh")) continue;
+                uint8_t* m = *(uint8_t**)(t + kCompSkelMesh);
+                if (m && (uintptr_t)m > 0x10000 && NameEnds(m, L"_SKEL")) {
+                    uint8_t* wm = *(uint8_t**)(w + kWeaponMeshActor);
+                    uint8_t* am = NameStarts(wm, L"TnWeaponMesh") ? *(uint8_t**)(wm + kWeaponMeshAnimated) : nullptr;
+                    uint8_t* comp = NameStarts(am, L"HmAnimatedMesh") ? *(uint8_t**)(am + kAnimatedMeshComp) : nullptr;
+                    if (!NameStarts(comp, L"SkeletalMeshComponent")) return nullptr;
+                    *mesh = m; *at = kCompSkelMesh;
+                    return comp;
+                }
+                m = *(uint8_t**)(t + kCompStaticMesh);
+                if (m && (uintptr_t)m > 0x10000 && NameEnds(m, L"_STAT")) { *mesh = m; *at = kCompStaticMesh; return model; }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return nullptr;
+}
 
 bool Attached(uint8_t* mesh, uint8_t* comp)
 {
@@ -285,31 +342,52 @@ void UpdateBelt(uint8_t* pawn, bool show)
         uint8_t* mesh = pawn ? *(uint8_t**)(pawn + kPawnMesh) : nullptr;
         int count = 0;
         uint8_t* w = pawn && show ? GrenadeWeapon(pawn, &count) : nullptr;
-        uint8_t* model = w && (count > 0 || g_spare) ? *(uint8_t**)(w + kWeaponModel) : nullptr;
-        if (g_belt && (g_belt != model || g_beltMesh != mesh)) {   // none left, another body (transformed), level change
+        bool want = w && (count > 0 || g_spare);
+        // (just after a level loads the single grenade may not be found yet: the pickup model meanwhile)
+        static DWORD retryAt;
+        bool retry = false;
+        if (g_belt && want && !g_beltMeshAt && GetTickCount() - retryAt > 2000) {
+            retryAt = GetTickCount();
+            uint8_t* one;
+            int at;
+            retry = OneGrenadeComp(w, *(uint8_t**)(w + kWeaponModel), &one, &at) != nullptr;
+        }
+        if (g_belt && (!want || retry || g_beltWeapon != w || g_beltMesh != mesh)) {   // none left, another body (transformed), level change
             if (g_beltMesh && Attached(g_beltMesh, g_belt)) Detach(g_beltMesh, g_belt);
             memcpy(g_belt + kCompTranslation, g_beltTranslation, sizeof(g_beltTranslation));
-            g_belt = g_beltMesh = nullptr;
+            if (g_beltMeshAt) *(uint8_t**)(g_belt + g_beltMeshAt) = g_beltOldMesh;
+            g_belt = g_beltMesh = g_beltWeapon = nullptr;
+            g_beltMeshAt = 0;
             IKSetBelt(nullptr);
         }
-        if (!model || !mesh) return;
+        if (!want || !mesh) return;
         if (!g_belt) {
             unsigned hips = HipsBone(mesh);
-            if (!hips || Attached(mesh, model)) return;
+            uint8_t* model = *(uint8_t**)(w + kWeaponModel), *one = nullptr;
+            int at = 0;
+            uint8_t* comp = OneGrenadeComp(w, model, &one, &at);
+            if (!comp) comp = model;
+            if (!hips || !comp || Attached(mesh, comp)) return;
             float loc[3] = {}, scale[3] = { 1, 1, 1 };
             int rot[3] = {};
-            memcpy(g_beltTranslation, model + kCompTranslation, sizeof(g_beltTranslation));
-            memset(model + kCompTranslation, 0, sizeof(g_beltTranslation));
-            ((AttachFn)kMeshAttach)(mesh, model, hips, loc, rot, scale);
-            g_belt = model;
+            if (at) { g_beltOldMesh = *(uint8_t**)(comp + at); *(uint8_t**)(comp + at) = one; }   // (before it is attached: drawn with it)
+            g_beltMeshAt = at;
+            memcpy(g_beltTranslation, comp + kCompTranslation, sizeof(g_beltTranslation));
+            memset(comp + kCompTranslation, 0, sizeof(g_beltTranslation));
+            ((AttachFn)kMeshAttach)(mesh, comp, hips, loc, rot, scale);
+            g_belt = comp;
             g_beltMesh = mesh;
-            Log("grenades: grenade model %p on the belt", model);
+            g_beltWeapon = w;
+            const wchar_t* mn = one ? NameOf(*(unsigned*)(one + 4)) : nullptr;
+            Log("grenades: %ls on the belt (component %p, weapon %p)", mn ? mn : L"the pickup model", comp, w);
         }
         *(uint8_t**)(g_belt + kCompOwner) = pawn;   // (the grenade weapon itself is hidden: drawn as part of the robot)
         *(uint32_t*)(g_belt + kCompFlags) &= ~kHiddenGame;
-        IKSetBelt(g_belt);
+        // the single grenade as big as the one thrown (its template's scale 1); the pickup model like the weapons
+        IKSetBelt(g_belt, g_beltMeshAt ? 1.0f : 0.0f);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        g_belt = g_beltMesh = nullptr;
+        g_belt = g_beltMesh = g_beltWeapon = nullptr;
+        g_beltMeshAt = 0;
         IKSetBelt(nullptr);
     }
 }
@@ -330,7 +408,7 @@ int GrenadeHand() { return g_state != Idle ? g_hand : -1; }
 bool GrenadeWantPress() { return InterlockedExchange(&g_wantPress, 0) != 0; }
 bool GrenadeWeaponClass(const wchar_t* cls)
 {
-    return !wcsncmp(cls, L"TnWeapon", 8) && (wcsstr(cls, L"Grenades") || wcsstr(cls, L"Mines")) && !wcsstr(cls, L"Launcher");
+    return !wcsncmp(cls, L"TnWeapon", 8) && (wcsstr(cls, L"Grenade") || wcsstr(cls, L"Mines") || wcsstr(cls, L"FlashBang")) && !wcsstr(cls, L"Launcher");
 }
 
 // game thread, once per frame; pawn = first-person player pawn (null = none)

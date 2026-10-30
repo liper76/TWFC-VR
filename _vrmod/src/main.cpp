@@ -203,7 +203,7 @@ static void LoadConfig()
     g_cfg.stereoPerFrame = (int)IniFloat(ini, L"VR", L"StereoPerFrame", (float)g_cfg.stereoPerFrame);
     g_cfg.singleThreadRender = (int)IniFloat(ini, L"VR", L"SingleThreadRender", (float)g_cfg.singleThreadRender);
     g_cfg.syncEyeTimeVehicle = (int)IniFloat(ini, L"VR", L"SyncEyeTimeVehicle", (float)g_cfg.syncEyeTimeVehicle);
-    g_cfg.autoScale = (int)IniFloat(ini, L"VR", L"AutoScale", (float)g_cfg.autoScale);
+    g_cfg.autoScale = 0;   // the T-pose scale is off (the user asked: it misjudged); WorldScale is set by hand
     g_cfg.userArmSpan = IniFloat(ini, L"VR", L"UserArmSpan", g_cfg.userArmSpan);
     g_cfg.userEyeHeight = IniFloat(ini, L"VR", L"UserEyeHeight", g_cfg.userEyeHeight);
     g_cfg.heldFrameTime =IniFloat(ini, L"VR", L"HeldFrameTime", (float)g_cfg.heldFrameTime);

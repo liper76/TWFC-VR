@@ -353,7 +353,27 @@ void UpdateGun(uint8_t* mesh)
         Pose rel = Compose(Load((float*)(found + kCompLocalToWorld)), Inverse(g_gun.boneWorld));
         Vec3 ax[3];
         UnitAxes(rel, ax);
-        g_gun.rel = { { ax[0], ax[1], ax[2] }, rel.pos };
+        // a measurement taken while the engine had not yet attached the gun to the posed bone (a weapon just
+        // picked up or switched to: one frame still where the pickup or the other pose put it) is far off the
+        // attachment, sheared or of the wrong size - kept, it stretched the gun away from the hand for good
+        const float* loc = (const float*)(entry + 8);
+        Vec3 d = Sub(rel.pos, { loc[0], loc[1], loc[2] });
+        float want = g_cfg.weaponScale * ((const float*)(entry + 0x20))[0], l0 = Len(rel.ax[0]), l1 = Len(rel.ax[1]), l2 = Len(rel.ax[2]);
+        bool sane = Len(d) < 60.0f && fabsf(Dot(ax[0], ax[1])) < 0.05f && fabsf(Dot(ax[1], ax[2])) < 0.05f &&
+                    fabsf(Dot(ax[0], ax[2])) < 0.05f && fabsf(l0 - l1) < 0.1f * l0 && fabsf(l0 - l2) < 0.1f * l0 &&
+                    (want <= 0.0f || fabsf(l0 - want) < 0.25f * want);
+        static DWORD rejectLog;
+        if (!sane) {
+            if (GetTickCount() - rejectLog > 2000) {
+                rejectLog = GetTickCount();
+                Log("ik: gun placement rejected: pos %.1f %.1f %.1f (attach %.1f %.1f %.1f) len %.2f %.2f %.2f want %.2f dots %.3f %.3f %.3f",
+                    rel.pos.x, rel.pos.y, rel.pos.z, loc[0], loc[1], loc[2], l0, l1, l2, want,
+                    Dot(ax[0], ax[1]), Dot(ax[1], ax[2]), Dot(ax[0], ax[2]));
+            }
+        } else {
+            Orthonormalize(ax);
+            g_gun.rel = { { ax[0], ax[1], ax[2] }, rel.pos };
+        }
     } else {
         // first frame: the attachment's own placement
         const float* loc = (const float*)(entry + 8);
@@ -638,13 +658,33 @@ Pose PredictComponentToWorld(uint8_t* comp)
 }
 
 void* volatile g_beltComp;
+volatile float g_beltSize;   // its size in the world (0 = like the weapons in hand)
 
 // The belt model (grenades.cpp) hangs on the hips bone: its attachment offset is set so it sits at the left front
 // of the belt where the hand takes grenades - under the eyes, turned with the body - whatever the hips do.
+// The middle of what is drawn goes there, not the model's origin (the pickup model's is ~90 units off to a side).
 void PlaceBelt(uint8_t* comp, const Pose* pose, const Pose& compToWorld)
 {
     uint8_t* belt = (uint8_t*)g_beltComp;
     if (!belt || g_sk.hips < 0) return;
+    static uint8_t* measured;
+    static int frames;
+    static Vec3 centre;   // the middle of its bounds in its own frame (model units)
+    if (measured != belt) { measured = belt; frames = 0; centre = {}; }
+    if (frames >= 0 && ++frames > 3) {   // (once it has been drawn where it is placed)
+        Pose m = Load((const float*)(belt + kCompLocalToWorld));
+        const float* b = (const float*)(belt + kCompBounds);
+        float ms = Len(m.ax[0]);
+        Vec3 d = Sub({ b[0], b[1], b[2] }, m.pos);
+        if (b[6] > 1.0f && ms > 1e-3f && Len(d) < b[6] * 2.0f + 50.0f) {
+            Vec3 u[3];
+            UnitAxes(m, u);
+            centre = Scale(InFrame(d, u), 1.0f / ms);
+            frames = -1;
+            Log("ik: belt model %p drawn %.1f %.1f %.1f from its origin (radius %.0f), centred", belt, centre.x, centre.y, centre.z, b[6] / ms);
+        } else if (frames > 200) frames = -1;   // no bounds: its origin then
+    }
+    float size = g_beltSize > 0.0f ? g_beltSize : g_cfg.weaponScale;
     uint8_t* att = *(uint8_t**)(comp + kCompAttachments);
     int count = *(int*)(comp + kCompAttachments + 4);
     for (int i = 0; att && i < count && i < 64; i++) {
@@ -657,11 +697,12 @@ void PlaceBelt(uint8_t* comp, const Pose* pose, const Pose& compToWorld)
         Vec3 u[3];
         UnitAxes(hips, u);
         float s = fmaxf(Len(hips.ax[0]), 1e-3f);
-        Vec3 rel = Scale(InFrame(Sub(at, hips.pos), u), 1.0f / s);
+        // (attached unturned: its axes are the hips')
+        Vec3 rel = Sub(Scale(InFrame(Sub(at, hips.pos), u), 1.0f / s), Scale(centre, size / s));
         float* loc = (float*)(e + 8);
         loc[0] = rel.x; loc[1] = rel.y; loc[2] = rel.z;
-        // its size like the weapons in hand, whatever the hips' scale
-        *(float*)(belt + kCompScale) = g_cfg.weaponScale / s;
+        // its size the same whatever the hips' scale
+        *(float*)(belt + kCompScale) = size / s;
         static DWORD logAt;
         if (g_cfg.logFps && GetTickCount() - logAt > 5000) {
             logAt = GetTickCount();
@@ -1006,7 +1047,7 @@ bool IKHandWorld(int hand, float pos[3], float fwd[3], float rel[3])
     return true;
 }
 
-void IKSetBelt(void* comp) { g_beltComp = comp; }
+void IKSetBelt(void* comp, float size) { g_beltSize = size; g_beltComp = comp; }
 
 float IKRobotArmSpan() { return g_robotSpan; }
 float IKRobotEyeHeight() { return g_robotEye; }

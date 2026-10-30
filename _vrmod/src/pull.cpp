@@ -41,7 +41,7 @@ float g_vel[3];             // hand velocity relative to the body (world axes, U
 
 bool g_debugAim, g_debugFlick;
 
-struct Flight { uint8_t* actor; Vec3f from, home, landing; bool factory, weapon; int hand; float t, duration; DWORD landedAt, retryAt; bool landed, checked, movePawn; } g_fly;
+struct Flight { uint8_t* actor; Vec3f from, home, landing, drawn; bool factory, weapon; int hand; float t, duration; DWORD landedAt, retryAt; bool landed, checked, movePawn; } g_fly;
 
 const wchar_t* NameOf(unsigned fname)
 {
@@ -68,6 +68,24 @@ bool MoveActor(uint8_t* actor, const Vec3f& dest, bool noCheck)
 
 // A factory whose item was taken hides it: available only while one of its meshes or effects is drawn (not
 // HiddenGame - flags +0xF0 bit 2 - and in the scene, +0x40). The collision cylinder is always hidden.
+// Where the item is drawn, relative to the actor: a factory's mesh floats above its base (the actor's place), so
+// the actor goes to the hand minus this to put the item itself in the hand. Centre of the drawn meshes' bounds.
+Vec3f DrawnOffset(uint8_t* a)
+{
+    uint8_t** comps = *(uint8_t***)(a + 0x50);
+    int n = *(int*)(a + 0x54);
+    const Vec3f& loc = *(Vec3f*)(a + kActorLocation);
+    for (int i = 0; comps && i < n && i < 32; i++) {
+        uint8_t* c = comps[i];
+        const wchar_t* nm = c ? NameOf(*(unsigned*)(c + 4)) : nullptr;
+        if (!nm || !wcsstr(nm, L"MeshComponent") || (*(uint32_t*)(c + 0xF0) & 0x4) || !*(void**)(c + 0x40)) continue;
+        const float* b = (const float*)(c + 0xBC);   // FBoxSphereBounds (world): origin, extent, radius
+        Vec3f d = { b[0] - loc.x, b[1] - loc.y, b[2] - loc.z };
+        if (b[6] > 1.0f && d.x * d.x + d.y * d.y + d.z * d.z < 300.0f * 300.0f) return d;
+    }
+    return { 0, 0, 0 };
+}
+
 bool PickupShown(uint8_t* a)
 {
     uint8_t** comps = *(uint8_t***)(a + 0x50);
@@ -129,9 +147,11 @@ void StartFlight(int i)
     g_fly.factory = p.factory;
     g_fly.weapon = p.weapon;
     g_fly.hand = g_hand;
+    g_fly.drawn = DrawnOffset(p.actor);
     g_target = nullptr;
     VRHaptic(g_hand < 0 ? 0 : g_hand, 0.6f, 0.08f);
-    Log("pull: pulling %p (%s)", p.actor, p.factory ? "factory" : "dropped");
+    Log("pull: pulling %p (%s) to hand %d, drawn %.0f %.0f %.0f from its base", p.actor, p.factory ? "factory" : "dropped",
+        g_hand, g_fly.drawn.x, g_fly.drawn.y, g_fly.drawn.z);
 }
 
 // debug: offsets of the arrays (TArray: data, count, max) in obj that hold other (the actors' Touching lists)
@@ -160,10 +180,15 @@ void Fly(uint8_t* pawn, float dt, DWORD now)
         // step puts it on the pawn, which touches it)
         float hp[3], hf[3], hr[3];
         Vec3f aim = to;
-        if (g_fly.hand >= 0 && IKHandWorld(g_fly.hand, hp, hf, hr)) aim = { hp[0] + hf[0] * 15.0f, hp[1] + hf[1] * 15.0f, hp[2] + hf[2] * 15.0f };
+        // (the drawn item - not the actor's base - ends in the palm)
+        if (g_fly.hand >= 0 && IKHandWorld(g_fly.hand, hp, hf, hr))
+            aim = { hp[0] + hf[0] * 10.0f - g_fly.drawn.x, hp[1] + hf[1] * 10.0f - g_fly.drawn.y, hp[2] + hf[2] * 10.0f - g_fly.drawn.z };
         float dist = sqrtf((aim.x - g_fly.from.x) * (aim.x - g_fly.from.x) + (aim.y - g_fly.from.y) * (aim.y - g_fly.from.y) +
                            (aim.z - g_fly.from.z) * (aim.z - g_fly.from.z));
-        if (g_fly.t == 0.0f) g_fly.duration = 0.45f + fminf(dist / 3500.0f, 0.6f);
+        if (g_fly.t == 0.0f) g_fly.duration = 0.25f + fminf(dist / 6000.0f, 0.3f);   // quick: it is taken on arrival
+        // the interact button is held from the last part of the flight on: the game takes a weapon the moment it
+        // touches (a swap for a full slot counts the hold from here, not from the landing)
+        if (g_fly.weapon && g_cfg.pullAutoTake && g_fly.t > 0.6f) g_interactUntil = now + 1500;
         g_fly.t = fminf(g_fly.t + dt / g_fly.duration, 1.0f);
         float t = g_fly.t, s = t * t * t * (t * (t * 6 - 15) + 10);   // smootherstep: eases out of its place and into the hand
         // a low arc that is gone well before the hand (a high one came in over the head)
@@ -180,7 +205,7 @@ void Fly(uint8_t* pawn, float dt, DWORD now)
             g_fly.landed = true;
             g_fly.landedAt = now;
             VRHaptic(g_hand < 0 ? 0 : g_hand, 0.4f, 0.05f);
-            if (g_fly.weapon && g_cfg.pullAutoTake) g_interactUntil = now + 1200;   // ("hold X to take")
+            if (g_fly.weapon && g_cfg.pullAutoTake) g_interactUntil = now + 1500;   // ("hold X to take")
         }
     } else {
         // a factory goes back to its place (it respawns there) once you walk away from it or after a while: some are
@@ -205,7 +230,8 @@ void Fly(uint8_t* pawn, float dt, DWORD now)
                     MoveActor(pawn, to, false);
                 }
                 if (PickupShown(g_fly.actor))
-                    MoveActor(g_fly.actor, { hp[0] + hf[0] * 15.0f, hp[1] + hf[1] * 15.0f, hp[2] + hf[2] * 15.0f }, true);
+                    MoveActor(g_fly.actor, { hp[0] + hf[0] * 10.0f - g_fly.drawn.x, hp[1] + hf[1] * 10.0f - g_fly.drawn.y,
+                                             hp[2] + hf[2] * 10.0f - g_fly.drawn.z }, true);
             }
             float dx = g_fly.landing.x - to.x, dy = g_fly.landing.y - to.y;
             if (dx * dx + dy * dy < 450.0f * 450.0f) return;

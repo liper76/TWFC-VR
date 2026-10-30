@@ -84,7 +84,8 @@ float4 PS(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     if (hud > 3.5 && (panelPart || max(sqrt(saturate(s.a)), max(s.r, max(s.g, s.b))) < 0.5)) return float4(0, 0, 0, 0);
     // minimal HUD (panel): only the health bar (top left) and the ammo bar with its count (top right) - not the
     // ability icons and grenades below them
-    bool hpAmmo = uv.y < 0.155 && (uv.x < 0.36 || (uv.x > 0.6 && uv.x < 0.9));
+    bool hpAmmo = (uv.y < 0.145 && (uv.x < 0.37 || (uv.x > 0.58 && uv.x < 0.96))) ||
+                  (uv.y < 0.205 && uv.x > 0.58 && uv.x < 0.892);   // the weapon picture and the count, not the grenades
     if (hud > 1.5 && hud < 3.5 && !(hpAmmo || prompts)) return float4(0, 0, 0, 0);
     if (hud > 2.5 && hud < 3.5 && s.a < 0.85) return float4(0, 0, 0, 0);   // zoomed: the scope overlay's tint goes
     if (hud > 0.5) {
@@ -889,9 +890,9 @@ static void UpdateInput()
     p.bLeftTrigger = (BYTE)(GetFloat(xr.trigger[GunIdx() ^ 1]) * 255.0f);
     p.bRightTrigger = (BYTE)(GetFloat(xr.trigger[GunIdx()]) * 255.0f);
     if (GetBool(xr.btn[kA])) p.wButtons |= XINPUT_GAMEPAD_A;
-    if (GetBool(xr.btn[kB])) p.wButtons |= XINPUT_GAMEPAD_B;
-    if (GetBool(xr.btn[kX])) p.wButtons |= XINPUT_GAMEPAD_X;
     bool gameplay = CameraInGameplay();
+    if (GetBool(xr.btn[kB]) && (!gameplay || g_cfg.gripAbilities)) p.wButtons |= XINPUT_GAMEPAD_B;   // (VR layout: UpdateWeaponWheel)
+    if (GetBool(xr.btn[kX])) p.wButtons |= XINPUT_GAMEPAD_X;
     float grip[2] = { GetFloat(xr.grip[0]), GetFloat(xr.grip[1]) };
     DWORD now = GetTickCount();
     if (!gameplay || g_cfg.gripAbilities) {
@@ -903,15 +904,16 @@ static void UpdateInput()
         if (GetBool(xr.btn[kRClick])) p.wButtons |= XINPUT_GAMEPAD_RIGHT_THUMB;
     } else {
         // VR layout: the grips hold things (the weapon's front, grenades, pickups); the left trigger stays the game's
-        // (fine aim / the weapon's second action, e.g. detonating grenades; vehicle boost). Abilities: Y = main
-        // ability (RB), right stick click = second ability (LB). Melee: a punch forward with a hand.
-        // The weapon wheels: a stick click held (UpdateWeaponWheel).
-        bool vehicle = IKPawnIsVehicle();
-        if (GetBool(xr.btn[kY])) p.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
-        UpdateWeaponWheel(p, grip, now);   // (the stick clicks: wheel when held, their buttons when tapped)
-        if (xr.clickPulse[1] > 0) { p.wButtons |= g_cfg.gripAbilities ? XINPUT_GAMEPAD_RIGHT_THUMB : XINPUT_GAMEPAD_LEFT_SHOULDER; xr.clickPulse[1]--; }
-        if (xr.clickPulse[0] > 0) { p.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB; xr.clickPulse[0]--; }
-        (void)vehicle;
+        // (fine aim / the weapon's second action, e.g. detonating grenades; vehicle boost). Nothing important is on the
+        // stick clicks (pressing them wears the sticks): the left click is only the game's transform (LS, one press),
+        // the right one does nothing. Y tapped = main ability (RB), held = second ability (LB); B tapped = the game's
+        // B (grenade), held = the weapon wheel (UpdateWeaponWheel). Melee: a punch forward with a hand.
+        if (GetBool(xr.btn[kLClick])) p.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
+        UpdateWeaponWheel(p, grip, now);
+        if (xr.clickPulse[1] > 0) { p.wButtons |= XINPUT_GAMEPAD_B; xr.clickPulse[1]--; }
+        if (xr.clickPulse[0] > 0) { p.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER; xr.clickPulse[0]--; }
+        // Y held 0.35 s: the second ability, pressed for as long as Y stays down
+        if (xr.clickHeld[0] && GetBool(xr.btn[kY])) p.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
     }
 
     // Menu button: short press = Start (pause). In gameplay, held 1.5 s = adjust how the gun sits in the hand;
@@ -1304,20 +1306,22 @@ static void UpdateWeaponWheel(XINPUT_GAMEPAD& p, const float grip[2], DWORD now)
         w.open = false;
         g_dbgWheelHand = -2;
     }
-    // The wheel is on the thumbstick clicks, not the grips (grabbing things and the setup kept opening it): a click
-    // held 0.35 s opens that hand's wheel, let go to choose; a short click is the stick's own button (the left: LS,
-    // the right: LB - or RS), sent when it is let go. In vehicle form the right click held switches the vehicle's
-    // weapon (the game's "next weapon").
+    // The wheel is on B held (not the grips: grabbing things kept opening it; not the stick clicks: they wear the
+    // sticks): B held 0.35 s opens the right hand's wheel, let go to choose; a short B is the game's B (grenade), sent
+    // when it is let go. In vehicle form B held switches the vehicle's weapon (the game's "next weapon").
+    // Y the same way: tapped = main ability (sent when let go), held = second ability (VRInput).
     bool vehicle = IKPawnIsVehicle();
-    for (int h = 0; h < 2 && !debug; h++) {
+    for (int h = 0; h < 2 && !debug; h++) {   // h: 1 = B (right hand), 0 = Y
         DWORD& at = xr.clickAt[h];
-        bool click = GetBool(xr.btn[h ? kRClick : kLClick]);
+        bool click = GetBool(xr.btn[h ? kB : kY]);
         if (click) {
             if (!at) at = now;
             if (now - at > 350 && !xr.clickHeld[h]) {
                 xr.clickHeld[h] = true;
-                if (vehicle) { if (h == 1) w.presses = 1; }
-                else if (!w.open && t) WheelOpen(t, h);
+                if (h == 1) {
+                    if (vehicle) w.presses = 1;
+                    else if (!w.open && t) WheelOpen(t, 1);
+                }
             }
         } else {
             if (at && w.open && w.hand == h) WheelChoose();
@@ -1725,10 +1729,8 @@ static void UpdateSetup(XINPUT_GAMEPAD& p, const float grip[2], DWORD now)
 struct SettingItem { const wchar_t* sec; const wchar_t* key; const wchar_t* label; float def, step, lo, hi; };   // sec null: an action
 static const SettingItem kSettings[] = {
     { nullptr, L"@weapon", L"\x041D\x0430\x0441\x0442\x0440\x043E\x0439\x043A\x0430 \x043E\x0440\x0443\x0436\x0438\x044F: \x0445\x0432\x0430\x0442, \x0446\x0435\x0432\x044C\x0451, \x043B\x0438\x043D\x0437\x0430, \x043F\x043E\x0434\x0441\x0443\x043C\x043E\x043A", 0, 0, 0, 0 },   // ��������� ������: ����, �����, �����, ��������
-    { nullptr, L"@tpose", L"\x041A\x0430\x043B\x0438\x0431\x0440\x043E\x0432\x043A\x0430: \x0422-\x043F\x043E\x0437\x0430 (\x043C\x0430\x0441\x0448\x0442\x0430\x0431 \x043C\x0438\x0440\x0430 \x043F\x043E\x0434 \x0440\x043E\x0431\x043E\x0442\x0430)", 0, 0, 0, 0 },
     { nullptr, L"@camera", L"\x041F\x043E\x043B\x043E\x0436\x0435\x043D\x0438\x0435 \x043A\x0430\x043C\x0435\x0440\x044B \x043C\x0430\x0448\x0438\x043D\x044B (\x0442\x044F\x043D\x0443\x0442\x044C \x043C\x0438\x0440 \x0433\x0440\x0438\x043F\x043E\x043C)", 0, 0, 0, 0 },   // ����������: �-���� (������� ���� ��� ������)
-    { L"VR", L"AutoScale", L"\x041C\x0430\x0441\x0448\x0442\x0430\x0431 \x043C\x0438\x0440\x0430 \x043F\x043E\x0434 \x0440\x043E\x0431\x043E\x0442\x0430 (\x043F\x043E \x0422-\x043F\x043E\x0437\x0435)", 1, 1, 0, 1 },   // ������� ���� ��� ������ (�� �-����)
-    { L"VR", L"WorldScale", L"\x041C\x0430\x0441\x0448\x0442\x0430\x0431 \x043C\x0438\x0440\x0430 (\x0431\x0435\x0437 \x043A\x0430\x043B\x0438\x0431\x0440\x043E\x0432\x043A\x0438)", 200, 10, 100, 400 },   // ������� ���� (��� ����������)
+    { L"VR", L"WorldScale", L"\x041C\x0430\x0441\x0448\x0442\x0430\x0431 \x043C\x0438\x0440\x0430", 200, 10, 100, 400 },   // ������� ���� (��� ����������)
     { L"VR", L"FirstPersonEyeHeight", L"\x0412\x044B\x0441\x043E\x0442\x0430 \x0433\x043B\x0430\x0437", 150, 5, 50, 300 },   // ������ ����
     { L"VR", L"SyncEyeTime", L"\x041E\x0431\x0430 \x0433\x043B\x0430\x0437\x0430 \x2014 \x043E\x0434\x0438\x043D \x043C\x043E\x043C\x0435\x043D\x0442 \x0438\x0433\x0440\x044B", 1, 1, 0, 1 },   // ��� ����� � ���� ������ ����
     { L"VR", L"HandScale", L"\x0420\x0430\x0437\x043C\x0435\x0440 \x043A\x0438\x0441\x0442\x0435\x0439", 0.6f, 0.05f, 0.2f, 1.5f },   // ������ ������
