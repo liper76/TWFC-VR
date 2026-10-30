@@ -174,7 +174,8 @@ void IKSetFrame(int eye, const float headOffset[3], float bodyYaw, float headYaw
 bool IKPawnIsVehicle();                     // the player's current skeleton has no arms (vehicle form)
 void IKSetBelt(void* comp);                 // a component attached to the hips, placed each frame on the belt (or null)
 bool IKWeaponHasScope();                    // first person, holding a weapon from ScopeWeapons
-float CameraMoveYawDelta();                 // radians to rotate the left stick so movement follows the head
+float CameraVehicleSteer();                 // vehicle form: right stick (-1..1) that turns it towards the aim
+float CameraMoveYawDelta();                // radians to rotate the left stick so movement follows the head
 void CameraBaseOffset(float& forward, float& up);   // eye base relative to the pawn (Unreal units)
 bool CameraVehicleAim();                    // vehicle form: the weapon aims where the head looks
 float CameraAimHitMeters();                 // distance to where the game's aim trace hits (0 = unknown)
@@ -212,6 +213,7 @@ void GrenadeArm();                          // ... armed it (left trigger)
 void GrenadeRelease();                      // ... let go
 bool GrenadeHeld();                         // one in the left hand (or on its way)
 bool GrenadeWantPress();                    // press the game's grenade button now (once)
+bool GrenadeWeaponClass(const wchar_t* cls); // the thrown kinds: TnWeaponFlakGrenades, ...KamikazeMines, ...EmpGrenades
 unsigned IKMirrorBone(unsigned boneName);   // ik.cpp: the other side's bone name of the player's skeleton (0 = none)
 
 // ---- vr.cpp: stereo frame pairing ----
