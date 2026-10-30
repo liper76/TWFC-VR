@@ -1,0 +1,34 @@
+press START 150
+wait 1500
+press A 150
+wait 1500
+press START 150
+wait 1500
+press A 150
+wait 3000
+press START 150
+wait 2500
+press A 150
+wait 2500
+press A 150
+wait 2500
+press A 150
+wait 3000
+press A 150
+wait 3000
+press A 150
+wait 3000
+press A 150
+wait 4000
+press A 150
+wait 4000
+press A 150
+wait 30000
+press START 150
+wait 2000
+press A 150
+wait 2000
+press START 150
+wait 3000
+press A 150
+wait 2000

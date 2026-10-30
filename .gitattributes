@@ -1,0 +1,2 @@
+# Windows-only project: keep every file byte-for-byte (CRLF, cp1251/UTF-8 text as is)
+* -text

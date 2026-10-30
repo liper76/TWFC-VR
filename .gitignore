@@ -1,0 +1,39 @@
+# The repository lives in the game folder, but holds only the VR mod.
+# Everything is ignored by default; mod files are whitelisted below.
+/*
+
+!/.gitignore
+!/.gitattributes
+!/README.md
+!/VR-мод — инструкция.txt
+!/Запуск VR.bat
+!/Запуск VR (классика).bat
+
+# dgVoodoo settings the mod relies on (dgVoodoo itself is not ours)
+!/BinariesVR/
+/BinariesVR/*
+!/BinariesVR/dgVoodoo.conf
+
+# mod sources, tools and notes
+!/_vrmod/
+/_vrmod/backup/
+/_vrmod/build/
+/_vrmod/ACTIVE_SESSION.txt
+
+# build outputs and run artefacts
+*.dll
+*.exe
+*.obj
+*.lib
+*.exp
+*.pdb
+*.map
+*.log
+*.bmp
+*.png
+__pycache__/
+*.pyc
+
+# large or game-derived research dumps
+/_vrmod/tools/names_entries.txt
+/_vrmod/tools/*.cpp.txt
