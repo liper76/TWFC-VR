@@ -1,0 +1,426 @@
+// The player's weapons for the VR weapon wheel, and the melee weapon kept in a hand.
+//
+// Weapons: Pawn.InvManager's inventory chain. The wheel lists the ones the game's "next weapon" button cycles
+// through; choosing one presses that button until it is the weapon in hand (works whatever order the game uses).
+//
+// Melee weapon: the game has no "hold the melee weapon" state - a melee attack attaches the robot's melee meshes
+// (hammer, blade... and arm parts; they differ per robot) to the skeleton and detaches them when the attack ends.
+// To keep one in the hand, the mod starts a melee attack, notes which skeletal meshes got attached for it, and
+// refuses their detach (USkeletalMeshComponent::DetachComponent) until the weapon is put away; then it detaches
+// them itself. Each swing is a normal melee attack of the game.
+#include "common.h"
+#include "MinHook.h"
+
+namespace {
+
+const uintptr_t kMeshDetach = 0x1163B730;   // USkeletalMeshComponent::DetachComponent: eax = mesh, edi = component
+const uintptr_t kMeshAttach = 0x1163EF00;   // USkeletalMeshComponent::AttachComponent: __fastcall(mesh, comp, 4 more)
+const uintptr_t kGNames = 0x12B2F0F4;
+const int kPawnMesh = 0x3F4;
+const int kPawnInvManager = 0x424;
+const int kPawnWeapon = 0x428;
+const int kInvChain = 0x1C8;          // InventoryManager.InventoryChain / Inventory.Inventory (next)
+const int kWeaponGroup = 0x2A0;       // seen: 0 / 3 hand weapons, 1 vehicle weapon, 50 melee weapon (Megatron)
+const int kMeshAttachments = 0x260;   // TArray, 0x30 per entry: +0 component, +4 bone FName
+const int kCompScale = 0x178;
+const int kCompFlags = 0xF0;          // PrimitiveComponent bit flags
+const uint32_t kHiddenGame = 0x4;
+
+const wchar_t* NameOf(unsigned fname)
+{
+    uint8_t** names = *(uint8_t***)kGNames;
+    int count = *(int*)(kGNames + 4);
+    int i = (int)(fname >> 14);
+    if (!names || i <= 0 || i >= count || !names[i]) return nullptr;
+    return (const wchar_t*)(names[i] + 8);
+}
+
+// "TnWeaponAssaultRifle" -> "Assault Rifle"
+void DisplayName(const wchar_t* cls, wchar_t* out, size_t n)
+{
+    const wchar_t* s = cls;
+    if (!wcsncmp(s, L"TnWeapon", 8)) s += 8;
+    size_t k = 0;
+    for (size_t i = 0; s[i] && k + 2 < n; i++) {
+        if (i && iswupper(s[i]) && !iswupper(s[i - 1])) out[k++] = L' ';
+        out[k++] = s[i];
+    }
+    out[k] = 0;
+}
+
+std::mutex g_listMutex;
+WeaponList g_list;
+void* g_listWeapon[8];               // game objects behind g_list (game thread)
+void* g_handWeapons[16];             // weapons seen in hand in robot form (the "next weapon" cycle)
+void* g_vehicleWeapons[16];          // weapons seen in hand in vehicle form
+void* g_unreachable[16];             // weapons the "next weapon" button did not reach
+void* g_switchStart;                 // weapon in hand when the switch began
+void* g_pawn;
+uint8_t* g_mesh;
+
+// weapon switching
+void* volatile g_want;               // weapon to switch to (game thread)
+int g_tries;
+DWORD g_pressAt;
+void* g_pressFrom;
+volatile long g_pressNext, g_pressMelee;   // button presses wanted by the game thread (read by VR input)
+
+// melee weapon in a hand
+volatile long g_meleeHand = -1;      // asked for
+volatile long g_meleeHeld = -1;      // actually held
+enum { kIdle, kEquipping, kHolding } g_meleeState;
+DWORD g_meleeStart, g_meleeFirst;
+int g_meleeTry;
+uint8_t* g_kept[8];                  // the melee meshes kept attached
+unsigned g_keptBone[8];              // their original bones
+int g_keptCount;
+struct Seen { uint8_t* comp; DWORD since; } g_seen[32];
+int g_seenCount;
+volatile bool g_keepFlag;            // HookDetach scratch (game thread only)
+void* g_origDetach;
+
+bool g_keptAnyWeaponBone;            // one of them hangs on a weapon bone (that one is the weapon)
+
+bool IsWeaponBone(unsigned bone)
+{
+    const wchar_t* n = NameOf(bone);
+    return n && (wcsstr(n, L"Wpn") || wcsstr(n, L"Weapon"));
+}
+
+bool Contains(void* const* arr, int n, void* v) { for (int i = 0; i < n; i++) if (arr[i] == v) return true; return false; }
+void Remember(void** arr, void* v)
+{
+    if (Contains(arr, 16, v)) return;
+    for (int i = 0; i < 16; i++) if (!arr[i]) { arr[i] = v; return; }
+}
+
+// While held, the game may not detach the kept meshes (it does so from several places when an attack ends); the mod
+// detaches them itself through the original function.
+bool __stdcall KeepAttached(uint8_t* mesh, uint8_t* comp, uintptr_t ret)
+{
+    if (g_meleeState != kHolding || mesh != g_mesh || !Contains((void* const*)g_kept, g_keptCount, comp)) return false;
+    if (g_cfg.logFps) Log("weapons: detach of %p from %08X refused", comp, (unsigned)ret);
+    return true;
+}
+
+__declspec(naked) void HookDetach()
+{
+    __asm {
+        pushad
+        push dword ptr [esp + 32]   // return address of this call
+        push edi
+        push eax
+        call KeepAttached
+        mov g_keepFlag, al
+        popad
+        cmp g_keepFlag, 0
+        jne keep
+        jmp g_origDetach
+    keep:
+        ret
+    }
+}
+
+void CallDetach(uint8_t* mesh, uint8_t* comp)
+{
+    void* fn = g_origDetach;
+    __asm {
+        mov eax, mesh
+        mov edi, comp
+        call fn
+    }
+}
+
+bool IsAttached(uint8_t* mesh, uint8_t* comp)
+{
+    uint8_t* att = *(uint8_t**)(mesh + kMeshAttachments);
+    int n = *(int*)(mesh + kMeshAttachments + 4);
+    for (int i = 0; att && i < n && i < 64; i++) if (*(uint8_t**)(att + i * 0x30) == comp) return true;
+    return false;
+}
+
+// The next swing attaches the meshes again: they are still attached (kept), so that is skipped - attaching twice
+// breaks the game.
+typedef void(__fastcall* AttachFn)(uint8_t* mesh, uint8_t* comp, void* bone, void* loc, void* rot, void* scale);
+AttachFn g_origAttach;
+
+void __fastcall HookAttach(uint8_t* mesh, uint8_t* comp, void* bone, void* loc, void* rot, void* scale)
+{
+    if (g_meleeState == kHolding && mesh == g_mesh && Contains((void* const*)g_kept, g_keptCount, comp)) {
+        bool attached = false;
+        __try { attached = IsAttached(mesh, comp); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        if (attached) return;
+    }
+    g_origAttach(mesh, comp, bone, loc, rot, scale);
+}
+
+void ReleaseMelee(bool detach)
+{
+    if (g_meleeState == kHolding && detach && g_mesh) {
+        for (int k = 0; k < g_keptCount; k++) {
+            __try {
+                *(float*)(g_kept[k] + kCompScale) = 1.0f;
+                for (int i = 0; i < 4 && IsAttached(g_mesh, g_kept[k]); i++) CallDetach(g_mesh, g_kept[k]);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        }
+        Log("weapons: melee weapon put away (%d meshes)", g_keptCount);
+    }
+    g_meleeState = kIdle;
+    g_keptCount = 0;
+    g_meleeHeld = -1;
+}
+
+// Skeletal meshes attached to the player's mesh, with how long each has been attached.
+void TrackAttachments(uint8_t* mesh, DWORD now)
+{
+    Seen cur[32];
+    int n = 0;
+    uint8_t* att = *(uint8_t**)(mesh + kMeshAttachments);
+    int count = *(int*)(mesh + kMeshAttachments + 4);
+    for (int i = 0; att && i < count && i < 64 && n < 32; i++) {
+        uint8_t* c = *(uint8_t**)(att + i * 0x30);
+        if (!c || *(uintptr_t*)c != *(uintptr_t*)mesh) continue;   // skeletal meshes only (not particles, lights)
+        DWORD since = now;
+        for (int j = 0; j < g_seenCount; j++) if (g_seen[j].comp == c) since = g_seen[j].since;
+        cur[n++] = { c, since };
+    }
+    memcpy(g_seen, cur, sizeof(cur));
+    g_seenCount = n;
+}
+
+void UpdateMelee(uint8_t* mesh, bool vehicle, DWORD now)
+{
+    if (vehicle) g_meleeHand = -1;   // transforming puts it away (and does not take it out again by itself)
+    int want = g_meleeHand;
+    if (want < 0) {
+        if (g_meleeState != kIdle) ReleaseMelee(true);
+        return;
+    }
+    if (g_meleeState == kIdle) {
+        // start a melee attack: its meshes get attached
+        g_meleeState = kEquipping;
+        g_meleeStart = now;
+        g_meleeFirst = 0;
+        g_meleeTry = 0;
+        g_keptCount = 0;
+        g_keptAnyWeaponBone = false;
+        g_pressMelee = 1;
+        return;
+    }
+    if (g_meleeState == kEquipping) {
+        for (int i = 0; i < g_seenCount && g_keptCount < 8; i++) {
+            const Seen& s = g_seen[i];
+            if (s.since + 30 < g_meleeStart || Contains((void* const*)g_kept, g_keptCount, s.comp)) continue;
+            g_kept[g_keptCount] = s.comp;
+            g_keptBone[g_keptCount++] = 0;
+            if (!g_meleeFirst) g_meleeFirst = now;
+        }
+        if (g_meleeFirst && now - g_meleeFirst > 150) {
+            for (int k = 0; k < g_keptCount; k++) {
+                uint8_t* m = *(uint8_t**)(g_kept[k] + 0x1BC);
+                const wchar_t* nm = m ? NameOf(*(unsigned*)(m + 4)) : nullptr;
+                Log("weapons: keeping melee mesh %p %ls", g_kept[k], nm ? nm : L"?");
+            }
+            g_meleeState = kHolding;
+        } else if (!g_meleeFirst && now - g_meleeStart > 1500) {
+            if (++g_meleeTry >= 2) {
+                Log("weapons: no melee weapon appeared - giving up");
+                g_meleeHand = -1;
+                g_meleeState = kIdle;
+                return;
+            }
+            g_meleeStart = now;
+            g_pressMelee = 1;
+        }
+        return;
+    }
+    // holding: the meshes go to the chosen hand's side of the skeleton and take the weapon size
+    uint8_t* att = *(uint8_t**)(mesh + kMeshAttachments);
+    int count = *(int*)(mesh + kMeshAttachments + 4);
+    for (int i = 0; att && i < count && i < 64; i++) {
+        uint8_t* e = att + i * 0x30;
+        uint8_t* c = *(uint8_t**)e;
+        for (int k = 0; k < g_keptCount; k++) {
+            if (c != g_kept[k]) continue;
+            unsigned& bone = *(unsigned*)(e + 4);
+            if (!g_keptBone[k]) {
+                g_keptBone[k] = bone;
+                if (IsWeaponBone(bone)) g_keptAnyWeaponBone = true;
+            }
+            unsigned target = g_keptBone[k];
+            if (want == 0) { unsigned m = IKMirrorBone(target); if (m) target = m; }
+            bone = target;
+            // only the weapon itself is shown (the mesh on a weapon bone); the rest of the attack set - arm parts
+            // that would cover the view right in front of the eyes - is hidden
+            bool weapon = IsWeaponBone(g_keptBone[k]) || !g_keptAnyWeaponBone;
+            // world size = WeaponScale, whatever the scale of the bone it hangs on (the gun hand is shrunk)
+            float* scale = (float*)(c + kCompScale);
+            const float* l2w = (const float*)(c + 0x50);
+            float world = sqrtf(l2w[0] * l2w[0] + l2w[1] * l2w[1] + l2w[2] * l2w[2]);
+            float parent = *scale > 1e-4f ? world / *scale : 1.0f;
+            *scale = weapon ? g_cfg.weaponScale / std::min(std::max(parent, 0.05f), 20.0f) : 0.001f;
+            // after each attack the game hides the weapon (PrimitiveComponent HiddenGame, flags +0xF0 bit 2) and the
+            // engine drops it from the scene: kept visible while held (the engine re-adds it by itself)
+            if (weapon) *(uint32_t*)(c + kCompFlags) &= ~kHiddenGame;
+        }
+    }
+    g_meleeHeld = want;
+}
+
+// A melee attack makes the robot lunge at the target; in VR you swing where you stand. During the attack the
+// robot moves no faster than walking (horizontally), so the lunge is gone but you can still walk.
+volatile DWORD g_strikeAt;
+bool g_prevValid;
+float g_prevPos[2];
+LARGE_INTEGER g_prevT;
+
+void HoldInPlace(uint8_t* pawn, DWORD now)
+{
+    float* loc = (float*)(pawn + 0xD8);   // Actor.Location
+    LARGE_INTEGER t, f;
+    QueryPerformanceCounter(&t);
+    QueryPerformanceFrequency(&f);
+    if (g_strikeAt && now - g_strikeAt < 750 && g_prevValid) {
+        float dt = fmaxf((float)(t.QuadPart - g_prevT.QuadPart) / f.QuadPart, 0.001f);
+        float dx = loc[0] - g_prevPos[0], dy = loc[1] - g_prevPos[1];
+        float d = sqrtf(dx * dx + dy * dy), maxD = 650.0f * dt;   // ~ running speed (Unreal units per second)
+        if (d > maxD && d < 2000.0f) {   // (a jump of more than that is a teleport: leave it)
+            loc[0] = g_prevPos[0] + dx * maxD / d;
+            loc[1] = g_prevPos[1] + dy * maxD / d;
+        }
+    }
+    g_prevPos[0] = loc[0];
+    g_prevPos[1] = loc[1];
+    g_prevT = t;
+    g_prevValid = true;
+}
+
+void UpdateList(uint8_t* pawn, bool vehicle, DWORD now)
+{
+    void* cur = *(void**)(pawn + kPawnWeapon);
+    if (cur) Remember(vehicle ? g_vehicleWeapons : g_handWeapons, cur);
+    uint8_t* inv = *(uint8_t**)(pawn + kPawnInvManager);
+    WeaponList l;
+    void* ptrs[8] = {};
+    uint8_t* w = inv ? *(uint8_t**)(inv + kInvChain) : nullptr;
+    for (int guard = 0; w && guard < 16 && l.count < 8; guard++, w = *(uint8_t**)(w + kInvChain)) {
+        bool hand = Contains(g_handWeapons, 16, w);
+        int group = *(int*)(w + kWeaponGroup);
+        const wchar_t* cls = NameOf(*(unsigned*)(w + 4));
+        if (!cls) continue;
+        bool guessVehicle = group == 1 || wcsstr(cls, L"Vehicle") || wcsstr(cls, L"Plane");
+        // grenades are thrown with their own button, the "next weapon" button never reaches them
+        bool grenade = wcsstr(cls, L"Grenade") && !wcsstr(cls, L"Launcher");
+        if (grenade || Contains(g_unreachable, 16, w)) continue;
+        if (!hand && (Contains(g_vehicleWeapons, 16, w) || guessVehicle || group == 50)) continue;
+        if (w == cur) l.current = l.count;
+        DisplayName(cls, l.name[l.count], 40);
+        ptrs[l.count++] = w;
+    }
+    memcpy(g_listWeapon, ptrs, sizeof(ptrs));
+    std::lock_guard<std::mutex> lock(g_listMutex);
+    g_list = l;
+}
+
+void UpdateSwitch(uint8_t* pawn, DWORD now)
+{
+    void* want = g_want;
+    if (!want) return;
+    void* cur = *(void**)(pawn + kPawnWeapon);
+    if (cur == want) { g_want = nullptr; return; }
+    // back where we started (a whole round of "next weapon") or out of tries: that weapon cannot be reached this
+    // way - stop, and leave it out of the wheel from now on
+    if (g_tries <= 0 || (g_pressAt && cur == g_switchStart && cur != g_pressFrom)) {
+        Remember(g_unreachable, want);
+        Log("weapons: cannot switch to that weapon - left out of the wheel");
+        g_want = nullptr;
+        return;
+    }
+    if (!g_pressAt) g_switchStart = cur;
+    // one press at a time: wait until the weapon has changed (or a second has passed)
+    if (g_pressAt && cur == g_pressFrom && now - g_pressAt < 1200) return;
+    if (g_pressAt && now - g_pressAt < 250) return;
+    g_pressNext = 1;
+    g_pressAt = now;
+    g_pressFrom = cur;
+    g_tries--;
+}
+
+}   // namespace
+
+void WeaponsInstall()
+{
+    bool ok = MH_CreateHook((void*)kMeshAttach, (void*)HookAttach, (void**)&g_origAttach) == MH_OK &&
+              MH_EnableHook((void*)kMeshAttach) == MH_OK;
+    // without the attach guard, keeping the meshes would break the next swing: no melee holding then
+    if (ok && MH_CreateHook((void*)kMeshDetach, (void*)HookDetach, &g_origDetach) == MH_OK && MH_EnableHook((void*)kMeshDetach) == MH_OK)
+        Log("weapons: attach/detach hooks installed");
+    else
+        Log("weapons: attach/detach hooks FAILED");
+}
+
+void WeaponsUpdate(void* pawnPtr)
+{
+    uint8_t* pawn = (uint8_t*)pawnPtr;
+    DWORD now = GetTickCount();
+    __try {
+        uint8_t* mesh = pawn ? *(uint8_t**)(pawn + kPawnMesh) : nullptr;
+        if (pawn != g_pawn || mesh != g_mesh) {
+            // out of first person (cutscene, menu): put the melee weapon away; a new pawn or mesh has new meshes
+            // (the old ones may be gone), so nothing to detach then
+            ReleaseMelee(!pawn);
+            g_pawn = pawn;
+            g_mesh = mesh;
+            g_seenCount = 0;
+            if (!pawn) { g_meleeHand = -1; g_want = nullptr; }
+        }
+        if (!pawn || !mesh || !g_origDetach) return;
+        bool vehicle = IKPawnIsVehicle();
+        TrackAttachments(mesh, now);
+        UpdateMelee(mesh, vehicle, now);
+        if (!vehicle) HoldInPlace(pawn, now);
+        static DWORD listAt;
+        if (now - listAt > 200) { listAt = now; UpdateList(pawn, vehicle, now); }
+        UpdateSwitch(pawn, now);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_pawn = nullptr;
+        g_mesh = nullptr;
+        g_meleeState = kIdle;
+        g_keptCount = 0;
+        g_meleeHeld = -1;
+    }
+}
+
+void WeaponsGetList(WeaponList& out)
+{
+    std::lock_guard<std::mutex> lock(g_listMutex);
+    out = g_list;
+}
+
+void WeaponsSelect(int index)
+{
+    if (index < 0 || index >= 8 || !g_listWeapon[index]) return;
+    g_tries = 5;
+    g_pressAt = 0;
+    g_want = g_listWeapon[index];
+}
+
+void WeaponsSetMeleeHand(int hand)
+{
+    if (hand != g_meleeHand) Log("weapons: melee weapon %s", hand < 0 ? "put away" : hand ? "to the right hand" : "to the left hand");
+    g_meleeHand = hand;
+}
+
+int WeaponsMeleeHand() { return g_meleeHand; }
+void WeaponsStrike() { g_strikeAt = GetTickCount(); }
+int WeaponsMeleeHeld() { return g_meleeHeld; }
+
+bool WeaponsWantPress(bool melee)
+{
+    return InterlockedExchange(melee ? &g_pressMelee : &g_pressNext, 0) != 0;
+}
+
+bool WeaponsIsMeleeComp(void* comp)
+{
+    return g_meleeState != kIdle && Contains((void* const*)g_kept, g_keptCount, comp);
+}
