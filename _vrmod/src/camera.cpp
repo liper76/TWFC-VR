@@ -17,7 +17,7 @@ static Vec3f g_latchPawn;        // pawn position when the eye pair was latched 
 static bool g_latchValid;
 static volatile float g_turnInput;   // right stick X (-1..1) seen by the XInput proxy
 float g_debugViewOffset[4];          // debug.cpp "viewoffset"
-static Vec3f g_latchHead;            // head position in the room (body frame, horizontal) latched for the eye pair
+static Vec3f g_latchHead;            // head position in the room (body frame; z: height vs the start) latched for the eye pair
 static float g_latchHeadYaw;         // head yaw relative to the body (radians) latched for the eye pair
 static float g_moveYawDelta;         // head yaw - aim yaw (radians), for the left stick
 static float g_vehicleSteer;         // vehicle form: right stick that turns the vehicle towards the aim (-1..1)
@@ -246,7 +246,7 @@ void CameraOnUpdate(TPOV* pov, void* viewTarget, void* pc, float dt)
         // where the head is in the room (horizontal, body frame) and which way it looks: the drawn body is kept
         // under the head and turned with it
         Vec3 head = XrToUE({ eye.px, eye.py, eye.pz });
-        g_latchHead = { head.x * g_cfg.worldScale, head.y * g_cfg.worldScale, 0.0f };
+        g_latchHead = { head.x * g_cfg.worldScale, head.y * g_cfg.worldScale, head.z * g_cfg.worldScale };
         Vec3 look = XrRotToUE(QuatToMat(eye.qx, eye.qy, eye.qz, eye.qw)).col(0);
         g_latchHeadYaw = atan2f(look.y, look.x);
         g_latchValid = true;
@@ -266,7 +266,7 @@ void CameraOnUpdate(TPOV* pov, void* viewTarget, void* pc, float dt)
             g_latchPawn = pawn;
         }
     }
-    float headOffset[3] = { g_latchHead.x, g_latchHead.y, 0.0f };
+    float headOffset[3] = { g_latchHead.x, g_latchHead.y, g_latchHead.z };   // (z: crouching bends the legs)
     // the skeleton is posed before the next view: with both eyes per frame that is always a new pair (eye 1 ->
     // the next pose is a left-eye pose)
     IKSetFrame(pair ? 1 : eye.eye, headOffset, g_latchYaw * kUURotToRad, g_latchHeadYaw);

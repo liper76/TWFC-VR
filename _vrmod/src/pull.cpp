@@ -41,7 +41,7 @@ float g_vel[3];             // hand velocity relative to the body (world axes, U
 
 bool g_debugAim, g_debugFlick;
 
-struct Flight { uint8_t* actor; Vec3f from, home, landing; bool factory, weapon; int hand; float t, duration; DWORD landedAt; bool landed, checked, movePawn; } g_fly;
+struct Flight { uint8_t* actor; Vec3f from, home, landing; bool factory, weapon; int hand; float t, duration; DWORD landedAt, retryAt; bool landed, checked, movePawn; } g_fly;
 
 const wchar_t* NameOf(unsigned fname)
 {
@@ -166,8 +166,10 @@ void Fly(uint8_t* pawn, float dt, DWORD now)
         if (g_fly.t == 0.0f) g_fly.duration = 0.45f + fminf(dist / 3500.0f, 0.6f);
         g_fly.t = fminf(g_fly.t + dt / g_fly.duration, 1.0f);
         float t = g_fly.t, s = t * t * t * (t * (t * 6 - 15) + 10);   // smootherstep: eases out of its place and into the hand
+        // a low arc that is gone well before the hand (a high one came in over the head)
+        float arc = t < 0.7f ? sinf(t / 0.7f * 3.14159265f) : 0.0f;
         Vec3f p = { g_fly.from.x + (aim.x - g_fly.from.x) * s, g_fly.from.y + (aim.y - g_fly.from.y) * s,
-                    g_fly.from.z + (aim.z - g_fly.from.z) * s + sinf(t * 3.14159265f) * fminf(dist * 0.12f, 90.0f) };
+                    g_fly.from.z + (aim.z - g_fly.from.z) * s + arc * fminf(dist * 0.05f, 35.0f) };
         if (t < 1.0f) MoveActor(g_fly.actor, p, true);
         else {
             // into the pawn without the checks (with them the engine pushed it out - up, above the head), then the
@@ -193,6 +195,18 @@ void Fly(uint8_t* pawn, float dt, DWORD now)
         bool taken = !g_fly.factory ? !Listed(g_fly.actor) : !PickupShown(g_fly.actor);
         DWORD wait = g_fly.weapon ? 2000 : 800;
         if (!taken && now - g_fly.landedAt < wait) {
+            // a crate or health not taken (yet): the touch is tried again, and meanwhile it stays in the hand - not
+            // inside the body. (Weapons stay on the pawn: the held interact button takes what it touches.)
+            float hp[3], hf[3], hr[3];
+            if (g_fly.factory && !g_fly.weapon && g_fly.hand >= 0 && IKHandWorld(g_fly.hand, hp, hf, hr)) {
+                if (now - g_fly.retryAt > 150) {
+                    g_fly.retryAt = now;
+                    MoveActor(g_fly.actor, to, true);
+                    MoveActor(pawn, to, false);
+                }
+                if (PickupShown(g_fly.actor))
+                    MoveActor(g_fly.actor, { hp[0] + hf[0] * 15.0f, hp[1] + hf[1] * 15.0f, hp[2] + hf[2] * 15.0f }, true);
+            }
             float dx = g_fly.landing.x - to.x, dy = g_fly.landing.y - to.y;
             if (dx * dx + dy * dy < 450.0f * 450.0f) return;
         }

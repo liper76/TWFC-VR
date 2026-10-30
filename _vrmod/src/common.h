@@ -194,7 +194,7 @@ void WeaponsSelect(int index);              // switch to that weapon of the list
 void WeaponsSetMeleeHand(int hand);         // -1 = put away, 0 = left, 1 = right hand holds the melee weapon
 int WeaponsMeleeHand();                     // the hand asked for (-1 = none)
 int WeaponsMeleeHeld();                     // the hand the melee weapon is in right now (-1 = none)
-void WeaponsStrike();                       // VR input: a melee attack starts now (the robot is held in place)
+void WeaponsStrike(int hand);               // VR input: a melee attack by that hand starts now (the robot is held in place)
 bool WeaponsWantPress(bool melee);          // VR input: the game's next-weapon (false) / melee (true) button is wanted now
 bool WeaponsIsMeleeComp(void* comp);        // ik.cpp: that component is the melee weapon kept in a hand
 

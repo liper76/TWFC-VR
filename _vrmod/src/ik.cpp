@@ -182,12 +182,13 @@ struct Skeleton {
     int parent[kMaxBones];
     Pose ref[kMaxBones];                 // bind pose relative to the parent
     bool bindPose[kMaxBones];            // spine/clavicles: kept in the bind pose
+    bool armour[kMaxBones];              // armour plates on the upper arm and forearm (*Robo*): kept in the bind pose
     uint8_t group[kMaxBones];            // 1 = torso (hidden unless ShowBody=2), 2 = waist/legs (hidden with ShowBody=0)
     Arm arm[2];
     int fingers[2][4][2];                // per hand: index, middle, ring, thumb - base and tip bone (-1: none)
     bool armsOk = false;                 // false: no arms (vehicle form)
     int head = -1, hips = -1;
-    int thigh[2] = { -1, -1 }, knee[2] = { -1, -1 };
+    int thigh[2] = { -1, -1 }, knee[2] = { -1, -1 }, ankle[2] = { -1, -1 };
 } g_sk;
 
 bool Starts(const wchar_t* s, const wchar_t* p) { return !wcsncmp(s, p, wcslen(p)); }
@@ -202,7 +203,7 @@ bool ResolveSkeleton(uint8_t* mesh)
     if (!bones || n <= 0 || n > kMaxBones) return false;
     k.n = n;
     k.head = k.hips = -1;
-    for (int s = 0; s < 2; s++) { k.arm[s] = { -1, -1, -1, -1, -1, -1 }; k.thigh[s] = k.knee[s] = -1; }
+    for (int s = 0; s < 2; s++) { k.arm[s] = { -1, -1, -1, -1, -1, -1 }; k.thigh[s] = k.knee[s] = k.ankle[s] = -1; }
     memset(k.fingers, 0xFF, sizeof(k.fingers));
     static const wchar_t* fingerNames[4] = { L"Finger02_Index0", L"Finger03_Middle0", L"Finger04_Ring0", L"Finger01_Thumb0" };
     static const wchar_t* side[2] = { L"L_", L"R_" };
@@ -246,7 +247,17 @@ bool ResolveSkeleton(uint8_t* mesh)
                     k.fingers[s][f][r[wcslen(fingerNames[f])] - L'1'] = i;
             if (Starts(r, L"Leg01_Thigh_XB")) k.thigh[s] = i;
             if (Starts(r, L"Leg02_Knee_XB")) k.knee[s] = i;
+            if (Starts(r, L"Leg03_Ankle_XB")) k.ankle[s] = i;
         }
+    }
+    // the arm armour: the game's weapon animations fold it away (the forearm looked bare with an empty hand or
+    // some guns, until an attack unfolded it)
+    for (int i = 0; i < n; i++) {
+        k.armour[i] = false;
+        int p = k.parent[i];
+        const wchar_t* nm = NameOf(*(const unsigned*)(bones + i * kMeshBoneSize));
+        if (p < 0 || !nm || !wcsstr(nm, L"Robo")) continue;
+        for (int s = 0; s < 2; s++) if (p == k.arm[s].shoulder || p == k.arm[s].elbow) k.armour[i] = true;
     }
     k.armsOk = true;
     for (int s = 0; s < 2; s++) {
@@ -458,6 +469,30 @@ void SolveFreeArm(int side, Pose* pose, Vec3 target, const Vec3 ctrl[3])
     HandAxesFor(side, pose, ctrl, want);
     ReachWrist(side, pose, target, ctrl);
     SetAxes(pose[a.hand], want, g_cfg.handScale);
+}
+
+// A leg of a crouching body: the hip went down, the ankle stays at `ankle` (its orientation too: the foot stays
+// flat) and the knee bends forward.
+void CrouchLeg(int side, Pose* pose, Vec3 ankle, Vec3 fwd, bool* driven)
+{
+    int t = g_sk.thigh[side], k = g_sk.knee[side], a = g_sk.ankle[side];
+    if (g_sk.parent[k] != t || g_sk.parent[a] != k) return;
+    Vec3 T = pose[t].pos, K = pose[k].pos, A = pose[a].pos;
+    float l1 = Len(Sub(K, T)), l2 = Len(Sub(A, K));
+    Vec3 dir = Norm(Sub(ankle, T));
+    float dist = fminf(fmaxf(Len(Sub(ankle, T)), fabsf(l1 - l2) + 0.5f), l1 + l2 - 0.05f);
+    Vec3 perp = Sub(fwd, Scale(dir, Dot(fwd, dir)));
+    if (Len(perp) < 1e-3f) return;
+    perp = Norm(perp);
+    float cosA = fminf(fmaxf((l1 * l1 + dist * dist - l2 * l2) / (2.0f * l1 * dist), -1.0f), 1.0f);
+    Vec3 K2 = Add(T, Scale(Add(Scale(dir, cosA), Scale(perp, sqrtf(1.0f - cosA * cosA))), l1));
+    Vec3 A2 = Add(T, Scale(dir, dist));
+    Mat3 r1 = RotFromTo(Sub(K, T), Sub(K2, T));
+    RotatePose(pose[t], r1);
+    RotatePose(pose[k], Mul(RotFromTo(Mul(r1, Sub(A, K)), Sub(A2, K2)), r1));
+    pose[k].pos = K2;
+    pose[a].pos = A2;
+    driven[t] = driven[k] = driven[a] = true;
 }
 
 // Rotation by `angle` (radians) about the unit axis.
@@ -711,13 +746,23 @@ void OnSkelPose(uint8_t* comp)
         }
         // the whole body turns to where the head looks (the game turns the pawn with the aim) and stays under the
         // head when you walk around the room
+        float crouch = 0.0f;   // how far the body went down (component units)
         {
             float meshYaw = atan2f(compToWorld.ax[0].y, compToWorld.ax[0].x);
             float turn = remainderf(g_bodyYaw + g_headYaw - meshYaw, 6.2831853f);
             Vec3 shift = {};
             if (g_cfg.bodyFollowHead) {
-                Vec3 w = YawRotate(g_headOffset, g_bodyYaw);
+                Vec3 w = YawRotate({ g_headOffset.x, g_headOffset.y, 0.0f }, g_bodyYaw);
                 shift = DirTo(worldToComp, w);
+            }
+            // crouching (the head lower than at the start): the body goes down with the eyes - the feet stay on
+            // the floor and the knees bend (below)
+            float drop = -g_headOffset.z - 0.05f * g_cfg.worldScale;
+            if (drop > 0.0f && g_sk.ankle[0] >= 0 && g_sk.ankle[1] >= 0 && g_sk.knee[0] >= 0 && g_sk.knee[1] >= 0 && g_sk.thigh[0] >= 0 && g_sk.thigh[1] >= 0) {
+                const int t = g_sk.thigh[0], k = g_sk.knee[0], a = g_sk.ankle[0];
+                float leg = Len(Sub(pose[k].pos, pose[t].pos)) + Len(Sub(pose[a].pos, pose[k].pos));
+                crouch = fminf(drop / fmaxf(Len(compToWorld.ax[0]), 1e-3f), leg * 0.6f);
+                shift = Add(shift, Scale(Norm(DirTo(worldToComp, { 0, 0, 1 })), -crouch));
             }
             for (int i = 0; i < n; i++) {
                 pose[i].pos = Add(YawRotate(pose[i].pos, turn), shift);
@@ -726,6 +771,12 @@ void OnSkelPose(uint8_t* comp)
             }
         }
         for (int i = 0; i < n; i++) anim[i] = pose[i];   // from here on: the body as the arms start from
+        if (crouch > 0.0f) {
+            Vec3 up = Norm(DirTo(worldToComp, { 0, 0, 1 }));
+            float yaw = g_bodyYaw + g_headYaw;
+            Vec3 fwd = Norm(DirTo(worldToComp, { cosf(yaw), sinf(yaw), 0 }));
+            for (int s = 0; s < 2; s++) CrouchLeg(s, pose, Add(pose[g_sk.ankle[s]].pos, Scale(up, crouch)), fwd, driven);
+        }
 
         // the robot's arm span (wrist to wrist, arms out: shoulders apart + both arms' bone lengths - rigid, so any
         // pose gives it), in world units; with the player's own span (T-pose in the setup) it sets the world's scale:
@@ -836,9 +887,12 @@ void OnSkelPose(uint8_t* comp)
         // head always (the eyes are inside it), the torso unless ShowBody=2, the legs too with ShowBody=0
         static bool changed[kMaxBones];   // pose differs from `anim`: the children follow it
         for (int i = 0; i < n; i++) {
-            changed[i] = driven[i];
-            if (driven[i]) continue;
             int p = g_sk.parent[i];
+            // the clavicles keep their bind pose even though the torso they hang on is hidden (collapsed with it,
+            // the shoulders and the top of the upper arms were gone)
+            changed[i] = driven[i] || (g_sk.bindPose[i] && g_sk.group[i] == 0);
+            if (changed[i]) continue;
+            if (g_sk.armour[i] && p >= 0) { pose[i] = Compose(g_sk.ref[i], pose[p]); changed[i] = true; continue; }
             if (p >= 0 && changed[p]) { pose[i] = Compose(Compose(anim[i], Inverse(anim[p])), pose[p]); changed[i] = true; }
             bool hide = i == g_sk.head || (g_sk.group[i] == 1 && g_cfg.showBody < 2) || (g_sk.group[i] == 2 && g_cfg.showBody == 0);
             if (hide) { for (auto& a : pose[i].ax) a = Scale(a, 0.01f); changed[i] = true; }

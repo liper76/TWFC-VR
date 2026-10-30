@@ -331,7 +331,7 @@ static DWORD WINAPI PressRelayThread(LPVOID)
             XINPUT_GAMEPAD p = {};
             p.wButtons = melee ? XINPUT_GAMEPAD_RIGHT_THUMB : XINPUT_GAMEPAD_Y;
             Log("debug: relay press %s", melee ? "RS" : "Y");
-            if (melee) WeaponsStrike();
+            if (melee) WeaponsStrike(1);
             SetPad(p, true);
             Sleep(100);
             SetPad({}, false);
