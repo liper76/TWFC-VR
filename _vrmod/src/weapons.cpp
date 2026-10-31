@@ -258,7 +258,7 @@ void UpdateMelee(uint8_t* mesh, bool vehicle, DWORD now)
             // only the weapon itself is shown (the mesh on a weapon bone); the rest of the attack set - arm parts
             // that would cover the view right in front of the eyes - is hidden
             bool weapon = IsWeaponBone(g_keptBone[k]) || !g_keptAnyWeaponBone;
-            // world size = WeaponScale, whatever the scale of the bone it hangs on (the gun hand is shrunk)
+            // world size = WeaponScale, whatever the scale of the bone it hangs on (the hand may be resized)
             float* scale = (float*)(c + kCompScale);
             const float* l2w = (const float*)(c + 0x50);
             float world = sqrtf(l2w[0] * l2w[0] + l2w[1] * l2w[1] + l2w[2] * l2w[2]);
