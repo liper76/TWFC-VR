@@ -36,11 +36,11 @@ CONTROLS (main mode; the buttons work like an Xbox gamepad)
   Left trigger .................... as in the game: precise aim / the weapon's second action (detonating grenades);
                                     in vehicle form - boost
   Y ............................... main ability (RB), at once, held while you hold Y
-  B: short press .................. second ability (LB). Grenades are taken from the belt with the grip (no button)
+  B: short press .................. the game's B: throws a grenade (and whatever else the game has on B); grenades also from the belt with the grip
   B: hold 0.35 s .................. the right hand's WEAPON WHEEL (like Half-Life: Alyx): point the hand at an item
                                     and release B. Items: your weapons / "Empty hand". (The grips do not open the
                                     wheel - they only grab.) In a vehicle, holding B switches the vehicle's weapon.
-  Left stick click ................ transform. The right stick click does nothing.
+  Left stick click ................ transform. Right stick click: second ability (LB).
                                     Empty right hand: the gun is put away and does not fire, the hand is free
                                     (grenades from the belt, pulling, fingers); its position on the controller
                                     is its own, set in "Weapon setup" while the hand is empty (EmptyGripR)

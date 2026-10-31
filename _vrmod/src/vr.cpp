@@ -96,7 +96,12 @@ float4 PS(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         bool grey = hi - lo < 0.3 * hi + 0.02;
         bool red = c.r > 0.05 && c.r >= hi - 0.01 && abs(c.g - c.b) < 0.2 * c.r + 0.03;
         float r = length(uv - 0.5);
-        if (scope < 1.5 && ((grey && r < maskRadius) || (red && r < 0.065))) { c = 0; a = 0; }
+        // spread wide (jumping, firing) the red crosshair's marks leave that circle: they are point-symmetric
+        // about the centre, an enemy's marker is not - a red pixel with red opposite it is the crosshair
+        float3 m = src.Sample(smp, 1.0 - uv).rgb;
+        float mhi = max(m.r, max(m.g, m.b));
+        bool mirrored = red && r < 0.35 && m.r > 0.05 && m.r >= mhi - 0.01 && abs(m.g - m.b) < 0.2 * m.r + 0.03;
+        if (scope < 1.5 && ((grey && r < maskRadius) || (red && (r < 0.065 || mirrored)))) { c = 0; a = 0; }
         // full-screen tints (damage / ability flashes) are drawn with the HUD: on the floating panel they become a
         // coloured rectangle. They are flat and translucent - text and icons have edges - so a pixel whose
         // neighbours a few pixels away have the same translucent alpha is dropped.
@@ -475,6 +480,7 @@ static bool g_rightEmpty;
 static int g_gunHand = 1;
 int VRGunHand() { return IKPawnIsVehicle() || g_gunHand == 1 ? (g_rightEmpty && !IKPawnIsVehicle() ? -1 : 1) : 0; }   // -1: put away
 bool VRRightEmpty() { return VRGunHand() != 1; }
+void VRDebugPutAway(int on) { if (g_gunHand == 1) g_rightEmpty = on != 0; Log("debug: right hand %s", g_rightEmpty ? "empty" : "holds the gun"); }
 static int GunIdx() { return g_gunHand == 0 && !IKPawnIsVehicle() ? 0 : 1; }   // the controller that aims the gun
 
 // Horizontal direction of a melee swing in the last few tenths of a second (OpenXR x/z), false if none.
@@ -940,13 +946,14 @@ static void UpdateInput()
         // VR layout: the grips hold things (the weapon's front, grenades, pickups); the left trigger stays the game's
         // (fine aim / the weapon's second action, e.g. detonating grenades; vehicle boost). Nothing important is on the
         // stick clicks (pressing them wears the sticks): the left click is only the game's transform (LS, one press),
-        // the right one does nothing. Y = main ability (RB) at once, for as long as it is down; B tapped = second
-        // ability (LB), held = the weapon wheel (UpdateWeaponWheel). Grenades: taken from the belt with a grip (no
-        // button). Melee: a punch forward with a hand.
+        // the right one the second ability (LB). Y = main ability (RB) at once, for as long as it is down; B tapped =
+        // the game's B (the grenade throw, and whatever else the game has on it), held = the weapon wheel
+        // (UpdateWeaponWheel). Grenades also from the belt with a grip. Melee: a punch forward with a hand.
         if (GetBool(xr.btn[kLClick])) p.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
+        if (GetBool(xr.btn[kRClick])) p.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
         UpdateWeaponWheel(p, grip, now);
         if (GetBool(xr.btn[kY])) p.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
-        if (xr.clickPulse[1] > 0) { p.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER; xr.clickPulse[1]--; }
+        if (xr.clickPulse[1] > 0) { p.wButtons |= XINPUT_GAMEPAD_B; xr.clickPulse[1]--; }
         if (xr.exitPulse > 0) { p.wButtons |= XINPUT_GAMEPAD_X; xr.exitPulse--; }
     }
 
@@ -1348,8 +1355,8 @@ static void UpdateWeaponWheel(XINPUT_GAMEPAD& p, const float grip[2], DWORD now)
         g_dbgWheelHand = -2;
     }
     // The wheel is on B held (not the grips: grabbing things kept opening it; not the stick clicks: they wear the
-    // sticks): B held 0.35 s opens the right hand's wheel, let go to choose; a short B is the second ability, sent
-    // when it is let go (grenades are taken from the belt, not on a button). In vehicle form B held switches the
+    // sticks): B held 0.35 s opens the right hand's wheel, let go to choose; a short B is the game's B (grenade), sent
+    // when it is let go. In vehicle form B held switches the
     // vehicle's weapon (the game's "next weapon"). Y is the main ability at once (VRInput).
     bool vehicle = IKPawnIsVehicle();
     for (int h = 1; h < 2 && !debug; h++) {   // h: 1 = B (right hand)
