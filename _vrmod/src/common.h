@@ -202,6 +202,7 @@ void WeaponsStrike(int hand);               // VR input: a melee attack by that 
 bool WeaponsWantPress(bool melee);          // VR input: the game's next-weapon (false) / melee (true) button is wanted now
 bool WeaponsIsMeleeComp(void* comp);        // ik.cpp: that component is the melee weapon kept in a hand
 bool WeaponsOnTurret();                     // the player is on a mounted turret (its gun in hand)
+float WeaponsTurretClearance(const float o[3], const float dir[3]);   // the aim ray's run through the turret gun
 float CameraTurretLift();                   // on a turret: how far the eyes are raised (Unreal units, gliding)
 
 // ---- pull.cpp: pickups pulled from a distance with the left hand ----

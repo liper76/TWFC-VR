@@ -588,6 +588,34 @@ int WeaponsMeleeHeld() { return g_meleeHeld; }
 
 bool WeaponsOnTurret() { return g_onTurret; }
 
+// On a mounted turret: how far the ray from o along unit dir runs inside the turret gun's bounds (world units; 0:
+// not on one, or the ray misses it). The aim starts past it: from the handles, raised high, the trace hit the
+// turret's own barrel - shots burst in it and the ring sat on it.
+float WeaponsTurretClearance(const float o[3], const float dir[3])
+{
+    if (!g_onTurret || !g_pawn) return 0.0f;
+    float best = 0.0f;
+    __try {
+        uint8_t* w = *(uint8_t**)((uint8_t*)g_pawn + kPawnWeapon);
+        if (!w) return 0.0f;
+        uint8_t* meshes[2] = { *(uint8_t**)(w + kWeaponMesh), *(uint8_t**)(w + kWeaponMesh2) };
+        for (uint8_t* m : meshes) {
+            if (!m) continue;
+            const float* b = (const float*)(m + 0xBC);   // world bounds: origin, box extent
+            float tNear = -1e9f, tFar = 1e9f;
+            for (int k = 0; k < 3; k++) {
+                float lo = b[k] - b[3 + k] - o[k], hi = b[k] + b[3 + k] - o[k];
+                if (fabsf(dir[k]) < 1e-6f) { if (lo > 0.0f || hi < 0.0f) tFar = -1.0f; continue; }
+                float t1 = lo / dir[k], t2 = hi / dir[k];
+                tNear = fmaxf(tNear, fminf(t1, t2));
+                tFar = fminf(tFar, fmaxf(t1, t2));
+            }
+            if (tFar >= fmaxf(tNear, 0.0f) && tFar < 1000.0f) best = fmaxf(best, tFar + 5.0f);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0.0f; }
+    return best;
+}
+
 bool WeaponsWantPress(bool melee)
 {
     return InterlockedExchange(melee ? &g_pressMelee : &g_pressNext, 0) != 0;
