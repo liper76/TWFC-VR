@@ -269,6 +269,12 @@ uint8_t* g_beltMesh;        // ... attached to this skeletal mesh
 uint8_t* g_beltWeapon;      // ... for this grenade weapon
 uint8_t* g_beltOldMesh;     // the mesh the belt model had before it was given the single grenade's
 int g_beltMeshAt;           // ... at this offset (kCompSkelMesh / kCompStaticMesh; 0 = not changed)
+uint8_t* g_beltWorld;       // ... in this world (another one: all of it is gone, nothing to take off)
+// Every model ever hung on the belt in this world: one left attached when the belt was taken over by a new one (a
+// pickup gives a new grenade weapon) stayed on the hips - grenades piled up there. They are all taken off first.
+struct BeltRec { uint8_t* comp; uint8_t* mesh; uint8_t* oldMesh; int at; float trans[3]; };
+BeltRec g_beltRecs[8];
+int g_beltRecCount;
 
 // The weapon's own model is its pickup: several grenades (three mines). The grenade it throws is one - the projectile
 // class's (WEPDATA +0x34 -> class, +0x9C its defaults) mesh template. A skeletal one goes on the weapon's spare
@@ -357,6 +363,29 @@ unsigned HipsBone(uint8_t* mesh)
     return 0;
 }
 
+// takes every model hung on a belt off again, as it was
+void ClearBelts()
+{
+    bool sameWorld = *(uint8_t**)kGWorld == g_beltWorld;
+    for (int i = 0; i < g_beltRecCount && sameWorld; i++) {
+        BeltRec& r = g_beltRecs[i];
+        __try {
+            // (only while attached is it surely alive: the mesh's attachments keep it)
+            if (!Attached(r.mesh, r.comp)) continue;
+            Detach(r.mesh, r.comp);
+            memcpy(r.comp + kCompTranslation, r.trans, sizeof(r.trans));
+            if (r.at) *(uint8_t**)(r.comp + r.at) = r.oldMesh;
+            *(uint32_t*)(r.comp + kCompFlags) |= kHiddenGame;
+            Log("grenades: belt model %p taken off", r.comp);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    g_beltRecCount = 0;
+    g_belt = g_beltMesh = g_beltWeapon = nullptr;
+    g_beltMeshAt = 0;
+    IKSetBelt(nullptr);
+}
+
 void UpdateBelt(uint8_t* pawn, bool show)
 {
     __try {
@@ -373,14 +402,8 @@ void UpdateBelt(uint8_t* pawn, bool show)
             int at;
             retry = OneGrenadeComp(w, *(uint8_t**)(w + kWeaponModel), &one, &at) != nullptr;
         }
-        if (g_belt && (!want || retry || g_beltWeapon != w || g_beltMesh != mesh)) {   // none left, another body (transformed), level change
-            if (g_beltMesh && Attached(g_beltMesh, g_belt)) Detach(g_beltMesh, g_belt);
-            memcpy(g_belt + kCompTranslation, g_beltTranslation, sizeof(g_beltTranslation));
-            if (g_beltMeshAt) *(uint8_t**)(g_belt + g_beltMeshAt) = g_beltOldMesh;
-            g_belt = g_beltMesh = g_beltWeapon = nullptr;
-            g_beltMeshAt = 0;
-            IKSetBelt(nullptr);
-        }
+        // none left, another body (transformed), a new grenade weapon (picked up), level change; or one left over
+        if ((g_belt && (!want || retry || g_beltWeapon != w || g_beltMesh != mesh)) || (!g_belt && g_beltRecCount)) ClearBelts();
         if (!want || !mesh) return;
         if (!g_belt) {
             unsigned hips = HipsBone(mesh);
@@ -389,6 +412,15 @@ void UpdateBelt(uint8_t* pawn, bool show)
             uint8_t* comp = OneGrenadeComp(w, model, &one, &at);
             if (!comp) comp = model;
             if (!hips || !comp || Attached(mesh, comp)) return;
+            if (g_beltRecCount < 8) {
+                BeltRec& r = g_beltRecs[g_beltRecCount++];
+                r.comp = comp;
+                r.mesh = mesh;
+                r.at = at;
+                r.oldMesh = at ? *(uint8_t**)(comp + at) : nullptr;
+                memcpy(r.trans, comp + kCompTranslation, sizeof(r.trans));
+            }
+            g_beltWorld = *(uint8_t**)kGWorld;
             float loc[3] = {}, scale[3] = { 1, 1, 1 };
             int rot[3] = {};
             if (at) { g_beltOldMesh = *(uint8_t**)(comp + at); *(uint8_t**)(comp + at) = one; }   // (before it is attached: drawn with it)
@@ -407,7 +439,7 @@ void UpdateBelt(uint8_t* pawn, bool show)
         // the single grenade as big as the one in the hand; the pickup model like the weapons
         IKSetBelt(g_belt, g_beltMeshAt ? fmaxf(g_cfg.grenadeScale, 0.05f) : 0.0f);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        g_belt = g_beltMesh = g_beltWeapon = nullptr;
+        g_belt = g_beltMesh = g_beltWeapon = nullptr;   // (the records stay: taken off on the next update)
         g_beltMeshAt = 0;
         IKSetBelt(nullptr);
     }
@@ -443,9 +475,9 @@ void GrenadesUpdate(void* pawnPtr)
     g_prevT = t;
     bool grab = InterlockedExchange(&g_reqGrab, 0) != 0, arm = InterlockedExchange(&g_reqArm, 0) != 0,
          release = InterlockedExchange(&g_reqRelease, 0) != 0;
-    if (!pawn) {   // cutscene, menu, level change: the belt model is left as it is (the pawn may be gone)
-        g_belt = g_beltMesh = nullptr;
-        IKSetBelt(nullptr);
+    if (!pawn) {   // cutscene, menu, an interaction, level change: the belt model is left as it is and remembered - a
+        IKSetBelt(nullptr);   // forgotten one stayed on the hips next to the next one (taken off when the pawn is back)
+        if (*(uint8_t**)kGWorld != g_beltWorld) { g_beltRecCount = 0; g_belt = g_beltMesh = g_beltWeapon = nullptr; g_beltMeshAt = 0; }
     }
     bool vehicle = pawn && IKPawnIsVehicle();
     if (pawn) UpdateBelt(pawn, g_cfg.grenadeGrab && g_cfg.grenadeBelt && !vehicle);

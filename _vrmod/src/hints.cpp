@@ -26,9 +26,9 @@ const Key kKeys[] = {
     { L"E", L"X", nullptr },               { L"R", L"X", nullptr },
     { L"F", L"L Stick", nullptr },
     { L"Shift", L"Y", L"R Grip" },         { L"LeftShift", L"Y", L"R Grip" },   { L"Left Shift", L"Y", L"R Grip" },
-    { L"Ctrl", L"Hold Y", L"L Grip" },    { L"Control", L"Hold Y", L"L Grip" },
-    { L"LeftControl", L"Hold Y", L"L Grip" }, { L"Left Ctrl", L"Hold Y", L"L Grip" },
-    { L"G", L"B", nullptr },
+    { L"Ctrl", L"B", L"L Grip" },          { L"Control", L"B", L"L Grip" },
+    { L"LeftControl", L"B", L"L Grip" },   { L"Left Ctrl", L"B", L"L Grip" },
+    { L"G", L"Grip at the belt", L"B" },
     { L"C", L"A", nullptr },               { L"V", L"B", nullptr },
     { L"Q", L"Swing", nullptr },           { L"Middle Mouse", L"Swing", nullptr }, { L"MiddleMouseButton", L"Swing", nullptr },
     { L"Left Mouse", L"Trigger", nullptr },  { L"LeftMouseButton", L"Trigger", nullptr }, { L"Left Mouse Button", L"Trigger", nullptr },
@@ -47,6 +47,7 @@ const Key kKeys[] = {
 
 const wchar_t* ButtonFor(const std::wstring& key)
 {
+    if (g_cfg.gripUse && !_wcsicmp(key.c_str(), L"E")) return L"Grip";   // the use key (R is the reload: X)
     for (const Key& k : kKeys)
         if (!_wcsicmp(k.key, key.c_str())) return g_cfg.gripAbilities && k.buttonGripLayout ? k.buttonGripLayout : k.button;
     return nullptr;

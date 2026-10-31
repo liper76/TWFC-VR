@@ -52,7 +52,8 @@ struct Config {
     float meleeHitRadius = 90.0f;   // a robot's body for the weapon: radius (Unreal units; height twice that each way)
     int   throwGesture = 1;         // a throw with the free left hand throws a grenade
     float throwSpeed = 2.5f;        // hand speed (m/s) that counts as a throw
-    int   grenadeGrab = 1;          // grenades taken from the body with the left hand, armed, thrown (replaces the gesture)
+    int   gripUse = 1;              // a free hand's grip away from the body = the game's use button (X)
+    int   grenadeGrab = 1;         // grenades taken from the body with the left hand, armed, thrown (replaces the gesture)
     float grenadeThrowScale = 3.0f; // thrown grenade speed = hand speed x this
     float grenadeGravity = 1.0f;    // a thrown grenade falls (x 9.8 m/s²; the game's own fly almost straight)
     int   hudMarkersInEyes = 1;     // minimal HUD: its other parts (waypoints, names, lock-on marks) drawn into the eyes
@@ -104,6 +105,7 @@ struct Config {
     int   cameraMode = 1;       // 0 = third person (game camera), 1 = first person (at the pawn's eyes)
     float eyeHeight = 150.0f;     // first person: eye height above the pawn origin (Unreal units)
     float eyeForward = 30.0f;       // first person: eye offset forward of the pawn origin
+    float turretEyeUp = 0.35f;      // on a mounted turret: eyes (and body) raised by this much (metres, real) to see over it
     int   keepStickPitch = 0;       // 1 = keep the game camera pitch under the head pitch
     int   snapTurnDeg = 0;              // >0 = snap turn by this many degrees, 0 = smooth turn
     float smoothTurnDegPerSec = 120.0f;
@@ -199,6 +201,8 @@ int WeaponsMeleeHeld();                     // the hand the melee weapon is in r
 void WeaponsStrike(int hand);               // VR input: a melee attack by that hand starts now (the robot is held in place)
 bool WeaponsWantPress(bool melee);          // VR input: the game's next-weapon (false) / melee (true) button is wanted now
 bool WeaponsIsMeleeComp(void* comp);        // ik.cpp: that component is the melee weapon kept in a hand
+bool WeaponsOnTurret();                     // the player is on a mounted turret (its gun in hand)
+float CameraTurretLift();                   // on a turret: how far the eyes are raised (Unreal units, gliding)
 
 // ---- pull.cpp: pickups pulled from a distance with the left hand ----
 void PullUpdate(void* pawn);                // game thread, once per frame (null = not in first person)
@@ -238,6 +242,8 @@ bool VRNextStereoEye(int& eye);             // eye of the next stereo frame; fal
 bool VRTwoHanded();                         // the weapon is held with both hands
 void VRFingerCurls(int hand, float out[4]); // empty hand: index, middle, ring, thumb bend (0..1) from the controller
 bool VRTwoHandTurn(float q[4]);             // held two-handed: turn (quaternion x,y,z,w, OpenXR LOCAL) of the right hand's aim
+// a mounted turret's aim from both hands: the orientation between the two aim poses, from the point between them
+void VRTurretAim(const VREyeView::Hand& l, const VREyeView::Hand& r, float q[4], float p[3]);
 bool IKForegrip(float out[3]);              // ik.cpp: held weapon's front grip relative to the right aim pose (OpenXR axes, metres)
 bool VRMeleeSwing(float& x, float& z);      // recent melee swing direction (OpenXR horizontal)
 DWORD VRAbilityPressedAt();                 // GetTickCount of the last ability (bumper) press

@@ -197,7 +197,7 @@ struct Skeleton {
     Arm arm[2];
     int fingers[2][4][2];                // per hand: index, middle, ring, thumb - base and tip bone (-1: none)
     bool armsOk = false;                 // false: no arms (vehicle form)
-    int head = -1, hips = -1;
+    int head = -1, hips = -1, chest = -1;   // chest: the lowest spine bone above the hips (the torso twists there)
     int thigh[2] = { -1, -1 }, knee[2] = { -1, -1 }, ankle[2] = { -1, -1 };
 } g_sk;
 
@@ -212,7 +212,7 @@ bool ResolveSkeleton(uint8_t* mesh)
     int n = *(int*)(mesh + kMeshRefSkeleton + 4);
     if (!bones || n <= 0 || n > kMaxBones) return false;
     k.n = n;
-    k.head = k.hips = -1;
+    k.head = k.hips = k.chest = -1;
     for (int s = 0; s < 2; s++) { k.arm[s] = { -1, -1, -1, -1, -1, -1 }; k.thigh[s] = k.knee[s] = k.ankle[s] = -1; }
     memset(k.fingers, 0xFF, sizeof(k.fingers));
     static const wchar_t* fingerNames[4] = { L"Finger02_Index0", L"Finger03_Middle0", L"Finger04_Ring0", L"Finger01_Thumb0" };
@@ -238,6 +238,7 @@ bool ResolveSkeleton(uint8_t* mesh)
         if (!nm) continue;
         if (Starts(nm, L"C_Spine00_Hips")) k.hips = i;
         if (Starts(nm, L"C_Spine04_Head_XB")) k.head = i;
+        if (Starts(nm, L"C_Spine01") && k.chest < 0) k.chest = i;
         for (auto s : bind) if (Starts(nm, s)) k.bindPose[i] = true;
         if (wcsstr(nm, L"_Arm01_Clav_XB")) k.bindPose[i] = true;
         for (auto s : torso) if (wcsstr(nm, s)) k.group[i] = 1;
@@ -283,18 +284,29 @@ bool ResolveSkeleton(uint8_t* mesh)
 // ---------------------------------------------------------------------------------------------
 // The held gun: a skeletal mesh attached to the right arm (Transformers carry their guns on the forearm). Read
 // from the pawn mesh's attachments: which bone it hangs on and its exact placement relative to that bone.
+// The game's attachment is kept as it made it (restored whenever we let go); every frame the gun is placed anew
+// from it - nothing is measured from the animation (a weapon taken mid-animation, with the hand shrunk away,
+// once left the gun ten times its size for good) and nothing builds up.
 struct Gun {
     uint8_t* comp = nullptr;
-    int bone = -1;                   // the arm bone it is attached to
-    Pose rel;                        // gun relative to that bone (unit axes; translation in bone units)
+    uint8_t* mesh = nullptr;         // the pawn mesh it is attached to
+    uint8_t* entry = nullptr;        // its attachment entry (this frame)
+    unsigned origBone = 0;           // the attachment as the game made it
+    float origLoc[3], origScale[3];
+    int origRot[3];
+    int origSide = 1;                // the arm the game put it on
+    bool placed = false;             // the entry holds our placement:
+    unsigned wroteBone = 0;          //   on this bone, at this location
+    float wroteLoc[3];
+    Pose inHand;                     // gun relative to the hand, the wrist straight (unit axes; component units)
+    float size = 1.0f;               // gun units -> component units (before the component's own Scale)
+    float handSize = 1.0f;           // the hand's size as the game draws it under the gun
+    Pose pose;                       // the gun as posed this frame (unit axes; component space)
+    bool posed = false;
     uint8_t* skelMesh = nullptr;     // to notice weapon changes
     bool scoped = false;             // a sniper rifle (ini ScopeWeapons)
     bool hasGrip = false;
     Vec3 grip;                       // front grip in gun space (gun units, unscaled)
-    Pose boneWorld;                  // the bone it hangs on, in the world, as last posed
-    bool boneWorldValid = false;
-    uint8_t* moved = nullptr;        // the gun MoveGunToHand put on the hand bone, and that hand's size (relative
-    float handSize = 1.0f;           // to the forearm) its offset was worked out for
 } g_gun;
 int g_gunSide = 1;              // the arm holding the gun (1 right; 0 left - VRGunHand)
 
@@ -328,109 +340,119 @@ int BoneIndex(unsigned fname)
     return -1;
 }
 
-// Finds the gun among the mesh's attachments, sets its size (hidden while the right hand holds the melee
-// weapon) and the size of its muzzle flashes.
-// A gun on the forearm goes over to the hand bone, where it stays as the game's animation holds it: the gun arm
-// is then solved like the other arm (same two-bone reach, same slim forearm - a gun on a slimmed forearm would be
-// sheared with it). The game shrinks that hand away (the gun takes its place); the hand keeps the size it has now
-// (SolveGunArm), and the gun's offset and size are worked out for it.
-void MoveGunToHand(uint8_t* comp, uint8_t* entry, const Arm& r, const Pose* anim)
+unsigned BoneName(int i) { return *(unsigned*)(*(uint8_t**)((uint8_t*)g_sk.mesh + kMeshRefSkeleton) + i * kMeshBoneSize); }
+
+// The arm (0 left, 1 right) whose forearm, hand or weapon bone `b` is; -1: none.
+int ArmOfBone(int b)
 {
-    uint8_t* bones = *(uint8_t**)((uint8_t*)g_sk.mesh + kMeshRefSkeleton);
-    Pose handLocal = Compose(anim[r.hand], Inverse(anim[r.elbow]));
-    float size = fminf(fmaxf(Len(handLocal.ax[0]), 0.01f), 1.0f);
-    Vec3 hAx[3];
-    UnitAxes(handLocal, hAx);
-    Pose inv = Inverse({ { Scale(hAx[0], size), Scale(hAx[1], size), Scale(hAx[2], size) }, handLocal.pos });
-    float* loc = (float*)(entry + 8);
-    float* scale = (float*)(entry + 0x20);
-    Pose rel = RotatorPose((const int*)(entry + 0x14));
-    rel.pos = { loc[0], loc[1], loc[2] };
-    Pose to = Compose(rel, inv);
-    Vec3 ax[3] = { to.ax[0], to.ax[1], to.ax[2] };
-    Orthonormalize(ax);
-    for (int k = 0; k < 3; k++) scale[k] /= size;
-    g_gun.moved = comp;
-    g_gun.handSize = size;
+    for (int s = 0; s < 2; s++) if (b >= 0 && (b == g_sk.arm[s].elbow || b == g_sk.arm[s].hand || b == g_sk.arm[s].weapon)) return s;
+    return -1;
+}
+
+// A bone's bind pose in component space.
+Pose RefComponent(int b)
+{
+    Pose p = g_sk.ref[b];
+    for (int i = g_sk.parent[b]; i >= 0; i = g_sk.parent[i]) p = Compose(p, g_sk.ref[i]);
+    return p;
+}
+
+// The game's attachment back in the entry (the gun as the game's animation holds it).
+void RestoreGunEntry(uint8_t* e)
+{
+    if (!e || !g_gun.placed) return;
+    *(unsigned*)(e + 4) = g_gun.origBone;
+    memcpy(e + 8, g_gun.origLoc, 12);
+    memcpy(e + 0x14, g_gun.origRot, 12);
+    memcpy(e + 0x20, g_gun.origScale, 12);
+    g_gun.placed = false;
+}
+
+bool IsOurPlacement(const uint8_t* e)
+{
+    return g_gun.placed && *(const unsigned*)(e + 4) == g_gun.wroteBone && !memcmp(e + 8, g_gun.wroteLoc, 12);
+}
+
+// The gun relative to the hand with the wrist straight (the bind pose from its bone to the hand), from the game's
+// attachment: a gun on the forearm is an extension of it, the hand inside.
+void CaptureGun(uint8_t* comp, const uint8_t* e, int b)
+{
+    g_gun.comp = comp;
+    g_gun.origBone = *(const unsigned*)(e + 4);
+    memcpy(g_gun.origLoc, e + 8, 12);
+    memcpy(g_gun.origRot, e + 0x14, 12);
+    memcpy(g_gun.origScale, e + 0x20, 12);
+    g_gun.placed = false;
+    g_gun.origSide = ArmOfBone(b);
+    const Arm& a = g_sk.arm[g_gun.origSide];
+    Pose rel = RotatorPose(g_gun.origRot);
+    rel.pos = { g_gun.origLoc[0], g_gun.origLoc[1], g_gun.origLoc[2] };
+    Pose in = Compose(rel, Compose(RefComponent(b), Inverse(RefComponent(a.hand))));
+    Vec3 ax[3];
+    UnitAxes(in, ax);
+    g_gun.inHand = { { ax[0], ax[1], ax[2] }, in.pos };
+    g_gun.size = fabsf(g_gun.origScale[0]) > 1e-3f ? fabsf(g_gun.origScale[0]) : 1.0f;
+    Log("ik: gun %p on bone %d (%s, %s arm): %.1f %.1f %.1f from the hand, size %.2f", comp, b,
+        b == a.elbow ? "forearm" : b == a.hand ? "hand" : "weapon bone", g_gun.origSide ? "right" : "left",
+        in.pos.x, in.pos.y, in.pos.z, g_gun.size);
+}
+
+// The posed gun into its attachment entry, on the gun hand's bone (uniform: on the slimmed forearm it was sheared).
+void PlaceGunEntry(const Pose* pose)
+{
+    uint8_t* e = g_gun.entry;
+    int hb = g_sk.arm[g_gunSide].hand;
+    if (!e || hb < 0) return;
+    Pose g = g_gun.pose;
+    for (auto& a : g.ax) a = Scale(a, g_gun.size);
+    Pose rel = Compose(g, Inverse(pose[hb]));
+    Vec3 ax[3];
+    UnitAxes(rel, ax);
     Mat3 m;
     for (int i = 0; i < 3; i++) { m.m[i][0] = Comp(ax[0], i); m.m[i][1] = Comp(ax[1], i); m.m[i][2] = Comp(ax[2], i); }
-    int* rot = (int*)(entry + 0x14);
+    int* rot = (int*)(e + 0x14);
     MatToRotator(m, rot[0], rot[1], rot[2]);
-    loc[0] = to.pos.x; loc[1] = to.pos.y; loc[2] = to.pos.z;
-    *(unsigned*)(entry + 4) = *(unsigned*)(bones + r.hand * kMeshBoneSize);
-    Log("ik: gun moved from the forearm to the hand bone (offset %.1f %.1f %.1f, hand size %.3f, gun size %.3f)",
-        to.pos.x, to.pos.y, to.pos.z, size, scale[0]);
+    float* loc = (float*)(e + 8);
+    float* scale = (float*)(e + 0x20);
+    loc[0] = rel.pos.x; loc[1] = rel.pos.y; loc[2] = rel.pos.z;
+    for (int k = 0; k < 3; k++) scale[k] = Len(rel.ax[k]);
+    g_gun.wroteBone = *(unsigned*)(e + 4) = BoneName(hb);
+    memcpy(g_gun.wroteLoc, loc, 12);
+    g_gun.placed = true;
 }
+
+// Finds the gun among the mesh's attachments, sets its size (hidden while the hand is empty or holds the melee
+// weapon) and the size of its muzzle flashes.
 
 void UpdateGun(uint8_t* mesh, const Pose* anim)
 {
-    // the gun hand: the right one, or the left when the gun was taken there (the gun hangs on the mirrored bone)
+    // the gun hand: the right one, or the left when the gun was taken there
     g_gunSide = VRGunHand() == 0 ? 0 : 1;
-    const Arm& r = g_sk.arm[g_gunSide];
-    const Arm& o = g_sk.arm[g_gunSide ^ 1];
+    g_gun.entry = nullptr;
+    g_gun.posed = false;
     uint8_t* att = *(uint8_t**)(mesh + kCompAttachments);
     int count = *(int*)(mesh + kCompAttachments + 4);
     // the weapon in hand (Pawn.Weapon) and its mesh components
     uint8_t* weapon = *(uint8_t**)((uint8_t*)g_pawn + kPawnWeapon);
     uint8_t* mine[2] = { weapon ? *(uint8_t**)(weapon + kWeaponMesh) : nullptr, weapon ? *(uint8_t**)(weapon + kWeaponMesh2) : nullptr };
     uint8_t* found = nullptr;
-    int bone = -1;
-    const uint8_t* entry = nullptr;
+    uint8_t* entry = nullptr;
+    bool ours = false;
     for (int i = 0; att && i < count && i < 64 && !found; i++) {
-        const uint8_t* e = att + i * 0x30;
-        uint8_t* c = *(uint8_t* const*)e;
+        uint8_t* e = att + i * 0x30;
+        uint8_t* c = *(uint8_t**)e;
         if (!c || (c != mine[0] && c != mine[1]) || WeaponsIsMeleeComp(c)) continue;
-        int b = BoneIndex(*(const unsigned*)(e + 4));
-        if (b >= 0 && (b == o.elbow || b == o.hand || b == o.weapon)) {   // on the other arm: over to this side
-            unsigned m = IKMirrorBone(*(const unsigned*)(e + 4));
-            if (m) { *(unsigned*)(e + 4) = m; b = BoneIndex(m); g_gun.boneWorldValid = false; }
-        }
-        if (b >= 0 && b == r.elbow && r.hand >= 0 && g_sk.parent[r.hand] == r.elbow) {
-            MoveGunToHand(c, (uint8_t*)e, r, anim);
-            b = r.hand;
-        }
-        if (b >= 0 && (b == r.elbow || b == r.hand || b == r.weapon)) { found = c; bone = b; entry = e; }
+        if (c == g_gun.comp && IsOurPlacement(e)) { found = c; entry = e; ours = true; break; }   // (the array may have moved)
+        if (ArmOfBone(BoneIndex(*(const unsigned*)(e + 4))) >= 0) { found = c; entry = e; }
     }
     if (found != g_gun.comp && g_gun.comp) RestoreScale(g_gun.comp);   // the previous gun gets its size back
-    if (found != g_gun.comp || bone != g_gun.bone) {
-        g_gun.boneWorldValid = false;
-        if (found) Log("ik: gun %p on bone %d (%s)", found, bone, bone == r.elbow ? "forearm" : bone == r.hand ? "hand" : "weapon bone");
-    }
-    g_gun.comp = found;
-    if (!found) return;
-    g_gun.bone = bone;
-    if (g_gun.boneWorldValid) {
-        // where the engine put the gun last frame, relative to the bone as we posed it: exact (sockets included)
-        Pose rel = Compose(Load((float*)(found + kCompLocalToWorld)), Inverse(g_gun.boneWorld));
-        Vec3 ax[3];
-        UnitAxes(rel, ax);
-        // a measurement taken while the engine had not yet attached the gun to the posed bone (a weapon just
-        // picked up or switched to: one frame still where the pickup or the other pose put it) is far off the
-        // attachment, sheared or of the wrong size - kept, it stretched the gun away from the hand for good
-        const float* loc = (const float*)(entry + 8);
-        Vec3 d = Sub(rel.pos, { loc[0], loc[1], loc[2] });
-        float want = g_cfg.weaponScale * ((const float*)(entry + 0x20))[0], l0 = Len(rel.ax[0]), l1 = Len(rel.ax[1]), l2 = Len(rel.ax[2]);
-        bool sane = Len(d) < 60.0f && fabsf(Dot(ax[0], ax[1])) < 0.05f && fabsf(Dot(ax[1], ax[2])) < 0.05f &&
-                    fabsf(Dot(ax[0], ax[2])) < 0.05f && fabsf(l0 - l1) < 0.1f * l0 && fabsf(l0 - l2) < 0.1f * l0 &&
-                    (want <= 0.0f || fabsf(l0 - want) < 0.25f * want);
-        static DWORD rejectLog;
-        if (!sane) {
-            if (GetTickCount() - rejectLog > 2000) {
-                rejectLog = GetTickCount();
-                Log("ik: gun placement rejected: pos %.1f %.1f %.1f (attach %.1f %.1f %.1f) len %.2f %.2f %.2f want %.2f dots %.3f %.3f %.3f",
-                    rel.pos.x, rel.pos.y, rel.pos.z, loc[0], loc[1], loc[2], l0, l1, l2, want,
-                    Dot(ax[0], ax[1]), Dot(ax[1], ax[2]), Dot(ax[0], ax[2]));
-            }
-        } else {
-            Orthonormalize(ax);
-            g_gun.rel = { { ax[0], ax[1], ax[2] }, rel.pos };
-        }
-    } else {
-        // first frame: the attachment's own placement
-        const float* loc = (const float*)(entry + 8);
-        g_gun.rel = RotatorPose((const int*)(entry + 0x14));
-        g_gun.rel.pos = { loc[0], loc[1], loc[2] };
-    }
+    if (!found) { g_gun.comp = nullptr; g_gun.placed = false; return; }
+    if (!ours) CaptureGun(found, entry, BoneIndex(*(const unsigned*)(entry + 4)));   // new, or attached anew by the game
+    g_gun.mesh = mesh;
+    g_gun.entry = entry;
+    // the hand under the gun as small as the game draws it (the gun takes its place)
+    int animHand = g_sk.arm[g_gun.origSide].hand;
+    g_gun.handSize = fminf(fmaxf(Len(anim[animHand].ax[0]), 0.05f), 1.0f);
 
     bool hidden = WeaponsMeleeHeld() == g_gunSide || VRGunHand() < 0;
     *(float*)(found + kCompScale) = hidden ? 0.001f : g_cfg.weaponScale;
@@ -546,6 +568,19 @@ void SolveArm(int side, Pose* pose, Vec3 wrist, const Vec3 ctrl[3], const Vec3 h
             RotatePose(pose[clav], r);
             for (Pose* p : { &rs, &re, &rh }) { RotatePose(*p, r); p->pos = Add(C, Mul(r, Sub(p->pos, C))); }
         }
+        // reach: a hand near the end of the arm's reach draws the shoulder after it (forward, across, up - up to 25
+        // degrees about the clavicle's root), so the whole shoulder follows the hand
+        Vec3 toW = Sub(wrist, C);
+        c = Sub(rs.pos, C);
+        float reach = Len(Sub(wrist, rs.pos)) / fmaxf(l1 + l2, 1.0f);
+        Vec3 axis2 = Cross(c, toW);
+        if (reach > 0.8f && Len(axis2) > 1e-3f && Len(toW) > 1e-3f) {
+            float want = acosf(fminf(fmaxf(Dot(Norm(c), Norm(toW)), -1.0f), 1.0f));
+            float ang = fminf(want, fminf((reach - 0.8f) / 0.3f, 1.0f) * 25.0f * 0.0174533f);
+            Mat3 r = AxisAngle(Norm(axis2), ang);
+            RotatePose(pose[clav], r);
+            for (Pose* p : { &rs, &re, &rh }) { RotatePose(*p, r); p->pos = Add(C, Mul(r, Sub(p->pos, C))); }
+        }
     }
     Vec3 S = rs.pos;
 
@@ -560,6 +595,10 @@ void SolveArm(int side, Pose* pose, Vec3 wrist, const Vec3 ctrl[3], const Vec3 h
     // the new bend
     Vec3 toT = Sub(wrist, S);
     Vec3 dir = Norm(toT);
+    // still out of reach: the arm stretches a little (up to 10 %), so the hand gets there
+    float stretch = fminf(fmaxf(Len(toT) / ((l1 + l2) * 0.999f), 1.0f), 1.1f);
+    l1 *= stretch;
+    l2 *= stretch;
     float dist = fminf(fmaxf(Len(toT), fabsf(l1 - l2) + 0.5f), (l1 + l2) * 0.999f);
     // pole: like a human elbow - behind the hand along the forearm, down, and out to the side
     Vec3 pole = Norm(Add(Add(Scale(ctrl[0], -0.6f), Scale(up, -0.8f)), Scale(out, 0.5f)));
@@ -600,8 +639,8 @@ void SolveArm(int side, Pose* pose, Vec3 wrist, const Vec3 ctrl[3], const Vec3 h
     g_padFrame[side][1] = el;
     g_padValid[side] = true;
 
-    StretchThin(sh, Sub(E, S), 1.0f, g_cfg.limbThickness);
-    StretchThin(el, Sub(H, E), 1.0f, g_cfg.limbThickness);
+    StretchThin(sh, Sub(E, S), stretch, g_cfg.limbThickness);
+    StretchThin(el, Sub(H, E), stretch, g_cfg.limbThickness);
     pose[a.shoulder] = sh;
     pose[a.elbow] = el;
     pose[a.hand].pos = H;
@@ -682,59 +721,34 @@ void PoseFingers(int side, Pose* pose, const float curl[4], bool* driven)
     }
 }
 
-// The right arm carrying the gun: the gun takes the controller's aim (barrel = forward, its up = up), the wrist
-// stays in the real hand, the upper arm reaches the elbow (stretched or squashed along its length if needed).
+// The arm carrying the gun: the gun aims as the controller does (barrel = forward, its up = up) and is held where
+// the real hand is - an extension of the arm, the hand inside it turned with it (wrist straight as in the bind
+// pose), the arm reaching that wrist like the other arm. Nothing is stretched.
 void SolveGunArm(Pose* pose, Vec3 target, const Vec3 ctrl[3])
 {
     const Arm& a = g_sk.arm[g_gunSide];
-    // bone axes that put the gun's axes onto the controller's: gun = rel * bone  =>  bone = rel^-1 * ctrl
-    Vec3 relAx[3];
-    UnitAxes(g_gun.rel, relAx);
-    Vec3 boneAx[3];
-    for (int j = 0; j < 3; j++) boneAx[j] = FromFrame({ Comp(relAx[0], j), Comp(relAx[1], j), Comp(relAx[2], j) }, ctrl);
-    Orthonormalize(boneAx);
-    if (g_gun.bone == a.elbow) {
-        // gun on the forearm: turn the forearm, then place it so the wrist is in the hand
-        Vec3 elbowOld[3];
-        UnitAxes(pose[a.elbow], elbowOld);
-        Vec3 S = pose[a.shoulder].pos, E = pose[a.elbow].pos, H = pose[a.hand].pos;
-        Vec3 E2 = Sub(target, FromFrame(InFrame(Sub(H, E), elbowOld), boneAx));
-        RotatePose(pose[a.shoulder], RotFromTo(Sub(E, S), Sub(E2, S)));
-        float l1 = Len(Sub(E, S));
-        StretchThin(pose[a.shoulder], Sub(E2, S), fminf(fmaxf(Len(Sub(E2, S)) / fmaxf(l1, 1.0f), 0.3f), 4.0f), g_cfg.limbThickness);
-        Pose handLocal = Compose(pose[a.hand], Inverse(pose[a.elbow]));
-        SetAxes(pose[a.elbow], boneAx, Len(pose[a.elbow].ax[0]));   // not slimmed: the gun hangs on it
-        pose[a.elbow].pos = E2;
-        pose[a.hand] = Compose(handLocal, pose[a.elbow]);
+    bool mirrored = g_gunSide != g_gun.origSide;   // (taken into the other hand)
+    Pose handInGun = Inverse(g_gun.inHand);
+    // the gun is drawn smaller (WeaponScale) about its origin: the hand stays on its grip
+    Vec3 hp = Scale(handInGun.pos, g_cfg.weaponScale);
+    if (mirrored) hp.y = -hp.y;
+    Vec3 handAx[3];
+    if (mirrored) {
+        HandAxesFor(g_gunSide, pose, ctrl, handAx);
     } else {
-        // gun on the hand (or its weapon bone): the hand bone takes the axes, the arm reaches the wrist
-        Vec3 handAx[3];
-        if (g_gun.bone == a.hand) {
-            for (int k = 0; k < 3; k++) handAx[k] = boneAx[k];
-        } else {
-            // weapon bone below the hand: hand = weaponLocal^-1 * weapon
-            Pose wl = Compose(pose[a.weapon], Inverse(pose[a.hand]));
-            Vec3 wlAx[3];
-            UnitAxes(wl, wlAx);
-            for (int j = 0; j < 3; j++) handAx[j] = FromFrame({ Comp(wlAx[0], j), Comp(wlAx[1], j), Comp(wlAx[2], j) }, boneAx);
-            Orthonormalize(handAx);
-        }
-        float size = g_gun.moved == g_gun.comp ? g_gun.handSize * Len(pose[a.elbow].ax[0]) : Len(pose[a.hand].ax[0]);
-        SolveArm(g_gunSide, pose, target, ctrl, handAx, size);
+        for (int j = 0; j < 3; j++) handAx[j] = FromFrame(handInGun.ax[j], ctrl);
+        Orthonormalize(handAx);
     }
+    SolveArm(g_gunSide, pose, target, ctrl, handAx, g_gun.handSize);
+    g_gun.pose = { { ctrl[0], ctrl[1], ctrl[2] }, Sub(pose[a.hand].pos, FromFrame(hp, ctrl)) };
+    g_gun.posed = true;
 }
 
-// The gun in component space for a pose of the arm bone it hangs on, with its real size (component units per gun
-// unit, measured from its LocalToWorld).
-Pose GunInComponent(const Pose* pose, const Pose& compToWorld)
+// The gun in component space as posed, at the size it is drawn (component units per gun unit).
+Pose GunInComponent()
 {
-    Pose bone = pose[g_gun.bone];
-    Vec3 bAx[3];
-    UnitAxes(bone, bAx);
-    Pose g = Compose(g_gun.rel, { { Scale(bAx[0], Len(bone.ax[0])), Scale(bAx[1], Len(bone.ax[1])), Scale(bAx[2], Len(bone.ax[2])) }, bone.pos });
-    float world = Len(Load((float*)(g_gun.comp + kCompLocalToWorld)).ax[0]);
-    float s = world / fmaxf(Len(compToWorld.ax[0]), 1e-3f);
-    for (auto& a : g.ax) a = Scale(Norm(a), s);
+    Pose g = g_gun.pose;
+    for (auto& a : g.ax) a = Scale(a, g_gun.size * g_cfg.weaponScale);
     return g;
 }
 
@@ -902,17 +916,74 @@ void OnSkelPose(uint8_t* comp)
                 moved[i] = true;
             }
         }
-        // the whole body turns to where the head looks (the game turns the pawn with the aim) and stays under the
-        // head when you walk around the room
+        // the body turns in two parts, as VR body IK usually does (VRIK, VRChat), and stays under the head when you
+        // walk around the room:
+        //  - the pelvis and the feet stay where they stand while the head looks around; once the head is more than
+        //    50 degrees away (75 with both hands held out in front - aiming) the pelvis steps round to the head, and
+        //    the head never gets more than 90 degrees away from it; walking (stick or room) lines it up at once
+        //  - the chest twists over the pelvis toward where the hands are (between them, in front); without hands, a
+        //    little with the head (12% of its angle up to 30 degrees, 45% beyond); at most 60 degrees
         float crouch = 0.0f;   // how far the body went down (component units)
+        static float pelvisYaw, chestYaw;   // relative to g_bodyYaw, as g_headYaw
+        if (eye == 0) {
+            const float deg = 0.0174533f, pi2 = 6.2831853f;
+            static DWORD torsoAt;
+            static bool stepping;
+            static float walkSpeed;
+            static Vec3 lastHead;
+            DWORD nowMs = GetTickCount();
+            float dt = torsoAt ? fminf((nowMs - torsoAt) / 1000.0f, 0.1f) : 1.0f;
+            torsoAt = nowMs;
+            // walking: the head moving over the ground (the pawn and the player in the room both count)
+            Vec3 headW = Add(pawnNow, YawRotate({ g_headOffset.x, g_headOffset.y, 0.0f }, g_bodyYaw));
+            float speed = dt > 1e-3f ? hypotf(headW.x - lastHead.x, headW.y - lastHead.y) / dt : 0.0f;
+            lastHead = headW;
+            walkSpeed += (speed - walkSpeed) * (1.0f - expf(-dt * 10.0f));
+            bool walking = walkSpeed > 0.6f * g_cfg.worldScale;
+            Vec3 sum = {};
+            int count = 0, ahead = 0;
+            for (int s = 0; s < 2; s++) {
+                if (!g_hand[s].valid) continue;
+                Vec3 d = Sub(g_hand[s].localPos, { g_headOffset.x, g_headOffset.y, g_hand[s].localPos.z });
+                sum = Add(sum, d);
+                count++;
+                if (d.x * cosf(g_headYaw) + d.y * sinf(g_headYaw) > 0.3f * g_cfg.worldScale) ahead++;
+            }
+            float off = remainderf(g_headYaw - pelvisYaw, pi2);
+            if (walking || fabsf(off) > (ahead == 2 ? 75.0f : 50.0f) * deg) stepping = true;
+            if (stepping) {
+                pelvisYaw += off * (1.0f - expf(-dt * (walking ? 10.0f : 6.0f)));
+                off = remainderf(g_headYaw - pelvisYaw, pi2);
+                if (!walking && fabsf(off) < 3.0f * deg) stepping = false;
+            }
+            off = fminf(fmaxf(off, -90.0f * deg), 90.0f * deg);
+            pelvisYaw = g_headYaw - off;
+            float a = fabsf(off);
+            float target = pelvisYaw + copysignf(a < 30.0f * deg ? 0.12f * a : 0.12f * 30.0f * deg + 0.45f * (a - 30.0f * deg), off);
+            if (count && sum.x * sum.x + sum.y * sum.y > 1e-6f) {
+                float handYaw = atan2f(sum.y, sum.x);
+                // hands far behind (reloading over the shoulder...) do not twist the body round
+                if (fabsf(remainderf(handYaw - g_headYaw, pi2)) < 1.6f) target = handYaw;
+            }
+            const float maxTwist = 60.0f * deg;
+            float t = remainderf(target - pelvisYaw, pi2);
+            target = pelvisYaw + fminf(fmaxf(t, -maxTwist), maxTwist);
+            chestYaw += remainderf(target - chestYaw, pi2) * (1.0f - expf(-dt * 8.0f));
+            // (always within the twist limit, also when the pelvis steps fast)
+            t = remainderf(chestYaw - pelvisYaw, pi2);
+            chestYaw = pelvisYaw + fminf(fmaxf(t, -maxTwist), maxTwist);
+        }
         {
             float meshYaw = atan2f(compToWorld.ax[0].y, compToWorld.ax[0].x);
-            float turn = remainderf(g_bodyYaw + g_headYaw - meshYaw, 6.2831853f);
+            float turn = remainderf(g_bodyYaw + pelvisYaw - meshYaw, 6.2831853f);
             Vec3 shift = {};
             if (g_cfg.bodyFollowHead) {
                 Vec3 w = YawRotate({ g_headOffset.x, g_headOffset.y, 0.0f }, g_bodyYaw);
                 shift = DirTo(worldToComp, w);
             }
+            // on a mounted turret the eyes are raised (camera.cpp): the body goes up with them
+            if (float lift = CameraTurretLift())
+                shift = Add(shift, Scale(Norm(DirTo(worldToComp, { 0, 0, 1 })), lift / fmaxf(Len(compToWorld.ax[0]), 1e-3f)));
             // crouching (the head lower than at the start): the body goes down with the eyes - the feet stay on
             // the floor and the knees bend (below)
             float drop = -g_headOffset.z - 0.05f * g_cfg.worldScale;
@@ -927,11 +998,24 @@ void OnSkelPose(uint8_t* comp)
                 for (auto& a : pose[i].ax) a = YawRotate(a, turn);
                 moved[i] = true;
             }
+            // the chest's twist over the pelvis: the spine from the waist up, round its root (the legs stay)
+            float twist = remainderf(chestYaw - pelvisYaw, 6.2831853f);
+            if (g_sk.chest >= 0 && fabsf(twist) > 1e-4f) {
+                bool upper[kMaxBones] = {};
+                Vec3 c = pose[g_sk.chest].pos;
+                for (int i = 0; i < n; i++) {
+                    int p = g_sk.parent[i];
+                    upper[i] = i == g_sk.chest || (p >= 0 && upper[p] && i != g_sk.thigh[0] && i != g_sk.thigh[1]);
+                    if (!upper[i]) continue;
+                    pose[i].pos = Add(c, YawRotate(Sub(pose[i].pos, c), twist));
+                    for (auto& a : pose[i].ax) a = YawRotate(a, twist);
+                }
+            }
         }
         for (int i = 0; i < n; i++) anim[i] = pose[i];   // from here on: the body as the arms start from
         if (crouch > 0.0f) {
             Vec3 up = Norm(DirTo(worldToComp, { 0, 0, 1 }));
-            float yaw = g_bodyYaw + g_headYaw;
+            float yaw = g_bodyYaw + pelvisYaw;
             Vec3 fwd = Norm(DirTo(worldToComp, { cosf(yaw), sinf(yaw), 0 }));
             for (int s = 0; s < 2; s++) CrouchLeg(s, pose, Add(pose[g_sk.ankle[s]].pos, Scale(up, crouch)), fwd, driven);
         }
@@ -1015,7 +1099,7 @@ void OnSkelPose(uint8_t* comp)
                         float k = g_cfg.worldScale / fmaxf(Len(compToWorld.ax[0]), 1e-3f);
                         target = Add(gunTarget, Scale(Add(Add(Scale(gunCtrl[1], f[0]), Scale(gunCtrl[2], f[1])), Scale(gunCtrl[0], -f[2])), k));
                     } else if (s == support && VRTwoHanded() && gunArm && g_gun.hasGrip) {   // other hand on the gun's front grip
-                        target = PointTo(GunInComponent(pose, compToWorld), g_gun.grip);   // (posed with the gun arm)
+                        target = PointTo(GunInComponent(), g_gun.grip);   // (posed with the gun arm)
                     }
                     SolveFreeArm(s, pose, target, ctrl);
                     if (g_cfg.fingerPoses) {
@@ -1028,6 +1112,8 @@ void OnSkelPose(uint8_t* comp)
                     }
                 }
             }
+            // the gun into its attachment, relative to the hand as posed (a blend below carries it along)
+            if (g_gun.entry && gunArm && g_gun.posed) PlaceGunEntry(pose);
             if (ikWeight < 1.0f)
                 for (int s = 0; s < 2; s++)
                     for (int b : { g_sk.arm[s].shoulder, g_sk.arm[s].elbow, g_sk.arm[s].hand }) {
@@ -1035,6 +1121,12 @@ void OnSkelPose(uint8_t* comp)
                         pose[b].pos = Add(Scale(anim[b].pos, 1 - ikWeight), Scale(pose[b].pos, ikWeight));
                     }
         }
+        if (g_gun.entry && !(gunArm && g_gun.posed)) RestoreGunEntry(g_gun.entry);   // as the game holds it
+        // a hand the player moves freely is the whole hand, as in the bind pose (the game's weapon animations
+        // shrink the gun hand away and fold its parts: an empty right hand was a bare bone)
+        bool freeHand[2];
+        for (int s = 0; s < 2; s++)
+            freeHand[s] = g_cfg.handIK && ikWeight >= 1.0f && g_hand[s].valid && melee != s && !(s == g_gunSide && gunArm);
 
         // ---- 4. look ----
         for (int s = 0; s < 2; s++)   // slimmer legs (the rest of the leg inherits it)
@@ -1045,9 +1137,17 @@ void OnSkelPose(uint8_t* comp)
         // children keep their local transforms relative to the moved bones; hidden parts collapse to a point: the
         // head always (the eyes are inside it), the torso unless ShowBody=2, the legs too with ShowBody=0
         static bool changed[kMaxBones];   // pose differs from `anim`: the children follow it
+        static int8_t inHand[kMaxBones];  // the hand (side + 1) the bone is part of; -1: the weapon bone's own
         bool padsOn = ikWeight >= 1.0f;   // (blending to an ability's animation: the armour on the blended bones)
         for (int i = 0; i < n; i++) {
             int p = g_sk.parent[i];
+            inHand[i] = 0;
+            if (p >= 0) {
+                if (i == g_sk.arm[0].weapon || i == g_sk.arm[1].weapon) inHand[i] = -1;
+                else if (p == g_sk.arm[0].hand) inHand[i] = 1;
+                else if (p == g_sk.arm[1].hand) inHand[i] = 2;
+                else inHand[i] = inHand[p];
+            }
             // the clavicles keep their bind pose even though the torso they hang on is hidden (collapsed with it,
             // the shoulders and the top of the upper arms were gone)
             changed[i] = driven[i] || (g_sk.bindPose[i] && g_sk.group[i] == 0);
@@ -1063,6 +1163,7 @@ void OnSkelPose(uint8_t* comp)
                 changed[i] = true;
                 continue;
             }
+            if (inHand[i] > 0 && freeHand[inHand[i] - 1]) { pose[i] = Compose(g_sk.ref[i], pose[p]); changed[i] = true; continue; }
             if (p >= 0 && changed[p]) { pose[i] = Compose(Compose(anim[i], Inverse(anim[p])), pose[p]); changed[i] = true; }
             bool hide = i == g_sk.head || (g_sk.group[i] == 1 && g_cfg.showBody < 2) || (g_sk.group[i] == 2 && g_cfg.showBody == 0);
             if (hide) { for (auto& a : pose[i].ax) a = Scale(a, 0.01f); changed[i] = true; }
@@ -1076,11 +1177,9 @@ void OnSkelPose(uint8_t* comp)
             g_frozenCount = n;
             g_frozenL2W = compToWorld;
             g_frozenPawn = pawnNow;
-            if (g_gun.comp && g_gun.bone >= 0) {
-                g_gunWorld = Compose(GunInComponent(pose, compToWorld), compToWorld);
+            if (g_gun.comp && g_gun.posed) {
+                g_gunWorld = Compose(GunInComponent(), compToWorld);
                 g_gunWorldValid = gunArm;
-                g_gun.boneWorld = Compose(pose[g_gun.bone], compToWorld);
-                g_gun.boneWorldValid = true;
             } else {
                 g_gunWorldValid = false;
             }
@@ -1137,7 +1236,16 @@ void __stdcall HookSetOpacityOverride(void* actor, float opacity, int flag)
 // ---------------------------------------------------------------------------------------------
 void IKSetPawn(void* pawn, const float viewPos[3])
 {
-    if (!pawn && g_gun.comp) {   // leaving first person (cutscene, menu): the weapon gets its size back
+    if (!pawn && g_gun.comp) {   // leaving first person (cutscene, menu): the weapon as the game had it
+        __try {
+            uint8_t* att = g_gun.placed && g_gun.mesh ? *(uint8_t**)(g_gun.mesh + kCompAttachments) : nullptr;
+            int count = att ? *(int*)(g_gun.mesh + kCompAttachments + 4) : 0;
+            for (int i = 0; i < count && i < 64; i++) {
+                uint8_t* e = att + i * 0x30;
+                if (*(uint8_t**)e == g_gun.comp && IsOurPlacement(e)) RestoreGunEntry(e);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        g_gun.placed = false;
         RestoreScale(g_gun.comp);
         g_gun.comp = nullptr;
     }

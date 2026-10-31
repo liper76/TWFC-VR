@@ -387,6 +387,7 @@ const int kWeaponMesh = 0x20C, kWeaponMesh2 = 0x208;
 const float kTurretRange = 800.0f;
 uint8_t* g_turrets[8];
 int g_turretCount;
+volatile bool g_onTurret;
 
 bool IsTurret(const wchar_t* n)
 {
@@ -483,6 +484,24 @@ void UpdateTurrets(uint8_t* pawn, DWORD now)
         }
     }
     for (int i = 0; i < g_turretCount; i++) ShrinkTurretFx(g_turrets[i], g_cfg.muzzleFlashScale);
+
+    // on a mounted turret: the weapon in hand is a turret's and a mountable turret stands right where the player is
+    // (a turret gun torn off and carried away is not on one)
+    bool on = false;
+    uint8_t* w = *(uint8_t**)(pawn + kPawnWeapon);
+    const wchar_t* wn = w ? NameOf(*(unsigned*)(w + 4)) : nullptr;
+    if (wn && IsTurret(wn)) {
+        const float* p = (const float*)(pawn + kActorLocation);
+        for (int i = 0; i < g_turretCount && !on; i++) {
+            const wchar_t* tn = NameOf(*(unsigned*)(g_turrets[i] + 4));
+            if (!tn || wcsncmp(tn, L"TnMountable", 11)) continue;
+            const float* q = (const float*)(g_turrets[i] + kActorLocation);
+            float dx = q[0] - p[0], dy = q[1] - p[1];
+            on = dx * dx + dy * dy < 250.0f * 250.0f;
+        }
+    }
+    if (on != g_onTurret) Log("weapons: %s a turret (%ls)", on ? "on" : "off", wn ? wn : L"-");
+    g_onTurret = on;
 }
 
 }   // namespace
@@ -513,7 +532,7 @@ void WeaponsUpdate(void* pawnPtr)
             g_seenCount = 0;
             if (!pawn) { g_meleeHand = -1; g_want = nullptr; }
         }
-        if (!pawn || !mesh || !g_origDetach) return;
+        if (!pawn || !mesh || !g_origDetach) { g_onTurret = false; return; }
         UpdateTurrets(pawn, now);
         bool vehicle = IKPawnIsVehicle();
         TrackAttachments(mesh, now);
@@ -566,6 +585,8 @@ void WeaponsSetMeleeHand(int hand)
 int WeaponsMeleeHand() { return g_meleeHand; }
 void WeaponsStrike(int hand) { g_strikeHand = hand; g_strikeAt = GetTickCount(); }
 int WeaponsMeleeHeld() { return g_meleeHeld; }
+
+bool WeaponsOnTurret() { return g_onTurret; }
 
 bool WeaponsWantPress(bool melee)
 {

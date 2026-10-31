@@ -35,9 +35,8 @@ CONTROLS (main mode; the buttons work like an Xbox gamepad)
   Right trigger ................... fire (with a melee weapon in the right hand: swing it)
   Left trigger .................... as in the game: precise aim / the weapon's second action (detonating grenades);
                                     in vehicle form - boost
-  Y: short press .................. main ability (RB)
-  Y: hold 0.35 s .................. second ability (LB), held while you hold Y
-  B: short press .................. grenade / action / skip a movie (like B in the game)
+  Y ............................... main ability (RB), at once, held while you hold Y
+  B: short press .................. second ability (LB). Grenades are taken from the belt with the grip (no button)
   B: hold 0.35 s .................. the right hand's WEAPON WHEEL (like Half-Life: Alyx): point the hand at an item
                                     and release B. Items: your weapons / "Empty hand". (The grips do not open the
                                     wheel - they only grab.) In a vehicle, holding B switches the vehicle's weapon.
@@ -50,6 +49,9 @@ CONTROLS (main mode; the buttons work like an Xbox gamepad)
   Left grip at the front of the gun  two-handed grip (the back of the gun follows the right controller,
                                     the barrel turns to the left hand)
   A - jump, X - reload / interact
+  Grip (free hand, not at the belt) . use: pick up, levers, buttons (GripUse=1 in [Input])
+  "Empty hand" in the wheel on a turret: get off the turret. On a turret: aim with both hands
+                                    (between them), the eyes are raised by TurretEyeUp=0.35 m ([VR])
   (in a vehicle: Y - the vehicle's special move)
   The old layout (grips = abilities, Y = next weapon): GripAbilities=1 in [Input].
   (in the old layout the stick clicks are LS / RS)

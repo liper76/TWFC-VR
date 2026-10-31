@@ -107,6 +107,8 @@ static void LoadConfig()
                   "VehicleEyeForward=-100\n"
                   "FirstPersonEyeHeight=150\n"
                   "FirstPersonEyeForward=30\n"
+                  "; On a mounted turret the eyes and the body go up by this much (metres) to see over the turret\n"
+                  "TurretEyeUp=0.35\n"
                   "; Unreal units per real metre for head movement\n"
                   "WorldScale=200\n"
                   "; Game render resolution for VR (square is best: each frame is one eye). 0 = use the game's setting.\n"
@@ -154,6 +156,9 @@ static void LoadConfig()
                   "PullRange=12\n"
                   "PullCone=15\n"
                   "PullSpeed=0\n"
+                  "; 1 = a free hand's grip squeezed away from the body is the game's use button (X): take a weapon, pull a lever,\n"
+                  ";     press a button, get in (held for as long as the grip is)\n"
+                  "GripUse=1\n"
                   "; Left grip near the front of the weapon = hold it with both hands (metres in front of the right hand, radius)\n"
                   "TwoHanded=1\n"
                   "TwoHandReach=0.25\n"
@@ -240,6 +245,7 @@ static void LoadConfig()
     g_cfg.pullSpeed = IniFloat(ini, L"Input", L"PullSpeed", g_cfg.pullSpeed);
     g_cfg.pullAutoTake = (int)IniFloat(ini, L"Input", L"PullAutoTake", (float)g_cfg.pullAutoTake);
     g_cfg.pullTrace = (int)IniFloat(ini, L"Input", L"PullTrace", (float)g_cfg.pullTrace);
+    g_cfg.gripUse = (int)IniFloat(ini, L"Input", L"GripUse", (float)g_cfg.gripUse);
     g_cfg.twoHanded = (int)IniFloat(ini, L"Input", L"TwoHanded", (float)g_cfg.twoHanded);
     g_cfg.twoHandReach = IniFloat(ini, L"Input", L"TwoHandReach", g_cfg.twoHandReach);
     g_cfg.twoHandRadius = IniFloat(ini, L"Input", L"TwoHandRadius", g_cfg.twoHandRadius);
@@ -300,6 +306,7 @@ static void LoadConfig()
     g_cfg.moveByHead = (int)IniFloat(ini, L"Input", L"MoveByHead", (float)g_cfg.moveByHead);
     g_cfg.eyeHeight = IniFloat(ini, L"VR", L"FirstPersonEyeHeight", g_cfg.eyeHeight);
     g_cfg.eyeForward = IniFloat(ini, L"VR", L"FirstPersonEyeForward", g_cfg.eyeForward);
+    g_cfg.turretEyeUp = IniFloat(ini, L"VR", L"TurretEyeUp", g_cfg.turretEyeUp);
     g_cfg.keepStickPitch = (int)IniFloat(ini, L"VR", L"KeepStickPitch", (float)g_cfg.keepStickPitch);
     g_cfg.snapTurnDeg = (int)IniFloat(ini, L"Input", L"SnapTurnDegrees", (float)g_cfg.snapTurnDeg);
     g_cfg.smoothTurnDegPerSec = IniFloat(ini, L"Input", L"SmoothTurnSpeed", g_cfg.smoothTurnDegPerSec);
