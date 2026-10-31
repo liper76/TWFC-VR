@@ -487,19 +487,29 @@ void UpdateTurrets(uint8_t* pawn, DWORD now)
 
     // on a mounted turret: the weapon in hand is a turret's and a mountable turret stands right where the player is
     // (a turret gun torn off and carried away is not on one)
-    bool on = false;
+    // (it flickered on and off every frame at the edge: on within 250 units, off only past 400 or with another
+    // weapon, and only after 0.3 s of that)
+    bool close = false;
     uint8_t* w = *(uint8_t**)(pawn + kPawnWeapon);
     const wchar_t* wn = w ? NameOf(*(unsigned*)(w + 4)) : nullptr;
     if (wn && IsTurret(wn)) {
         const float* p = (const float*)(pawn + kActorLocation);
-        for (int i = 0; i < g_turretCount && !on; i++) {
+        float r = g_onTurret ? 400.0f : 250.0f;
+        for (int i = 0; i < g_turretCount && !close; i++) {
             const wchar_t* tn = NameOf(*(unsigned*)(g_turrets[i] + 4));
             if (!tn || wcsncmp(tn, L"TnMountable", 11)) continue;
             const float* q = (const float*)(g_turrets[i] + kActorLocation);
             float dx = q[0] - p[0], dy = q[1] - p[1];
-            on = dx * dx + dy * dy < 250.0f * 250.0f;
+            close = dx * dx + dy * dy < r * r;
         }
     }
+    static DWORD awayAt;
+    bool on = close;
+    if (g_onTurret && !close) {
+        if (!awayAt) awayAt = now;
+        on = now - awayAt < 300;
+    }
+    if (close) awayAt = 0;
     if (on != g_onTurret) Log("weapons: %s a turret (%ls)", on ? "on" : "off", wn ? wn : L"-");
     g_onTurret = on;
 }
@@ -614,6 +624,45 @@ float WeaponsTurretClearance(const float o[3], const float dir[3])
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0.0f; }
     return best;
+}
+
+// On a mounted turret: its muzzle (world) - the middle of the particle systems (muzzle flashes) attached to the
+// turret gun's meshes, which sit at its barrels' ends. The shots start there, so they leave the turret's end
+// along where it points.
+bool WeaponsTurretMuzzle(const float o[3], float out[3])
+{
+    if (!g_onTurret || !g_pawn) return false;
+    __try {
+        uint8_t* w = *(uint8_t**)((uint8_t*)g_pawn + kPawnWeapon);
+        if (!w) return false;
+        uint8_t* meshes[2] = { *(uint8_t**)(w + kWeaponMesh), *(uint8_t**)(w + kWeaponMesh2) };
+        float sum[3] = {};
+        int n = 0;
+        for (int m = 0; m < 2; m++) {
+            if (!meshes[m] || (m == 1 && meshes[1] == meshes[0])) continue;
+            uint8_t* att = *(uint8_t**)(meshes[m] + kMeshAttachments);
+            int count = *(int*)(meshes[m] + kMeshAttachments + 4);
+            for (int i = 0; att && i < count && i < 32; i++) {
+                uint8_t* c = *(uint8_t**)(att + i * 0x30);
+                const wchar_t* nm = c ? NameOf(*(unsigned*)(c + 4)) : nullptr;
+                if (!nm || !wcsstr(nm, L"ParticleSystemComponent")) continue;
+                const float* t = (const float*)(c + 0x50 + 0x30);   // LocalToWorld's translation
+                float dx = t[0] - o[0], dy = t[1] - o[1], dz = t[2] - o[2];
+                if (dx * dx + dy * dy + dz * dz > 800.0f * 800.0f) continue;   // (not placed yet)
+                for (int k = 0; k < 3; k++) sum[k] += t[k];
+                n++;
+            }
+        }
+        if (!n) return false;
+        for (int k = 0; k < 3; k++) out[k] = sum[k] / n;
+        static uint8_t* logged;
+        if (logged != w) {
+            logged = w;
+            Log("weapons: turret muzzle from %d particle systems, %.0f units from the hands", n,
+                sqrtf((out[0] - o[0]) * (out[0] - o[0]) + (out[1] - o[1]) * (out[1] - o[1]) + (out[2] - o[2]) * (out[2] - o[2])));
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
 bool WeaponsWantPress(bool melee)

@@ -280,6 +280,12 @@ static void RunLine(const char* line)
     } else if (!strncmp(line, "turretfx", 8)) {
         void WeaponsDebugTurretFx();
         WeaponsDebugTurretFx();
+    } else if (!strncmp(line, "armdump", 7)) {   // the right arm's bones as the game animates them (once)
+        void IKArmDump();
+        IKArmDump();
+    } else if (!strncmp(line, "putaway", 7)) {   // putaway 1|0: the right hand empty (the gun put away) or back
+        void VRDebugPutAway(int on);
+        VRDebugPutAway(atoi(line + 7));
     } else if (!strncmp(line, "ability", 7)) {
         void VRDebugAbility();
         VRDebugAbility();

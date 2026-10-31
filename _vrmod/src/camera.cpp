@@ -408,13 +408,19 @@ void CameraOnUpdate(TPOV* pov, void* viewTarget, void* pc, float dt)
         Vec3 h = XrToUE({ a.px, a.py, a.pz });
         Vec3 hw = Mul(body, Vec3{ h.x * s, h.y * s, h.z * s });
         Vec3 o = { g_latchBase.x + hw.x, g_latchBase.y + hw.y, g_latchBase.z + hw.z };
-        // on a turret the aim starts past the turret's own gun (the ring still measured from the hands)
-        float clear = 0.0f;
+        // on a turret the aim starts at its muzzle (the shots leave its end, along the aim it is turned to), or
+        // else past the turret's own gun (the ring still measured from the hands)
+        Vec3 start = o;
         if (turret) {
-            float of[3] = { o.x, o.y, o.z }, df[3] = { turretDir.x, turretDir.y, turretDir.z };
-            clear = WeaponsTurretClearance(of, df);
+            float of[3] = { o.x, o.y, o.z }, df[3] = { turretDir.x, turretDir.y, turretDir.z }, mz[3];
+            if (WeaponsTurretMuzzle(of, mz)) {
+                start = { mz[0] + turretDir.x * 10.0f, mz[1] + turretDir.y * 10.0f, mz[2] + turretDir.z * 10.0f };
+            } else {
+                float clear = WeaponsTurretClearance(of, df);
+                start = { o.x + turretDir.x * clear, o.y + turretDir.y * clear, o.z + turretDir.z * clear };
+            }
         }
-        GameSetAim(true, ap, ay, o.x + turretDir.x * clear, o.y + turretDir.y * clear, o.z + turretDir.z * clear);
+        GameSetAim(true, ap, ay, start.x, start.y, start.z);
         UpdateAimHit(pc, o.x, o.y, o.z);
         // the game moves the pawn relative to the aim: turn the stick by (head - aim) so "forward" is where you look
         int d = (short)(uint16_t)((headYaw - ay) & 0xFFFF);
