@@ -380,13 +380,17 @@ void CameraOnUpdate(TPOV* pov, void* viewTarget, void* pc, float dt)
         int gh = VRGunHand() == 0 ? 0 : 1;   // the gun's hand (the left one when the gun was taken there)
         auto a = eye.aim[gh];
         int ap, ay, ar;
-        if (WeaponsOnTurret() && eye.aim[0].valid && eye.aim[1].valid) {
+        Vec3 turretDir = {};
+        bool turret = WeaponsOnTurret() && eye.aim[0].valid && eye.aim[1].valid;
+        if (turret) {
             // a mounted turret is aimed with both hands on its handles: between the two controllers (VRTurretAim)
             float q[4], p[3];
             VRTurretAim(eye.aim[0], eye.aim[1], q, p);
             a.qx = q[0]; a.qy = q[1]; a.qz = q[2]; a.qw = q[3];
             a.px = p[0]; a.py = p[1]; a.pz = p[2];
-            MatToRotator(Mul(body, XrRotToUE(QuatToMat(a.qx, a.qy, a.qz, a.qw))), ap, ay, ar);
+            Mat3 m = Mul(body, XrRotToUE(QuatToMat(a.qx, a.qy, a.qz, a.qw)));
+            MatToRotator(m, ap, ay, ar);
+            turretDir = m.col(0);
         } else {
             MatToRotator(Mul(body, XrRotToUE(HandAimXR(eye, gh))), ap, ay, ar);
         }
@@ -403,8 +407,15 @@ void CameraOnUpdate(TPOV* pov, void* viewTarget, void* pc, float dt)
         // shots start at the hand, so they travel along the same ray as the VR crosshair
         Vec3 h = XrToUE({ a.px, a.py, a.pz });
         Vec3 hw = Mul(body, Vec3{ h.x * s, h.y * s, h.z * s });
-        GameSetAim(true, ap, ay, g_latchBase.x + hw.x, g_latchBase.y + hw.y, g_latchBase.z + hw.z);
-        UpdateAimHit(pc, g_latchBase.x + hw.x, g_latchBase.y + hw.y, g_latchBase.z + hw.z);
+        Vec3 o = { g_latchBase.x + hw.x, g_latchBase.y + hw.y, g_latchBase.z + hw.z };
+        // on a turret the aim starts past the turret's own gun (the ring still measured from the hands)
+        float clear = 0.0f;
+        if (turret) {
+            float of[3] = { o.x, o.y, o.z }, df[3] = { turretDir.x, turretDir.y, turretDir.z };
+            clear = WeaponsTurretClearance(of, df);
+        }
+        GameSetAim(true, ap, ay, o.x + turretDir.x * clear, o.y + turretDir.y * clear, o.z + turretDir.z * clear);
+        UpdateAimHit(pc, o.x, o.y, o.z);
         // the game moves the pawn relative to the aim: turn the stick by (head - aim) so "forward" is where you look
         int d = (short)(uint16_t)((headYaw - ay) & 0xFFFF);
         g_moveYawDelta = g_cfg.moveByHead ? d * kUURotToRad : 0.0f;
