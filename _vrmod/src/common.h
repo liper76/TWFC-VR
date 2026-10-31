@@ -184,6 +184,10 @@ void CameraBaseOffset(float& forward, float& up);   // eye base relative to the 
 bool CameraVehicleAim();                    // vehicle form: the weapon aims where the head looks
 float CameraAimHitMeters();                 // distance to where the game's aim trace hits (0 = unknown)
 void IKSetHand(int hand, bool valid, const float pos[3], const float axes[3][3]);   // body frame pose relative to the eye base; axes[k] = X/Y/Z
+void IKOnAttach(void* mesh, void* comp);    // weapons.cpp: the game attached comp to mesh (after it did)
+bool IKOnDetach(void* mesh, void* comp);    // weapons.cpp: the game detaches comp from mesh (false = keep it attached)
+bool IKArmModelHeld(void* mesh, void* comp);   // weapons.cpp: comp is the arm model the mod keeps on the empty right hand
+void IKArmModelUpdate(void* pawn, bool allowed);   // weapons.cpp, game thread, each frame: the arm model on the empty right hand
 
 // ---- weapons.cpp: the player's weapons (weapon wheel) and the melee weapon held in a hand ----
 struct WeaponList {
@@ -201,6 +205,11 @@ int WeaponsMeleeHeld();                     // the hand the melee weapon is in r
 void WeaponsStrike(int hand);               // VR input: a melee attack by that hand starts now (the robot is held in place)
 bool WeaponsWantPress(bool melee);          // VR input: the game's next-weapon (false) / melee (true) button is wanted now
 bool WeaponsIsMeleeComp(void* comp);        // ik.cpp: that component is the melee weapon kept in a hand
+bool WeaponsIsFlipped(void* comp);          // ik.cpp: a punch with the empty left hand moved that component to the left side
+bool WeaponsIsAttached(void* mesh, void* comp);
+// ik.cpp: attach/detach through the original engine functions (not seen by the hooks)
+void WeaponsAttachOriginal(void* mesh, void* comp, unsigned bone, const float* loc, const int* rot, const float* scale);
+void WeaponsDetachOriginal(void* mesh, void* comp);
 bool WeaponsOnTurret();                     // the player is on a mounted turret (its gun in hand)
 float WeaponsTurretClearance(const float o[3], const float dir[3]);   // the aim ray's run through the turret gun
 bool WeaponsTurretMuzzle(const float o[3], float out[3]);            // on a turret: its muzzle (world), near o

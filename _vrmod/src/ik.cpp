@@ -12,7 +12,11 @@
 //                 upper arm. The right arm holding the forearm-mounted gun is posed from
 //                 the gun: the gun takes the controller's aim, the wrist sits in the real hand. The left hand
 //                 holding the gun's front grip (two-handed) sits on the grip. A hand holding the melee weapon is
-//                 a free hand (the weapon hangs off its weapon bone).
+//                 a free hand (the weapon hangs off its weapon bone). The gun is the one of Pawn.Weapon among the
+//                 mesh's attachments, taken from the game's own attachment of it (records of the game's values:
+//                 the mod's placement is never mistaken for the game's); guns held before stay hidden where the
+//                 game has them. The empty right hand wears the robot's arm model (the arm shell the game shows
+//                 on a grenade throw) on the forearm as posed.
 //   4. Look     - head hidden (the eyes are inside), bulky torso hidden, slimmer limbs, hand and weapon sizes.
 //
 // Abilities (spins, special attacks) are arm animations: for a moment after an ability button the arms blend to
@@ -282,33 +286,71 @@ bool ResolveSkeleton(uint8_t* mesh)
 }
 
 // ---------------------------------------------------------------------------------------------
-// The held gun: a skeletal mesh attached to the right arm (Transformers carry their guns on the forearm). Read
-// from the pawn mesh's attachments: which bone it hangs on and its exact placement relative to that bone.
-// The game's attachment is kept as it made it (restored whenever we let go); every frame the gun is placed anew
-// from it - nothing is measured from the animation (a weapon taken mid-animation, with the hand shrunk away,
-// once left the gun ten times its size for good) and nothing builds up.
+// Attachments. Every skeletal mesh attached to the player's mesh (guns, the arm model, melee parts) has a record of
+// its attachment exactly as the game made it - taken when the game attaches it (the attach hook in weapons.cpp) or
+// when it is first seen, never re-read from the entry (that may hold our placement). Whatever the mod writes into
+// an entry or a component's Scale goes back from the record when the mod lets go of it: when the gun is put away,
+// switched, picked up or the arm model is no longer needed, and when leaving first person.
+const int kCompOwner = 0x34;         // ActorComponent.Owner
+const int kCompFlags = 0xF0;         // PrimitiveComponent bit flags
+const uint32_t kHiddenGame = 0x4;
+struct Att {
+    uint8_t* comp;
+    unsigned bone;                   // as the game attached it: bone, location, rotation, scale
+    float loc[3], scale[3];
+    int rot[3];
+    unsigned serial;                 // a new one for every attach (a new capture of the gun)
+    bool moved;                      // the entry holds our placement
+    bool sized;                      // the component's Scale is ours
+};
+const int kMaxAtt = 32;
+Att g_att[kMaxAtt];
+int g_attCount;
+uint8_t* g_attMesh;                  // the mesh the records are of
+unsigned g_attSerial;
+uint8_t* g_knownGuns[8];             // guns held lately (most recent first): hidden while on an arm but not in hand
+
+// ---------------------------------------------------------------------------------------------
+// The held gun: a skeletal mesh attached to the right arm (Transformers carry their guns on the forearm) - the mesh
+// of the weapon in hand (Pawn.Weapon). Every frame it is placed anew from its record: nothing is measured from the
+// animation (a weapon taken mid-animation, with the hand shrunk away, once left the gun ten times its size) and
+// nothing builds up.
 struct Gun {
     uint8_t* comp = nullptr;
-    uint8_t* mesh = nullptr;         // the pawn mesh it is attached to
     uint8_t* entry = nullptr;        // its attachment entry (this frame)
-    unsigned origBone = 0;           // the attachment as the game made it
-    float origLoc[3], origScale[3];
-    int origRot[3];
+    unsigned serial = 0;             // the attachment it was captured from
+    DWORD lastSeen = 0;
     int origSide = 1;                // the arm the game put it on
-    bool placed = false;             // the entry holds our placement:
-    unsigned wroteBone = 0;          //   on this bone, at this location
-    float wroteLoc[3];
     Pose inHand;                     // gun relative to the hand, the wrist straight (unit axes; component units)
     float size = 1.0f;               // gun units -> component units (before the component's own Scale)
     float handSize = 1.0f;           // the hand's size as the game draws it under the gun
     Pose pose;                       // the gun as posed this frame (unit axes; component space)
     bool posed = false;
+    bool held = false;               // in use: the gun arm is posed from it (also for a moment while switching)
     uint8_t* skelMesh = nullptr;     // to notice weapon changes
     bool scoped = false;             // a sniper rifle (ini ScopeWeapons)
     bool hasGrip = false;
     Vec3 grip;                       // front grip in gun space (gun units, unscaled)
 } g_gun;
 int g_gunSide = 1;              // the arm holding the gun (1 right; 0 left - VRGunHand)
+
+// The arm model: the robot's whole forearm (CP_<robot>Arm_SKEL), which the game attaches to the right forearm while
+// the gun is folded away (a grenade throw, a pickup, a melee attack). An empty right hand wears it, so it is a
+// full arm and not the thin forearm the gun animations leave.
+uint8_t* g_armComp;                  // found for this pawn (null: not yet)
+uint8_t* g_armPawn;
+uint8_t* g_armMesh;
+bool g_armSearched;                  // looked for in the pawn once
+bool g_armOurs;                      // the mod keeps it attached (the game's detach is refused)
+bool g_armAttachedByUs;              // ... and detaches it itself when done
+bool g_armWasHidden;
+uint8_t* g_armEntry;                 // its attachment entry (this frame)
+volatile bool g_armWanted;           // the right hand is empty (skeleton update, eye 0)
+volatile DWORD g_armWantedTick;
+unsigned g_armGameBone;              // where the game attaches it (for attaching it ourselves)
+float g_armGameLoc[3], g_armGameScale[3];
+int g_armGameRot[3];
+bool g_armGameSaved;
 
 bool MatchesScopeList(const std::wstring& names)
 {
@@ -357,55 +399,88 @@ Pose RefComponent(int b)
     return p;
 }
 
-// The game's attachment back in the entry (the gun as the game's animation holds it).
-void RestoreGunEntry(uint8_t* e)
+// ---- attachment records ----
+uint8_t* EntryOf(uint8_t* mesh, uint8_t* comp)
 {
-    if (!e || !g_gun.placed) return;
-    *(unsigned*)(e + 4) = g_gun.origBone;
-    memcpy(e + 8, g_gun.origLoc, 12);
-    memcpy(e + 0x14, g_gun.origRot, 12);
-    memcpy(e + 0x20, g_gun.origScale, 12);
-    g_gun.placed = false;
+    uint8_t* att = *(uint8_t**)(mesh + kCompAttachments);
+    int count = *(int*)(mesh + kCompAttachments + 4);
+    for (int i = 0; att && i < count && i < 64; i++) if (*(uint8_t**)(att + i * 0x30) == comp) return att + i * 0x30;
+    return nullptr;
 }
 
-bool IsOurPlacement(const uint8_t* e)
+Att* FindAtt(const uint8_t* comp)
 {
-    return g_gun.placed && *(const unsigned*)(e + 4) == g_gun.wroteBone && !memcmp(e + 8, g_gun.wroteLoc, 12);
+    for (int i = 0; comp && i < g_attCount; i++) if (g_att[i].comp == comp) return &g_att[i];
+    return nullptr;
 }
 
-// The gun relative to the hand with the wrist straight (the bind pose from its bone to the hand), from the game's
-// attachment: a gun on the forearm is an extension of it, the hand inside.
-void CaptureGun(uint8_t* comp, const uint8_t* e, int b)
+// The entry's values as the game's (only for an entry the mod has not written to).
+void ReadAtt(Att* r, const uint8_t* e)
 {
-    g_gun.comp = comp;
-    g_gun.origBone = *(const unsigned*)(e + 4);
-    memcpy(g_gun.origLoc, e + 8, 12);
-    memcpy(g_gun.origRot, e + 0x14, 12);
-    memcpy(g_gun.origScale, e + 0x20, 12);
-    g_gun.placed = false;
-    g_gun.origSide = ArmOfBone(b);
-    const Arm& a = g_sk.arm[g_gun.origSide];
-    Pose rel = RotatorPose(g_gun.origRot);
-    rel.pos = { g_gun.origLoc[0], g_gun.origLoc[1], g_gun.origLoc[2] };
-    Pose in = Compose(rel, Compose(RefComponent(b), Inverse(RefComponent(a.hand))));
-    Vec3 ax[3];
-    UnitAxes(in, ax);
-    g_gun.inHand = { { ax[0], ax[1], ax[2] }, in.pos };
-    g_gun.size = fabsf(g_gun.origScale[0]) > 1e-3f ? fabsf(g_gun.origScale[0]) : 1.0f;
-    Log("ik: gun %p on bone %d (%s, %s arm): %.1f %.1f %.1f from the hand, size %.2f", comp, b,
-        b == a.elbow ? "forearm" : b == a.hand ? "hand" : "weapon bone", g_gun.origSide ? "right" : "left",
-        in.pos.x, in.pos.y, in.pos.z, g_gun.size);
+    r->bone = *(const unsigned*)(e + 4);
+    memcpy(r->loc, e + 8, 12);
+    memcpy(r->rot, e + 0x14, 12);
+    memcpy(r->scale, e + 0x20, 12);
+    r->serial = ++g_attSerial;
+    r->moved = false;
 }
 
-// The posed gun into its attachment entry, on the gun hand's bone (uniform: on the slimmed forearm it was sheared).
-void PlaceGunEntry(const Pose* pose)
+Att* RecordAtt(uint8_t* comp, const uint8_t* e)
 {
-    uint8_t* e = g_gun.entry;
-    int hb = g_sk.arm[g_gunSide].hand;
-    if (!e || hb < 0) return;
-    Pose g = g_gun.pose;
-    for (auto& a : g.ax) a = Scale(a, g_gun.size);
-    Pose rel = Compose(g, Inverse(pose[hb]));
+    if (g_attCount >= kMaxAtt) return nullptr;
+    Att* r = &g_att[g_attCount++];
+    r->comp = comp;
+    r->sized = false;
+    ReadAtt(r, e);
+    return r;
+}
+
+void DropAtt(Att* r)
+{
+    for (auto& g : g_knownGuns) if (g == r->comp) g = nullptr;
+    *r = g_att[--g_attCount];
+}
+
+void RestoreEntry(Att* r, uint8_t* e)
+{
+    if (!r->moved) return;
+    if (e) {
+        *(unsigned*)(e + 4) = r->bone;
+        memcpy(e + 8, r->loc, 12);
+        memcpy(e + 0x14, r->rot, 12);
+        memcpy(e + 0x20, r->scale, 12);
+    }
+    r->moved = false;
+}
+
+void SetScale(Att* r, float s)
+{
+    *(float*)(r->comp + kCompScale) = s;
+    r->sized = s != 1.0f;
+}
+
+// Everything the mod changed back as the game had it; `forget`: the records too (leaving first person).
+void LetGoAll(bool forget)
+{
+    __try {
+        for (int i = 0; i < g_attCount; i++) {
+            Att& r = g_att[i];
+            if (r.moved) RestoreEntry(&r, g_attMesh ? EntryOf(g_attMesh, r.comp) : nullptr);
+            if (r.sized) { RestoreScale(r.comp); r.sized = false; }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    if (forget) {
+        g_attCount = 0;
+        g_attMesh = nullptr;
+        memset(g_knownGuns, 0, sizeof(g_knownGuns));
+    }
+}
+
+// `want` (component space) into the entry, on bone b as posed: uniform axes there (on the slimmed forearm the
+// attachment was sheared).
+void WriteEntry(Att* r, uint8_t* e, const Pose& want, int b, const Pose* pose)
+{
+    Pose rel = Compose(want, Inverse(pose[b]));
     Vec3 ax[3];
     UnitAxes(rel, ax);
     Mat3 m;
@@ -416,149 +491,224 @@ void PlaceGunEntry(const Pose* pose)
     float* scale = (float*)(e + 0x20);
     loc[0] = rel.pos.x; loc[1] = rel.pos.y; loc[2] = rel.pos.z;
     for (int k = 0; k < 3; k++) scale[k] = Len(rel.ax[k]);
-    g_gun.wroteBone = *(unsigned*)(e + 4) = BoneName(hb);
-    memcpy(g_gun.wroteLoc, loc, 12);
-    g_gun.placed = true;
+    *(unsigned*)(e + 4) = BoneName(b);
+    r->moved = true;
 }
 
-// ---------------------------------------------------------------------------------------------
-// The folded gun. Put away (a switch to another weapon, a grenade throw), the game folds a forearm gun into a shell
-// around the forearm - an animation of the gun's own bones; its bind pose is the gun deployed. The most compact pose
-// each gun mesh is seen in (component space; kept in twfcvr_folded.dat across runs) is held while the gun is not in
-// use, so the forearm wears the folded gun as in the game instead of a bare thin arm.
-const int kFoldBones = 64;
-struct Folded { wchar_t name[64]; int n; float extent; float m[kFoldBones * 16]; };
-const int kMaxFolded = 24;
-Folded g_folded[kMaxFolded];
-int g_foldedCount = -1;          // -1: the file not read yet
-float g_foldMax[kMaxFolded];     // the gun's largest extent seen this run (deployed)
-bool g_foldDirty;
-DWORD g_foldChanged;
-bool g_holdFolded;               // the gun not in use (set by UpdateGun): drawn folded
-int g_foldLog;                   // debug (armdump): the gun's extent logged for this many updates
-uint8_t* g_recentGuns[4];        // the guns held lately: the game folds a gun on after it is let go of
+bool IsKnownGun(const uint8_t* c) { return c && std::find(g_knownGuns, g_knownGuns + 8, c) != g_knownGuns + 8; }
 
-std::wstring FoldedPath() { return ModDir() + L"twfcvr_folded.dat"; }
-
-void LoadFolded()
+void AddKnownGun(uint8_t* c)
 {
-    g_foldedCount = 0;
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, FoldedPath().c_str(), L"rb") || !f) return;
-    int n = (int)fread(g_folded, sizeof(Folded), kMaxFolded, f);
-    fclose(f);
-    for (int i = 0; i < n; i++) if (g_folded[i].n <= 0 || g_folded[i].n > kFoldBones) { n = i; break; }
-    g_foldedCount = n;
-    Log("ik: %d folded gun poses read", n);
+    int i = 0;
+    while (i < 7 && g_knownGuns[i] != c) i++;
+    memmove(g_knownGuns + 1, g_knownGuns, i * sizeof(uint8_t*));
+    g_knownGuns[0] = c;
 }
 
-void SaveFolded()
+// The gun relative to the hand with the wrist straight (the bind pose from its bone to the hand), from the game's
+// attachment: a gun on the forearm is an extension of it, the hand inside.
+void CaptureGun(const Att* r)
 {
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, FoldedPath().c_str(), L"wb") || !f) return;
-    fwrite(g_folded, sizeof(Folded), g_foldedCount, f);
-    fclose(f);
-    g_foldDirty = false;
+    int b = BoneIndex(r->bone);
+    g_gun.serial = r->serial;
+    g_gun.origSide = ArmOfBone(b);
+    const Arm& a = g_sk.arm[g_gun.origSide];
+    Pose rel = RotatorPose(r->rot);
+    rel.pos = { r->loc[0], r->loc[1], r->loc[2] };
+    Pose in = Compose(rel, Compose(RefComponent(b), Inverse(RefComponent(a.hand))));
+    Vec3 ax[3];
+    UnitAxes(in, ax);
+    g_gun.inHand = { { ax[0], ax[1], ax[2] }, in.pos };
+    g_gun.size = fabsf(r->scale[0]) > 1e-3f ? fabsf(r->scale[0]) : 1.0f;
+    Log("ik: gun %p on bone %d (%s, %s arm): %.1f %.1f %.1f from the hand, size %.2f", r->comp, b,
+        b == a.elbow ? "forearm" : b == a.hand ? "hand" : "weapon bone", g_gun.origSide ? "right" : "left",
+        in.pos.x, in.pos.y, in.pos.z, g_gun.size);
 }
 
-// The entry for a gun mesh (by its name); `add`: a new one when there is none.
-int FoldedIndex(uint8_t* skel, bool add)
+// The posed gun into its attachment entry, on the gun hand's bone.
+bool PlaceGunEntry(const Pose* pose)
 {
-    if (g_foldedCount < 0) LoadFolded();
+    Att* r = FindAtt(g_gun.comp);
+    int hb = g_sk.arm[g_gunSide].hand;
+    if (!r || !g_gun.entry || hb < 0) return false;
+    Pose g = g_gun.pose;
+    for (auto& a : g.ax) a = Scale(a, g_gun.size);
+    WriteEntry(r, g_gun.entry, g, hb, pose);
+    return true;
+}
+
+// Still a skeletal mesh component (as `mesh`): not freed or reused.
+bool SameKind(const uint8_t* c, const uint8_t* mesh)
+{
+    __try { return c && *(const uintptr_t*)c == *(const uintptr_t*)mesh; } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+const wchar_t* SkelName(const uint8_t* c)
+{
+    const uint8_t* skel = c ? *(uint8_t* const*)(c + kCompSkelMesh) : nullptr;
+    const wchar_t* nm = skel ? NameOf(*(const unsigned*)(skel + 4)) : nullptr;
+    return nm ? nm : L"?";
+}
+
+// ---- the arm model ----
+// (memory of a pawn read while looking for it: only what is mapped and readable)
+uintptr_t g_readLo, g_readHi;
+bool Readable(const void* p, size_t n)
+{
+    uintptr_t a = (uintptr_t)p;
+    if (a < 0x10000) return false;
+    if (a >= g_readLo && a + n <= g_readHi) return true;
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!VirtualQuery(p, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS))) return false;
+    if (!(mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)))
+        return false;
+    g_readLo = (uintptr_t)mbi.BaseAddress;
+    g_readHi = g_readLo + mbi.RegionSize;
+    return a + n <= g_readHi;
+}
+
+// A skeletal mesh component of this pawn whose model is an arm (CP_SoundwaveArm_SKEL; not a weapon: WEP_...).
+bool IsArmModel(uint8_t* c, uint8_t* pawn, uint8_t* mesh)
+{
+    if (!c || c == mesh || *(uintptr_t*)c != *(uintptr_t*)mesh) return false;
+    uint8_t* owner = *(uint8_t**)(c + kCompOwner);
+    if (owner && owner != pawn) return false;
+    uint8_t* skel = *(uint8_t**)(c + kCompSkelMesh);
     const wchar_t* nm = skel ? NameOf(*(unsigned*)(skel + 4)) : nullptr;
-    if (!nm) return -1;
-    for (int i = 0; i < g_foldedCount; i++) if (!wcscmp(g_folded[i].name, nm)) return i;
-    if (!add || g_foldedCount >= kMaxFolded) return -1;
-    Folded& f = g_folded[g_foldedCount];
-    memset(&f, 0, sizeof(f));
-    wcsncpy_s(f.name, nm, _TRUNCATE);
-    return g_foldedCount++;
+    return nm && wcsstr(nm, L"Arm") && !Starts(nm, L"WEP");
 }
 
-// The gun's own skeleton update: its most compact pose remembered; while the gun is put away, that pose is drawn.
-void OnGunPose(uint8_t* comp)
+bool ArmModelAt(uint8_t* c, uint8_t* pawn, uint8_t* mesh)
 {
-    float* bases = *(float**)(comp + kCompSpaceBases);
-    int n = *(int*)(comp + kCompSpaceBases + 4);
-    uint8_t* skel = *(uint8_t**)(comp + kCompSkelMesh);
-    if (!bases || n <= 1 || n > kFoldBones || !skel) return;
-    int k = FoldedIndex(skel, true);
-    if (k < 0) return;
-    Folded& f = g_folded[k];
-    if (g_holdFolded && comp == g_gun.comp && f.n == n) {
-        memcpy(bases, f.m, n * 16 * sizeof(float));
-        return;
-    }
-    // how far the bones reach from the root (a folded gun is compact; parts tucked away are scaled to nothing);
-    // not a pose collapsed to a point
-    float extent = 0.0f;
-    for (int i = 1; i < n; i++) {
-        const float* m = bases + i * 16;
-        float s = sqrtf(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
-        if (s > 2.0f) return;
-        if (s < 0.05f) continue;
-        extent += sqrtf((m[12] - bases[12]) * (m[12] - bases[12]) + (m[13] - bases[13]) * (m[13] - bases[13]) + (m[14] - bases[14]) * (m[14] - bases[14]));
-    }
-    if (g_foldLog > 0) { g_foldLog--; Log("foldlog %p %ls extent %.0f", comp, f.name, extent); }
-    g_foldMax[k] = fmaxf(g_foldMax[k], extent);
-    if (extent < 0.25f * g_foldMax[k]) return;
-    if (f.n != n || extent < f.extent * 0.995f) {
-        if (f.n == n && extent < f.extent * 0.9f) Log("ik: folded gun '%ls': extent %.0f (deployed %.0f)", f.name, extent, g_foldMax[k]);
-        f.n = n;
-        f.extent = extent;
-        memcpy(f.m, bases, n * 16 * sizeof(float));
-        g_foldDirty = true;
-        g_foldChanged = GetTickCount();
-    }
-    if (g_foldDirty && GetTickCount() - g_foldChanged > 1000) SaveFolded();
+    if (!Readable(c, kCompSkelMesh + 4)) return false;
+    uint8_t* skel = *(uint8_t**)(c + kCompSkelMesh);
+    if (*(uintptr_t*)c != *(uintptr_t*)mesh || !Readable(skel, 8)) return false;
+    return IsArmModel(c, pawn, mesh);
 }
 
-// Folded far enough from its deployed pose to be drawn as the put-away shell.
-bool HasFolded(uint8_t* comp)
+// The arm model among an object's properties (a component, or in an array of them); `at`: the offset found.
+uint8_t* FindArmModelIn(uint8_t* obj, int size, uint8_t* pawn, uint8_t* mesh, int& at)
 {
-    uint8_t* skel = *(uint8_t**)(comp + kCompSkelMesh);
-    int k = FoldedIndex(skel, false);
-    if (k < 0 || g_folded[k].n != *(int*)(comp + kCompSpaceBases + 4)) return false;
-    float deployed = g_foldMax[k] > 0.0f ? g_foldMax[k] : g_folded[k].extent;
-    return g_folded[k].extent < 0.85f * deployed;
+    g_readLo = g_readHi = 0;
+    __try {
+        for (int o = 0x40; o < size; o += 4) {
+            if (!Readable(obj + o, 12)) break;
+            at = o;
+            uint8_t* p = *(uint8_t**)(obj + o);
+            if (ArmModelAt(p, pawn, mesh)) return p;
+            int n = *(int*)(obj + o + 4), max = *(int*)(obj + o + 8);
+            if (n < 1 || n > 64 || max < n || max > 1024 || !Readable(p, n * 4)) continue;
+            for (int i = 0; i < n; i++) {
+                uint8_t* c = ((uint8_t**)p)[i];
+                if (ArmModelAt(c, pawn, mesh)) return c;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return nullptr;
 }
 
-// Finds the gun among the mesh's attachments, sets its size (folded on the forearm while the hand is empty or
-// holds the melee weapon; hidden when its folded pose is not known yet) and the size of its muzzle flashes.
+// The arm model before the game ever attached it: on the pawn, or on one of its inventory items (weapons).
+uint8_t* FindArmModel(uint8_t* pawn, uint8_t* mesh)
+{
+    const int kPawnInvManager = 0x424, kInvChain = 0x1C8;
+    int at = 0;
+    if (uint8_t* c = FindArmModelIn(pawn, 0x1800, pawn, mesh, at)) {
+        Log("ik: arm model %p (%ls) on the pawn +0x%X", c, SkelName(c), at);
+        return c;
+    }
+    __try {
+        uint8_t* inv = *(uint8_t**)(pawn + kPawnInvManager);
+        uint8_t* item = inv ? *(uint8_t**)(inv + kInvChain) : nullptr;
+        for (int k = 0; item && k < 32; k++, item = *(uint8_t**)(item + kInvChain)) {
+            if (uint8_t* c = FindArmModelIn(item, 0x800, pawn, mesh, at)) {
+                const wchar_t* in = NameOf(*(unsigned*)(item + 4));
+                Log("ik: arm model %p (%ls) on %ls +0x%X", c, SkelName(c), in ? in : L"?", at);
+                return c;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return nullptr;
+}
 
+bool ArmWanted() { return g_armWanted && GetTickCount() - g_armWantedTick < 300 && !IKPawnIsVehicle(); }
+
+void ReleaseArmModel()
+{
+    g_armOurs = false;
+    uint8_t* comp = g_armComp, *mesh = g_armMesh;
+    if (!comp || !mesh) { g_armAttachedByUs = false; return; }
+    uint8_t* e = EntryOf(mesh, comp);
+    Att* r = mesh == g_attMesh ? FindAtt(comp) : nullptr;
+    if (r) {
+        RestoreEntry(r, e);
+        if (r->sized) { RestoreScale(comp); r->sized = false; }
+    }
+    if (g_armAttachedByUs) {
+        if (r) DropAtt(r);
+        if (e) WeaponsDetachOriginal(mesh, comp);
+        Log("ik: arm model %p taken off", comp);
+    }
+    if (g_armWasHidden) *(uint32_t*)(comp + kCompFlags) |= kHiddenGame;
+    g_armAttachedByUs = false;
+}
+
+// The gun in hand among the mesh's attachments (the mesh of Pawn.Weapon, on an arm), the arm model's entry, and the
+// sizes: the gun at WeaponScale while in use, hidden while the hand is empty or holds the melee weapon; guns held
+// before and still on an arm (the game lets go of a gun only after its put-away animation, and a pickup swaps
+// guns) back where the game has them, hidden.
 void UpdateGun(uint8_t* mesh, const Pose* anim)
 {
+    DWORD now = GetTickCount();
+    if (mesh != g_attMesh) {   // another mesh: its attachments are new
+        g_attCount = 0;
+        g_attMesh = mesh;
+        memset(g_knownGuns, 0, sizeof(g_knownGuns));
+        g_gun.comp = nullptr;
+        g_gun.serial = 0;
+    }
     // the gun hand: the right one, or the left when the gun was taken there
     g_gunSide = VRGunHand() == 0 ? 0 : 1;
     g_gun.entry = nullptr;
     g_gun.posed = false;
-    g_holdFolded = false;
+    g_armEntry = nullptr;
+    bool use = WeaponsMeleeHeld() != g_gunSide && VRGunHand() >= 0;
     uint8_t* att = *(uint8_t**)(mesh + kCompAttachments);
     int count = *(int*)(mesh + kCompAttachments + 4);
     // the weapon in hand (Pawn.Weapon) and its mesh components
     uint8_t* weapon = *(uint8_t**)((uint8_t*)g_pawn + kPawnWeapon);
     uint8_t* mine[2] = { weapon ? *(uint8_t**)(weapon + kWeaponMesh) : nullptr, weapon ? *(uint8_t**)(weapon + kWeaponMesh2) : nullptr };
-    uint8_t* found = nullptr;
-    uint8_t* entry = nullptr;
-    uint8_t* oldEntry = nullptr;     // the gun we hold, still at our placement (whatever Pawn.Weapon is now)
-    bool ours = false;
+    // (a weapon picked up may be drawn with a component of an earlier one of its kind - the weapon still names its
+    // own, unattached: the gun is then the latest attached of its model)
+    uint8_t* model = mine[0] ? *(uint8_t**)(mine[0] + kCompSkelMesh) : mine[1] ? *(uint8_t**)(mine[1] + kCompSkelMesh) : nullptr;
+    uint8_t* found = nullptr, *same = nullptr, *sameEntry = nullptr;
+    unsigned sameSerial = 0;
+    bool live[kMaxAtt] = {};
     for (int i = 0; att && i < count && i < 64; i++) {
         uint8_t* e = att + i * 0x30;
         uint8_t* c = *(uint8_t**)e;
-        if (!c) continue;
-        if (c == g_gun.comp && IsOurPlacement(e)) oldEntry = e;   // (the array may have moved)
-        if ((c != mine[0] && c != mine[1]) || WeaponsIsMeleeComp(c) || (found && !(c == g_gun.comp && oldEntry == e))) continue;
-        if (c == g_gun.comp && oldEntry == e) { found = c; entry = e; ours = true; }
-        else if (!found && ArmOfBone(BoneIndex(*(const unsigned*)(e + 4))) >= 0) { found = c; entry = e; }
+        if (!c || *(uintptr_t*)c != *(uintptr_t*)mesh) continue;   // skeletal meshes only
+        Att* r = FindAtt(c);
+        if (!r) r = RecordAtt(c, e);
+        if (!r) continue;
+        live[r - g_att] = true;
+        if (WeaponsIsMeleeComp(c)) continue;   // (the melee weapon in a hand: weapons.cpp)
+        if (!g_armComp && g_armPawn == g_pawn && IsArmModel(c, (uint8_t*)g_pawn, mesh)) {
+            g_armComp = c;
+            Log("ik: arm model %p (%ls), attached by the game", c, SkelName(c));
+        }
+        if (c == g_armComp) { g_armEntry = e; continue; }
+        if (ArmOfBone(BoneIndex(r->bone)) < 0) continue;
+        if ((c == mine[0] || c == mine[1]) && !found) { found = c; g_gun.entry = e; continue; }
+        if (model && *(uint8_t**)(c + kCompSkelMesh) == model && r->serial > sameSerial) { same = c; sameEntry = e; sameSerial = r->serial; }
+        if (IsKnownGun(c)) { RestoreEntry(r, e); SetScale(r, 0.001f); }
     }
-    // Letting go of a gun (Pawn.Weapon switched, even for a moment - a grenade grabbed off the belt): the game's
-    // attachment goes back into its entry first. Dropped at our placement it stayed on the hand bone ten times its
-    // size (sized for the shrunk hand), and the next capture took that for the game's - the stretched gun for good.
-    if (g_gun.comp && found != g_gun.comp) {
-        if (oldEntry) RestoreGunEntry(oldEntry);
-        g_gun.placed = false;
-        RestoreScale(g_gun.comp);   // the previous gun gets its size back
-    } else if (g_gun.comp && !oldEntry) g_gun.placed = false;   // (the game re-made the attachment: captured anew)
+    if (!found && same) { found = same; g_gun.entry = sameEntry; }
+    // records of what is no longer attached (taken off without the detach hook: its Scale back if still a component)
+    for (int i = g_attCount - 1; i >= 0; i--) {
+        if (live[i]) continue;
+        if (g_att[i].sized && SameKind(g_att[i].comp, mesh)) RestoreScale(g_att[i].comp);
+        DropAtt(&g_att[i]);
+    }
     static uint8_t* loggedWeapon;   // a weapon in hand whose gun is not on an arm: what the mesh has (once per weapon)
     if (!found && weapon && weapon != loggedWeapon) {
         loggedWeapon = weapon;
@@ -574,60 +724,64 @@ void UpdateGun(uint8_t* mesh, const Pose* anim)
                 c == mine[0] || c == mine[1] ? " <- the weapon's" : "");
         }
     }
-    if (!found) { g_gun.comp = nullptr; return; }
-    if (!ours) CaptureGun(found, entry, BoneIndex(*(const unsigned*)(entry + 4)));   // new, or attached anew by the game
-    if (std::find(g_recentGuns, g_recentGuns + 4, found) == g_recentGuns + 4) {
-        memmove(g_recentGuns + 1, g_recentGuns, 3 * sizeof(uint8_t*));
-        g_recentGuns[0] = found;
-    }
-    g_gun.mesh = mesh;
-    g_gun.entry = entry;
-    // the hand under the gun as small as the game draws it (the gun takes its place)
-    int animHand = g_sk.arm[g_gun.origSide].hand;
-    g_gun.handSize = fminf(fmaxf(Len(anim[animHand].ax[0]), 0.05f), 1.0f);
-
-    bool hidden = WeaponsMeleeHeld() == g_gunSide || VRGunHand() < 0;   // not in use (no muzzle flashes)
-    g_holdFolded = hidden && HasFolded(found);
-    *(float*)(found + kCompScale) = g_holdFolded ? 1.0f : hidden ? 0.001f : g_cfg.weaponScale;
-    // muzzle flashes: particle systems attached to the gun, right at the eyes; also gives the weapon's names
-    uint8_t* fx = *(uint8_t**)(found + kCompAttachments);
-    int fxCount = *(int*)(found + kCompAttachments + 4);
-    uint8_t* skel = *(uint8_t**)(found + kCompSkelMesh);
-    bool identify = skel != g_gun.skelMesh;
-    std::wstring names;
-    if (identify && skel) if (const wchar_t* nm = NameOf(*(unsigned*)(skel + 4))) names = nm;
-    for (int i = 0; fx && i < fxCount && i < 16; i++) {
-        uint8_t* e = fx + i * 0x30;
-        uint8_t* c = *(uint8_t**)e;
-        const wchar_t* nm = c ? NameOf(*(unsigned*)(c + 4)) : nullptr;
-        if (!nm || !wcsstr(nm, L"ParticleSystemComponent")) continue;
-        float* sc = (float*)(e + 0x20);
-        sc[0] = sc[1] = sc[2] = hidden ? 0.001f : g_cfg.muzzleFlashScale;
-        uint8_t* tmpl = *(uint8_t**)(c + 0x1B0);   // Template (MuzzleFlash_<weapon>_FX)
-        const wchar_t* tn = identify && tmpl ? NameOf(*(unsigned*)(tmpl + 4)) : nullptr;
-        if (tn) { names += L' '; names += tn; }
-    }
-    if (identify) {
-        g_gun.skelMesh = skel;
-        g_gun.scoped = MatchesScopeList(names);
-        g_gun.hasGrip = false;
-        Log("ik: weapon '%ls'%s", names.c_str(), g_gun.scoped ? " - sniper scope" : "");
-    }
-    if (!g_gun.hasGrip && !hidden) {
-        // front grip from the gun's world bounds: on the barrel line through the middle of the gun, a third of
-        // the way from the middle to the muzzle
-        Pose w = Load((float*)(found + kCompLocalToWorld));
-        const float* b = (const float*)(found + kCompBounds);
-        float s = Len(w.ax[0]);
-        if (s > 1e-3f && b[3] > 1.0f) {
-            Pose inv = Inverse(w);
-            Vec3 center = PointTo(inv, { b[0], b[1], b[2] });
-            Vec3 x = Norm(w.ax[0]);
-            float half = fabsf(b[3] * x.x) + fabsf(b[4] * x.y) + fabsf(b[5] * x.z);   // box support along the barrel
-            g_gun.grip = { center.x + half / s * 0.35f, center.y, center.z };
-            g_gun.hasGrip = true;
+    Att* r = found ? FindAtt(found) : nullptr;
+    if (!r) {
+        g_gun.comp = nullptr;
+        g_gun.entry = nullptr;
+    } else {
+        AddKnownGun(found);
+        // new, or attached anew by the game (switched back, picked up): captured from the game's attachment
+        if (found != g_gun.comp || r->serial != g_gun.serial) {
+            g_gun.comp = found;
+            CaptureGun(r);
+        }
+        g_gun.lastSeen = now;
+        // the hand under the gun as small as the game draws it (the gun takes its place)
+        g_gun.handSize = fminf(fmaxf(Len(anim[g_sk.arm[g_gun.origSide].hand].ax[0]), 0.05f), 1.0f);
+        SetScale(r, use ? g_cfg.weaponScale : 0.001f);
+        // muzzle flashes: particle systems attached to the gun, right at the eyes; also gives the weapon's names
+        uint8_t* fx = *(uint8_t**)(found + kCompAttachments);
+        int fxCount = *(int*)(found + kCompAttachments + 4);
+        uint8_t* skel = *(uint8_t**)(found + kCompSkelMesh);
+        bool identify = skel != g_gun.skelMesh;
+        std::wstring names;
+        if (identify && skel) if (const wchar_t* nm = NameOf(*(unsigned*)(skel + 4))) names = nm;
+        for (int i = 0; fx && i < fxCount && i < 16; i++) {
+            uint8_t* e = fx + i * 0x30;
+            uint8_t* c = *(uint8_t**)e;
+            const wchar_t* nm = c ? NameOf(*(unsigned*)(c + 4)) : nullptr;
+            if (!nm || !wcsstr(nm, L"ParticleSystemComponent")) continue;
+            float* sc = (float*)(e + 0x20);
+            sc[0] = sc[1] = sc[2] = use ? g_cfg.muzzleFlashScale : 0.001f;
+            uint8_t* tmpl = *(uint8_t**)(c + 0x1B0);   // Template (MuzzleFlash_<weapon>_FX)
+            const wchar_t* tn = identify && tmpl ? NameOf(*(unsigned*)(tmpl + 4)) : nullptr;
+            if (tn) { names += L' '; names += tn; }
+        }
+        if (identify) {
+            g_gun.skelMesh = skel;
+            g_gun.scoped = MatchesScopeList(names);
+            g_gun.hasGrip = false;
+            Log("ik: weapon '%ls'%s", names.c_str(), g_gun.scoped ? " - sniper scope" : "");
+        }
+        if (!g_gun.hasGrip && use) {
+            // front grip from the gun's world bounds: on the barrel line through the middle of the gun, a third of
+            // the way from the middle to the muzzle
+            Pose w = Load((float*)(found + kCompLocalToWorld));
+            const float* b = (const float*)(found + kCompBounds);
+            float s = Len(w.ax[0]);
+            if (s > 1e-3f && b[3] > 1.0f) {
+                Pose inv = Inverse(w);
+                Vec3 center = PointTo(inv, { b[0], b[1], b[2] });
+                Vec3 x = Norm(w.ax[0]);
+                float half = fabsf(b[3] * x.x) + fabsf(b[4] * x.y) + fabsf(b[5] * x.z);   // box support along the barrel
+                g_gun.grip = { center.x + half / s * 0.35f, center.y, center.z };
+                g_gun.hasGrip = true;
+            }
         }
     }
+    // the gun arm is posed from the gun while it is in use - also for the moment between one gun and the next (no
+    // free hand flashing up while switching)
+    g_gun.held = use && (r || (g_gun.serial && now - g_gun.lastSeen < 150));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -917,6 +1071,22 @@ Pose GunInComponent()
     return g;
 }
 
+// The arm model on the empty right hand: where the game attaches it on the forearm, relative to the forearm as
+// posed at its full thickness (the elbow plates' frame; the bone itself is slimmed), written onto the hand bone
+// (not sheared).
+bool PlaceArmModel(const Pose* pose)
+{
+    Att* r = FindAtt(g_armComp);
+    int hb = g_sk.arm[1].hand;
+    if (!r || !g_armEntry || hb < 0) return false;
+    if (BoneIndex(r->bone) != g_sk.arm[1].elbow) { RestoreEntry(r, g_armEntry); return false; }
+    Pose rel = RotatorPose(r->rot);
+    for (int k = 0; k < 3; k++) rel.ax[k] = Scale(rel.ax[k], r->scale[k]);
+    rel.pos = { r->loc[0], r->loc[1], r->loc[2] };
+    WriteEntry(r, g_armEntry, Compose(rel, g_padFrame[1][1]), hb, pose);
+    return true;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Frame state shared with the right-eye replay and with vr.cpp
 Pose g_frozen[kMaxBones];
@@ -1024,7 +1194,6 @@ void OnSkelPose(uint8_t* comp)
     }
     if (!g_pawn || GetTickCount() - g_inputTick > 250) return;
     __try {
-        if (std::find(g_recentGuns, g_recentGuns + 4, comp) != g_recentGuns + 4) { OnGunPose(comp); return; }
         if (*(uint8_t**)((uint8_t*)g_pawn + kPawnMesh) != comp) return;
         uint8_t* skel = *(uint8_t**)(comp + kCompSkelMesh);
         if (!skel) return;
@@ -1033,7 +1202,7 @@ void OnSkelPose(uint8_t* comp)
         int n = *(int*)(comp + kCompSpaceBases + 4);
         if (!bases || n != g_sk.n) return;
         g_poseTick = GetTickCount();
-        if (!g_sk.armsOk) return;   // vehicle form: drawn as the game poses it
+        if (!g_sk.armsOk) { LetGoAll(false); return; }   // vehicle form: drawn as the game poses it
 
         // ---- 1. frame ----
         Pose compToWorld = PredictComponentToWorld(comp);
@@ -1232,9 +1401,10 @@ void OnSkelPose(uint8_t* comp)
 
         UpdateGun(comp, anim);
         int melee = WeaponsMeleeHeld();
-        bool gunArm = g_gun.comp && melee != g_gunSide && VRGunHand() >= 0;   // (g_gunSide: the arm the gun is on)
+        bool gunArm = g_gun.held;   // the gun arm (g_gunSide) posed from the gun
         for (int s = 0; s < 2; s++) for (int b : { g_sk.arm[s].shoulder, g_sk.arm[s].elbow, g_sk.arm[s].hand }) driven[b] = true;
         g_padValid[0] = g_padValid[1] = false;
+        bool solvedFree[2] = {}, gunPlaced = false, armPlaced = false;
         if (g_cfg.handIK && ikWeight > 0.0f) {
             Vec3 gunTarget = {}, gunCtrl[3] = {};
             bool gunValid = false;
@@ -1269,6 +1439,7 @@ void OnSkelPose(uint8_t* comp)
                         target = PointTo(GunInComponent(), g_gun.grip);   // (posed with the gun arm)
                     }
                     SolveFreeArm(s, pose, target, ctrl);
+                    solvedFree[s] = true;
                     if (g_cfg.fingerPoses) {
                         // what the hand holds shapes it; empty, it follows the fingers on the controller
                         float curl[4];
@@ -1280,7 +1451,10 @@ void OnSkelPose(uint8_t* comp)
                 }
             }
             // the gun into its attachment, relative to the hand as posed (a blend below carries it along)
-            if (g_gun.entry && gunArm && g_gun.posed) PlaceGunEntry(pose);
+            if (g_gun.entry && gunArm && g_gun.posed) gunPlaced = PlaceGunEntry(pose);
+            // the arm model on the empty right forearm (not while the right hand holds the melee weapon)
+            if (g_armEntry && solvedFree[1] && melee != 1 && g_padValid[1] && !WeaponsIsMeleeComp(g_armComp) && !WeaponsIsFlipped(g_armComp))
+                armPlaced = PlaceArmModel(pose);
             if (ikWeight < 1.0f)
                 for (int s = 0; s < 2; s++)
                     for (int b : { g_sk.arm[s].shoulder, g_sk.arm[s].elbow, g_sk.arm[s].hand }) {
@@ -1288,7 +1462,25 @@ void OnSkelPose(uint8_t* comp)
                         pose[b].pos = Add(Scale(anim[b].pos, 1 - ikWeight), Scale(pose[b].pos, ikWeight));
                     }
         }
-        if (g_gun.entry && !(gunArm && g_gun.posed)) RestoreGunEntry(g_gun.entry);   // as the game holds it
+        // not placed this frame: where the game has it
+        if (g_gun.entry && !gunPlaced)
+            if (Att* r = FindAtt(g_gun.comp)) RestoreEntry(r, g_gun.entry);
+        if (Att* ar = g_armComp ? FindAtt(g_armComp) : nullptr) {
+            if (g_armEntry && !armPlaced) RestoreEntry(ar, g_armEntry);
+            // the game's arm model (a grenade throw) under the gun in the right hand: hidden, the gun is the arm
+            if (gunArm && g_gunSide == 1 && melee != 1 && !WeaponsIsMeleeComp(g_armComp)) SetScale(ar, 0.001f);
+            else if (ar->sized) { RestoreScale(g_armComp); ar->sized = false; }
+        }
+        // the right hand empty for a moment (not between two guns): the arm model goes on (weapons.cpp attaches
+        // it, IKArmModelUpdate)
+        if (eye == 0) {
+            bool rightFree = g_cfg.handIK && g_hand[1].valid && melee != 1 && !(g_gunSide == 1 && gunArm);
+            static DWORD freeSince;
+            if (!rightFree) freeSince = 0;
+            else if (!freeSince) freeSince = nowTick;
+            g_armWanted = rightFree && nowTick - freeSince >= 200;
+            g_armWantedTick = nowTick;
+        }
         // a hand the player moves freely is the whole hand, as in the bind pose (the game's weapon animations
         // shrink the gun hand away and fold its parts: an empty right hand was a bare bone)
         bool freeHand[2];
@@ -1373,6 +1565,45 @@ void OnSkelPose(uint8_t* comp)
                     sqrtf(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]), m[12], m[13], m[14], refPos[i].x, refPos[i].y, refPos[i].z);
             }
         }
+        if (eye == 0 && g_armDump) {   // ... and what the mod keeps of the mesh's attachments
+            Log("armdump gun %p held %d side %d, arm model %p entry %p ours %d wanted %d", g_gun.comp, g_gun.held, g_gunSide,
+                g_armComp, g_armEntry, g_armOurs, g_armWanted);
+            if (g_armComp) {   // where it is drawn, and the right arm (world)
+                const float* m = (const float*)(g_armComp + kCompLocalToWorld);
+                const float* b = (const float*)(g_armComp + kCompBounds);
+                Vec3 el = PointTo(compToWorld, pose[g_sk.arm[1].elbow].pos), ha = PointTo(compToWorld, pose[g_sk.arm[1].hand].pos);
+                int nb = *(int*)(g_armComp + kCompSpaceBases + 4);
+                Log("armdump arm model at %.0f %.0f %.0f size %.2f, bounds %.0f %.0f %.0f ext %.0f %.0f %.0f, flags %X, %d bones | elbow %.0f %.0f %.0f hand %.0f %.0f %.0f",
+                    m[12], m[13], m[14], sqrtf(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]), b[0], b[1], b[2], b[3], b[4], b[5],
+                    *(uint32_t*)(g_armComp + kCompFlags), nb, el.x, el.y, el.z, ha.x, ha.y, ha.z);
+                // its bones (world) and the body's bones of the same names
+                const float* ab = *(const float**)(g_armComp + kCompSpaceBases);
+                uint8_t* as = *(uint8_t**)(g_armComp + kCompSkelMesh);
+                uint8_t* abones = as ? *(uint8_t**)(as + kMeshRefSkeleton) : nullptr;
+                int aref = as ? *(int*)(as + kMeshRefSkeleton + 4) : 0;
+                Pose aw = Load(m);
+                for (int i = 0; ab && i < nb && i < 40; i++) {
+                    const float* q = ab + i * 16;
+                    Vec3 w = PointTo(aw, { q[12], q[13], q[14] });
+                    unsigned fn = abones && i < aref ? *(unsigned*)(abones + i * kMeshBoneSize) : 0;
+                    int par = abones && i < aref ? *(const int*)(abones + i * kMeshBoneSize + 0x34) : -1;
+                    const wchar_t* bn = fn ? NameOf(fn) : nullptr;
+                    int pb = fn ? BoneIndex(fn) : -1;
+                    Vec3 pw = pb >= 0 ? PointTo(compToWorld, pose[pb].pos) : Vec3{};
+                    Log("armdump arm model %d %ls p%d: %.0f %.0f %.0f (in it %.1f %.1f %.1f, scale %.2f) | body bone %d: %.0f %.0f %.0f",
+                        i, bn ? bn : L"?", par, w.x, w.y, w.z, q[12], q[13], q[14], sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]),
+                        pb, pw.x, pw.y, pw.z);
+                }
+                Log("armdump arm model axes %.2f %.2f %.2f / %.2f %.2f %.2f / %.2f %.2f %.2f",
+                    m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]);
+            }
+            for (int i = 0; i < g_attCount; i++) {
+                const Att& r = g_att[i];
+                Log("armdump att %p (%ls) bone %d loc %.1f %.1f %.1f scale %.2f moved %d sized %d comp scale %.3f", r.comp,
+                    SkelName(r.comp), BoneIndex(r.bone), r.loc[0], r.loc[1], r.loc[2], r.scale[0], r.moved, r.sized,
+                    *(float*)(r.comp + kCompScale));
+            }
+        }
         if (eye == 0) g_armDump = 0;
         for (int i = 0; i < n; i++) Store(pose[i], bases + i * 16);
 
@@ -1395,6 +1626,7 @@ void OnSkelPose(uint8_t* comp)
         g_sk.mesh = nullptr;
         g_gun.entry = nullptr;   // (the game's attachment is kept: the gun is still let go of properly)
         g_gun.posed = false;
+        g_armEntry = nullptr;
     }
 }
 
@@ -1443,18 +1675,10 @@ void __stdcall HookSetOpacityOverride(void* actor, float opacity, int flag)
 // ---------------------------------------------------------------------------------------------
 void IKSetPawn(void* pawn, const float viewPos[3])
 {
-    if (!pawn && g_gun.comp) {   // leaving first person (cutscene, menu): the weapon as the game had it
-        __try {
-            uint8_t* att = g_gun.placed && g_gun.mesh ? *(uint8_t**)(g_gun.mesh + kCompAttachments) : nullptr;
-            int count = att ? *(int*)(g_gun.mesh + kCompAttachments + 4) : 0;
-            for (int i = 0; i < count && i < 64; i++) {
-                uint8_t* e = att + i * 0x30;
-                if (*(uint8_t**)e == g_gun.comp && IsOurPlacement(e)) RestoreGunEntry(e);
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-        g_gun.placed = false;
-        RestoreScale(g_gun.comp);
+    if (!pawn) {   // leaving first person (cutscene, menu): the weapons and the arm model as the game has them
+        if (g_attCount) LetGoAll(true);
         g_gun.comp = nullptr;
+        g_gun.serial = 0;
     }
     g_pawn = pawn;
     g_inputTick = GetTickCount();
@@ -1532,9 +1756,120 @@ bool IKForegrip(float out[3])
     return true;
 }
 
-// The other side's bone of the player's skeleton ("R_Weapon01_Wpn_XW" <-> "L_Weapon01_Wpn_XW"), 0 if none.
-void IKArmDump() { g_armDump = 1; g_foldLog = 400; }
+void IKArmDump() { g_armDump = 1; }
 
+// The game attached a component to a mesh (weapons.cpp, right after): the values of the game's attachment - also
+// for a component attached anew (a gun switched back to or picked up: captured again).
+void IKOnAttach(void* mesh, void* comp)
+{
+    uint8_t* m = (uint8_t*)mesh, *c = (uint8_t*)comp;
+    if (!g_pawn || !m || m != g_attMesh || !c || *(uintptr_t*)c != *(uintptr_t*)m) return;
+    uint8_t* e = EntryOf(m, c);
+    if (!e) return;
+    if (Att* r = FindAtt(c)) ReadAtt(r, e);   // (its size stays: the component's Scale is the mod's)
+    else RecordAtt(c, e);
+    if (!g_armComp && g_armPawn == g_pawn && IsArmModel(c, (uint8_t*)g_pawn, m)) {
+        g_armComp = c;
+        Log("ik: arm model %p (%ls), attached by the game", c, SkelName(c));
+    }
+    if (c == g_armComp) {   // where the game wants it: the mod attaches it there too
+        g_armGameBone = *(const unsigned*)(e + 4);
+        memcpy(g_armGameLoc, e + 8, 12);
+        memcpy(g_armGameRot, e + 0x14, 12);
+        memcpy(g_armGameScale, e + 0x20, 12);
+        g_armGameSaved = true;
+    }
+}
+
+// The game is about to take a component off a mesh (weapons.cpp): false keeps it on - the arm model while the
+// mod shows it on the empty right hand (the game takes it off after a grenade throw).
+bool IKOnDetach(void* mesh, void* comp)
+{
+    uint8_t* m = (uint8_t*)mesh, *c = (uint8_t*)comp;
+    if (!c || !m || (m != g_attMesh && m != g_armMesh)) return true;
+    if (c == g_armComp && m == g_armMesh && g_armOurs) {
+        if (ArmWanted()) {
+            g_armAttachedByUs = true;   // (the mod takes it off when the hand is no longer empty)
+            return false;
+        }
+        g_armOurs = false;
+        g_armAttachedByUs = false;
+        if (g_armWasHidden) *(uint32_t*)(c + kCompFlags) |= kHiddenGame;
+    }
+    if (Att* r = m == g_attMesh ? FindAtt(c) : nullptr) {
+        if (r->sized) RestoreScale(c);
+        DropAtt(r);
+    }
+    return true;
+}
+
+// The game attaching the arm model the mod already holds attached (a grenade throw): skipped (weapons.cpp).
+bool IKArmModelHeld(void* mesh, void* comp) { return comp && comp == g_armComp && mesh == g_armMesh && g_armOurs; }
+
+// The arm model on the empty right hand (weapons.cpp, each frame, game thread): the robot's own arm shell (the
+// model the game shows on a grenade throw), attached where the game attaches it while the hand is empty and
+// shown; let go of (taken off if the mod attached it) once the hand holds something again. `allowed`: not while the
+// right hand is about to take the melee weapon (its attack attaches meshes of its own).
+void IKArmModelUpdate(void* pawnArg, bool allowed)
+{
+    uint8_t* pawn = (uint8_t*)pawnArg;
+    __try {
+        uint8_t* mesh = pawn ? *(uint8_t**)(pawn + kPawnMesh) : nullptr;
+        static uint8_t* compPawn;   // the pawn g_armComp belongs to (kept while out of first person for a moment)
+        if (pawn != g_armPawn || mesh != g_armMesh) {
+            if (g_armOurs && (!pawn || pawn == g_armPawn)) ReleaseArmModel();
+            g_armOurs = false;
+            g_armAttachedByUs = false;
+            if (pawn && pawn != compPawn) { g_armComp = nullptr; g_armSearched = false; g_armGameSaved = false; compPawn = pawn; }
+            else if (pawn && g_armComp && !ArmModelAt(g_armComp, pawn, mesh)) { g_armComp = nullptr; g_armSearched = false; }
+            g_armPawn = pawn;
+            g_armMesh = mesh;
+        }
+        if (!pawn || !mesh) return;
+        bool want = allowed && ArmWanted() && !WeaponsIsMeleeComp(g_armComp) && !WeaponsIsFlipped(g_armComp);
+        if (want && !g_armComp && !g_armSearched && pawn == g_pawn && g_sk.mesh) {
+            g_armSearched = true;
+            g_armComp = FindArmModel(pawn, mesh);
+            if (!g_armComp) Log("ik: no arm model on pawn %p or its inventory", pawn);
+        }
+        if (want && g_armComp) {
+            if (!WeaponsIsAttached(mesh, g_armComp)) {
+                unsigned bone = g_armGameBone;
+                float loc[3] = {}, scale[3] = { 1.0f, 1.0f, 1.0f };
+                int rot[3] = {};
+                if (g_armGameSaved) {
+                    memcpy(loc, g_armGameLoc, 12);
+                    memcpy(rot, g_armGameRot, 12);
+                    memcpy(scale, g_armGameScale, 12);
+                } else {
+                    bone = g_sk.mesh && g_sk.arm[1].elbow >= 0 ? BoneName(g_sk.arm[1].elbow) : 0;
+                }
+                if (bone) WeaponsAttachOriginal(mesh, g_armComp, bone, loc, rot, scale);
+                if (!bone || !WeaponsIsAttached(mesh, g_armComp)) {
+                    Log("ik: arm model %p could not be attached", g_armComp);
+                    g_armComp = nullptr;
+                    return;
+                }
+                g_armAttachedByUs = true;
+                Log("ik: arm model %p on the empty right hand (bone %d)", g_armComp, BoneIndex(bone));
+            }
+            if (!g_armOurs) {
+                g_armOurs = true;
+                g_armWasHidden = (*(uint32_t*)(g_armComp + kCompFlags) & kHiddenGame) != 0;
+            }
+            *(uint32_t*)(g_armComp + kCompFlags) &= ~kHiddenGame;   // (the game shows it only for its animations)
+            if (!*(uint8_t**)(g_armComp + kCompOwner)) *(uint8_t**)(g_armComp + kCompOwner) = pawn;
+        } else if (g_armOurs) {
+            ReleaseArmModel();
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_armOurs = false;
+        g_armAttachedByUs = false;
+        g_armComp = nullptr;
+    }
+}
+
+// The other side's bone of the player's skeleton ("R_Weapon01_Wpn_XW" <-> "L_Weapon01_Wpn_XW"), 0 if none.
 unsigned IKMirrorBone(unsigned boneName)
 {
     __try {

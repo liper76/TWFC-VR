@@ -172,6 +172,8 @@ static void RunLine(const char* line)
                     *(const float*)&d[0], *(const float*)&d[1], *(const float*)&d[2], *(const float*)&d[3]);
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) { Log("dump: bad address"); }
+    } else if (sscanf_s(line, "pokef %31s %f", a, (unsigned)sizeof(a), &v) == 2) {   // pokef <hex addr> <float>
+        __try { *(float*)strtoul(a, nullptr, 16) = v; Log("debug: pokef %s = %g", a, v); } __except (EXCEPTION_EXECUTE_HANDLER) { Log("debug: pokef: bad address"); }
     } else if (sscanf_s(line, "objscan %31s %f", a, (unsigned)sizeof(a), &v) == 2) {   // objscan <hex addr> <bytes>
         // the fields of an object that point at other objects (names from GNames, the FName at +4)
         const uint8_t* base = (const uint8_t*)strtoul(a, nullptr, 16);
