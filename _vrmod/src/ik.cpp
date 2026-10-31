@@ -323,7 +323,6 @@ struct Gun {
     int origSide = 1;                // the arm the game put it on
     Pose inHand;                     // gun relative to the hand, the wrist straight (unit axes; component units)
     float size = 1.0f;               // gun units -> component units (before the component's own Scale)
-    float handSize = 1.0f;           // the hand's size as the game draws it under the gun
     Pose pose;                       // the gun as posed this frame (unit axes; component space)
     bool posed = false;
     bool held = false;               // in use: the gun arm is posed from it (also for a moment while switching)
@@ -656,7 +655,7 @@ void ReleaseArmModel()
 // sizes: the gun at WeaponScale while in use, hidden while the hand is empty or holds the melee weapon; guns held
 // before and still on an arm (the game lets go of a gun only after its put-away animation, and a pickup swaps
 // guns) back where the game has them, hidden.
-void UpdateGun(uint8_t* mesh, const Pose* anim)
+void UpdateGun(uint8_t* mesh)
 {
     DWORD now = GetTickCount();
     if (mesh != g_attMesh) {   // another mesh: its attachments are new
@@ -736,8 +735,6 @@ void UpdateGun(uint8_t* mesh, const Pose* anim)
             CaptureGun(r);
         }
         g_gun.lastSeen = now;
-        // the hand under the gun as small as the game draws it (the gun takes its place)
-        g_gun.handSize = fminf(fmaxf(Len(anim[g_sk.arm[g_gun.origSide].hand].ax[0]), 0.05f), 1.0f);
         SetScale(r, use ? g_cfg.weaponScale : 0.001f);
         // muzzle flashes: particle systems attached to the gun, right at the eyes; also gives the weapon's names
         uint8_t* fx = *(uint8_t**)(found + kCompAttachments);
@@ -831,8 +828,10 @@ float TwistAbout(Vec3 d, const Vec3 a[3], const Vec3 b[3])
 // An arm, rigid, from the bind pose (both arms are mirror images there, so they look the same): the clavicle
 // shrugs a little when the hand is raised, the wrist goes to `wrist` (out of reach: the arm points at it,
 // straight), the elbow bends down, out and back from the hand, the forearm takes half of the wrist's roll and the
-// hand gets `handAx` at `handSize`. Upper arm and forearm are slimmed by LimbThickness, the armour is not.
-void SolveArm(int side, Pose* pose, Vec3 wrist, const Vec3 ctrl[3], const Vec3 handAx[3], float handSize, bool rigidWrist = false)
+// hand gets `handAx` at `handSize`. The upper arm is slimmed by LimbThickness; the forearm and the armour are not.
+// With `holdAx` the forearm is part of the gun instead (see SolveGunArm).
+void SolveArm(int side, Pose* pose, Vec3 wrist, const Vec3 ctrl[3], const Vec3 handAx[3], float handSize,
+              const Vec3* holdAx = nullptr)
 {
     const Arm& a = g_sk.arm[side];
     int clav = g_sk.parent[a.shoulder];
@@ -903,36 +902,29 @@ void SolveArm(int side, Pose* pose, Vec3 wrist, const Vec3 ctrl[3], const Vec3 h
 
     Pose sh = rs, el = re;
     float stretch1 = stretch, stretch2 = stretch;
-    bool rigid = false;
-    if (rigidWrist) {
-        // the gun arm: the forearm is part of the gun (the game hangs the gun on it) - fixed to the hand, the
-        // wrist straight as in the bind pose, always: the gun's back end stays on the forearm. The elbow goes
-        // where that puts it; the upper arm gives (0.5..1.2 of its length) and beyond that the gun with the
+    if (holdAx) {
+        // the gun arm: the forearm turns into the gun from the elbow (the game hangs the gun on it, its back end
+        // over the forearm) - fixed to it as the game has it, the wrist straight, the wrist at `wrist`. The elbow
+        // goes where that puts it; the upper arm gives (0.6..1.15 of its length) and beyond that the gun with the
         // forearm moves along it, still pointing where the controller does.
         float L1 = l1 / stretch, L2 = l2 / stretch;
         Vec3 rhAx[3];
         UnitAxes(rh, rhAx);
-        Vec3 d = Norm(FromFrame(InFrame(Norm(Sub(rh.pos, re.pos)), rhAx), handAx));   // the forearm, turned with the hand
-        Vec3 Er = Sub(wrist, Scale(d, L2));
-        Vec3 v = Sub(Er, S);
+        Vec3 d = Norm(FromFrame(InFrame(Norm(Sub(rh.pos, re.pos)), rhAx), holdAx));   // the forearm, turned with the gun
+        Vec3 v = Sub(Sub(wrist, Scale(d, L2)), S);
         float len = Len(v);
-        Vec3 ve = len > 1e-3f ? Scale(v, 1.0f / len) : perp;
-        float k = fminf(fmaxf(len, 0.5f * L1), 1.2f * L1);
-        Vec3 E2 = Add(S, Scale(ve, k));
-        H = Add(E2, Scale(d, L2));
-        rigid = true;
-        Vec3 dirN = Norm(Sub(H, S)), eN = Sub(E2, S);
+        float k = fminf(fmaxf(len, 0.6f * L1), 1.15f * L1);
+        E = Add(S, Scale(len > 1e-3f ? Scale(v, 1.0f / len) : perp, k));
+        H = Add(E, Scale(d, L2));
+        Vec3 dirN = Norm(Sub(H, S)), eN = Sub(E, S);
         Vec3 perpN = Sub(eN, Scale(dirN, Dot(eN, dirN)));
-        Vec3 hingeN = Len(perpN) > 1e-3f ? Norm(Cross(perpN, dirN)) : hinge;
-        BendFrame(eN, hingeN, up1);
+        BendFrame(eN, Len(perpN) > 1e-3f ? Norm(Cross(perpN, dirN)) : hinge, up1);
         RotatePose(sh, FrameToFrame(up0, up1));
-        RotatePose(el, FrameToFrame(rhAx, handAx));
-        el.pos = E2;
+        RotatePose(el, FrameToFrame(rhAx, holdAx));
+        el.pos = E;
         stretch1 = k / fmaxf(L1, 1e-3f);
         stretch2 = 1.0f;
-        E = E2;
-    }
-    if (!rigid) {
+    } else {
         RotatePose(sh, FrameToFrame(up0, up1));
         RotatePose(el, FrameToFrame(fore0, fore1));
         el.pos = E;
@@ -959,7 +951,7 @@ void SolveArm(int side, Pose* pose, Vec3 wrist, const Vec3 ctrl[3], const Vec3 h
     g_padValid[side] = true;
 
     StretchThin(sh, Sub(E, S), stretch1, g_cfg.limbThickness);
-    StretchThin(el, Sub(H, E), stretch2, g_cfg.limbThickness);
+    StretchThin(el, Sub(H, E), stretch2, 1.0f);   // (the forearm is in view: always at its full thickness)
     pose[a.shoulder] = sh;
     pose[a.elbow] = el;
     pose[a.hand].pos = H;
@@ -1040,25 +1032,27 @@ void PoseFingers(int side, Pose* pose, const float curl[4], bool* driven)
     }
 }
 
-// The arm carrying the gun: the gun aims as the controller does (barrel = forward, its up = up) and is held where
-// the real hand is - an extension of the arm, the hand inside it turned with it (wrist straight as in the bind
-// pose), the arm reaching that wrist like the other arm. Nothing is stretched.
+// The arm carrying the gun, as the game has it: the forearm turns into the gun from the elbow (the gun hangs on the
+// forearm, its back end over it) - the gun aimed as the controller is (barrel = forward, its up = up) and held where
+// the real hand is, the forearm fixed to it (wrist straight), the upper arm reaching that elbow. The hand is a fist
+// on the gun's grip, at its full size.
 void SolveGunArm(Pose* pose, Vec3 target, const Vec3 ctrl[3])
 {
     const Arm& a = g_sk.arm[g_gunSide];
     bool mirrored = g_gunSide != g_gun.origSide;   // (taken into the other hand)
     Pose handInGun = Inverse(g_gun.inHand);
-    // the gun is drawn smaller (WeaponScale) about its origin: the hand stays on its grip
+    // the gun is drawn at WeaponScale about its origin: the hand stays on its grip
     Vec3 hp = Scale(handInGun.pos, g_cfg.weaponScale);
     if (mirrored) hp.y = -hp.y;
-    Vec3 handAx[3];
+    Vec3 holdAx[3], handAx[3];
+    HandAxesFor(g_gunSide, pose, ctrl, handAx);
     if (mirrored) {
-        HandAxesFor(g_gunSide, pose, ctrl, handAx);
+        for (int j = 0; j < 3; j++) holdAx[j] = handAx[j];
     } else {
-        for (int j = 0; j < 3; j++) handAx[j] = FromFrame(handInGun.ax[j], ctrl);
-        Orthonormalize(handAx);
+        for (int j = 0; j < 3; j++) holdAx[j] = FromFrame(handInGun.ax[j], ctrl);
+        Orthonormalize(holdAx);
     }
-    SolveArm(g_gunSide, pose, target, ctrl, handAx, g_gun.handSize, true);
+    SolveArm(g_gunSide, pose, target, ctrl, handAx, g_cfg.handScale, holdAx);
     g_gun.pose = { { ctrl[0], ctrl[1], ctrl[2] }, Sub(pose[a.hand].pos, FromFrame(hp, ctrl)) };
     g_gun.posed = true;
 }
@@ -1399,12 +1393,12 @@ void OnSkelPose(uint8_t* comp)
         bool yield = g_cfg.abilityYield > 0.0f && nowTick - VRAbilityPressedAt() < (DWORD)(g_cfg.abilityYield * 1000.0f);
         ikWeight = yield ? fmaxf(ikWeight - step, 0.0f) : fminf(ikWeight + step, 1.0f);
 
-        UpdateGun(comp, anim);
+        UpdateGun(comp);
         int melee = WeaponsMeleeHeld();
         bool gunArm = g_gun.held;   // the gun arm (g_gunSide) posed from the gun
         for (int s = 0; s < 2; s++) for (int b : { g_sk.arm[s].shoulder, g_sk.arm[s].elbow, g_sk.arm[s].hand }) driven[b] = true;
         g_padValid[0] = g_padValid[1] = false;
-        bool solvedFree[2] = {}, gunPlaced = false, armPlaced = false;
+        bool solved[2] = {}, gunPlaced = false, armPlaced = false;
         if (g_cfg.handIK && ikWeight > 0.0f) {
             Vec3 gunTarget = {}, gunCtrl[3] = {};
             bool gunValid = false;
@@ -1421,11 +1415,49 @@ void OnSkelPose(uint8_t* comp)
                     for (int k = 0; k < 3; k++) gunCtrl[k] = ctrl[k];
                     gunValid = true;
                 }
+                solved[s] = true;
                 if (s == g_gunSide && gunArm) {
                     SolveGunArm(pose, target, ctrl);
                     if (eye == 0) {
                         g_gripWorld = h.pos;
                         for (int k = 0; k < 3; k++) g_ctrlWorld[k] = Norm(h.ax[k]);
+                    }
+                    if (g_cfg.fingerPoses) {   // a fist around the gun, the index finger as on the trigger
+                        float curl[4];
+                        VRFingerCurls(s, curl);
+                        curl[0] = 0.6f + 0.3f * fminf(fmaxf(curl[0], 0.0f), 1.0f);
+                        curl[1] = curl[2] = 0.95f;
+                        curl[3] = 0.85f;
+                        PoseFingers(s, pose, curl, driven);
+                    }
+                    if (eye == 0 && g_armDump) {   // the fist and the gun in the aim frame (forward, right, up from the wrist)
+                        Vec3 W = pose[g_sk.arm[s].hand].pos;
+                        auto inAim = [&](Vec3 p) { return InFrame(Sub(p, W), ctrl); };
+                        Vec3 go = inAim(g_gun.pose.pos), el = inAim(pose[g_sk.arm[s].elbow].pos);
+                        Log("armdump aim: fwd %.2f %.2f %.2f right %.2f %.2f %.2f up %.2f %.2f %.2f | gun origin %.1f %.1f %.1f (k %.2f), elbow %.1f %.1f %.1f",
+                            ctrl[0].x, ctrl[0].y, ctrl[0].z, ctrl[1].x, ctrl[1].y, ctrl[1].z, ctrl[2].x, ctrl[2].y, ctrl[2].z,
+                            go.x, go.y, go.z, g_gun.size * g_cfg.weaponScale, el.x, el.y, el.z);
+                        for (int f = 0; f < 4; f++)
+                            for (int j = 0; j < 2; j++) {
+                                int b = g_sk.fingers[s][f][j];
+                                if (b < 0) continue;
+                                Vec3 q = inAim(pose[b].pos);
+                                Log("armdump aim: finger %d.%d at %.1f %.1f %.1f", f, j, q.x, q.y, q.z);
+                            }
+                        if (Att* gr = FindAtt(g_gun.comp)) {   // the gun as the game's animation holds it (component axes)
+                            int gb = BoneIndex(gr->bone);
+                            if (gb >= 0) {
+                                Pose rel = RotatorPose(gr->rot);
+                                rel.pos = { gr->loc[0], gr->loc[1], gr->loc[2] };
+                                Pose nat = Compose(rel, anim[gb]);
+                                Vec3 nx[3];
+                                UnitAxes(nat, nx);
+                                Vec3 fa = Norm(Sub(anim[g_sk.arm[s].hand].pos, anim[g_sk.arm[s].elbow].pos));
+                                Log("armdump aim: the game's gun x %.2f %.2f %.2f y %.2f %.2f %.2f z %.2f %.2f %.2f | its forearm %.2f %.2f %.2f, rot %d %d %d",
+                                    nx[0].x, nx[0].y, nx[0].z, nx[1].x, nx[1].y, nx[1].z, nx[2].x, nx[2].y, nx[2].z, fa.x, fa.y, fa.z,
+                                    gr->rot[0], gr->rot[1], gr->rot[2]);
+                            }
+                        }
                     }
                 } else {
                     if (s == support && VRTwoHanded() && gunArm && g_cfg.foregripSet && gunValid) {
@@ -1439,7 +1471,6 @@ void OnSkelPose(uint8_t* comp)
                         target = PointTo(GunInComponent(), g_gun.grip);   // (posed with the gun arm)
                     }
                     SolveFreeArm(s, pose, target, ctrl);
-                    solvedFree[s] = true;
                     if (g_cfg.fingerPoses) {
                         // what the hand holds shapes it; empty, it follows the fingers on the controller
                         float curl[4];
@@ -1453,7 +1484,7 @@ void OnSkelPose(uint8_t* comp)
             // the gun into its attachment, relative to the hand as posed (a blend below carries it along)
             if (g_gun.entry && gunArm && g_gun.posed) gunPlaced = PlaceGunEntry(pose);
             // the arm model on the empty right forearm (not while the right hand holds the melee weapon)
-            if (g_armEntry && solvedFree[1] && melee != 1 && g_padValid[1] && !WeaponsIsMeleeComp(g_armComp) && !WeaponsIsFlipped(g_armComp))
+            if (g_armEntry && solved[1] && !(g_gunSide == 1 && gunArm) && melee != 1 && g_padValid[1] && !WeaponsIsMeleeComp(g_armComp) && !WeaponsIsFlipped(g_armComp))
                 armPlaced = PlaceArmModel(pose);
             if (ikWeight < 1.0f)
                 for (int s = 0; s < 2; s++)
@@ -1481,11 +1512,11 @@ void OnSkelPose(uint8_t* comp)
             g_armWanted = rightFree && nowTick - freeSince >= 200;
             g_armWantedTick = nowTick;
         }
-        // a hand the player moves freely is the whole hand, as in the bind pose (the game's weapon animations
-        // shrink the gun hand away and fold its parts: an empty right hand was a bare bone)
+        // a hand the player moves is the whole hand, as in the bind pose (the game's weapon animations shrink the
+        // gun hand away and fold its parts: an empty right hand was a bare bone); with the gun it is a fist
         bool freeHand[2];
         for (int s = 0; s < 2; s++)
-            freeHand[s] = g_cfg.handIK && ikWeight >= 1.0f && g_hand[s].valid && melee != s && !(s == g_gunSide && gunArm);
+            freeHand[s] = g_cfg.handIK && ikWeight >= 1.0f && g_hand[s].valid && melee != s;
 
         // ---- 4. look ----
         for (int s = 0; s < 2; s++)   // slimmer legs (the rest of the leg inherits it)

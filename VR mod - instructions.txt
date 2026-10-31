@@ -118,8 +118,9 @@ HANDS (new, early version)
   Your own robot's head is hidden so it does not block the view.
   Robots near you no longer vanish (NoNearFade=600 - the radius; 0 = as in the game).
   ShowBody=1 - arms and legs visible, the bulky torso hidden (0 = arms only, 2 = the whole body).
-  LimbThickness=0.5 - thinner arms, LegThickness=0.75 - thinner legs (1 = as in the game).
-  HandScale=0.6 / WeaponScale=0.6 - size of the robot's hands and of the weapon in hand.
+  LimbThickness=0.5 - thinner upper arms (shoulder to elbow; the forearms always keep the game's size),
+    LegThickness=0.75 - thinner legs (1 = as in the game).
+  HandScale=1.0 / WeaponScale=1.0 - size of the robot's hands and of the weapon in hand (1 = as in the game).
   HandOffsetForward / HandOffsetRight / HandOffsetUp - shift the robot's hands relative to yours, in cm
     (e.g. the robot's hands are right of yours - HandOffsetRight=-4). Can be changed in game.
   MuzzleFlashScale=0.35 - size of muzzle flashes (they are right at your eyes); also for turrets - mounted
@@ -131,7 +132,9 @@ HANDS (new, early version)
     pose (does not slip after menus, movies, loads). 0 - as before (a separate render thread: slightly more
     FPS, but the eyes can slip).
   NearClip=10 - how close to the eyes things are still visible (the game had 100 - hands vanished at the face).
-  The gun hangs on the right forearm and points exactly along the right controller.
+  The gun is as in the game: the forearm turns into the gun from the elbow, it points exactly along the right
+    controller and the elbow follows it; the hand is a fist on its grip. An empty hand is a full-size fist on a
+    thick forearm.
   In a vehicle you can aim with your gaze (VehicleHeadAim=1; 0 = with the controller).
   Vehicle camera: VehicleCamera=0 - from the cockpit, 1 - chase camera behind and above (ChaseDistance /
     ChaseHeight).
