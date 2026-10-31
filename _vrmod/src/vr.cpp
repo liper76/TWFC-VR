@@ -82,10 +82,8 @@ float4 PS(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     // into the eye: the rest, but only what is drawn solid (markers, names, lock-on marks) - the see-through
     // full-screen effects of abilities and aiming stay out
     if (hud > 3.5 && (panelPart || max(sqrt(saturate(s.a)), max(s.r, max(s.g, s.b))) < 0.5)) return float4(0, 0, 0, 0);
-    // minimal HUD (panel): only the health bar (top left) and the ammo bar with its count (top right) - not the
-    // ability icons and grenades below them
-    bool hpAmmo = (uv.y < 0.145 && (uv.x < 0.37 || (uv.x > 0.58 && uv.x < 0.96))) ||
-                  (uv.y < 0.205 && uv.x > 0.58 && uv.x < 0.892);   // the weapon picture and the count, not the grenades
+    // minimal HUD (panel): the top corners - health and ability (left), weapon, ammo, ability and grenades (right)
+    bool hpAmmo = uv.y < 0.26 && (uv.x < 0.4 || uv.x > 0.6);
     if (hud > 1.5 && hud < 3.5 && !(hpAmmo || prompts)) return float4(0, 0, 0, 0);
     if (hud > 2.5 && hud < 3.5 && s.a < 0.85) return float4(0, 0, 0, 0);   // zoomed: the scope overlay's tint goes
     if (hud > 0.5) {
@@ -238,12 +236,15 @@ struct XR {
     DWORD clickAt[2] = {};    // thumbstick click held since (weapon wheel)
     bool clickHeld[2] = {};   // ... long enough: the wheel (no tap)
     int clickPulse[2] = {};   // a tap of the click: its button for a few updates
+    int exitPulse = 0;        // the game's use button (X) for a few updates: off a mounted turret
     DWORD throwAt = 0;        // grenade throw gesture
     int throwPulse = 0;
     bool grenade = false;     // a grip holds a grenade from the pouch (grenades.cpp)
     int grenadeHand = 0;
     bool grenadeArmed = false;
+    DWORD grenadeAt = 0;      // a grenade was last taken or held then (no melee during the throw and just after)
     bool fireWas = false;
+    bool use[2] = {};         // a grip squeeze that is the game's use button (X) while held
 };
 static XR xr;
 static std::atomic<int64_t> g_lastDisplayTime;   // predicted display time of the last frame (hand/eye poses)
@@ -572,7 +573,6 @@ static DWORD g_setupEnteredAt;
 static void TrackWeaponSetup();
 
 // The grenade pouch (BeltOffset: right, up, forward from the eyes, turned with the head's heading).
-static const float kZoneRadius = 0.15f;   // grab zones (pouch, the gun's front): a hand this close to the point
 static XrVector3f BeltPoint(const XrPosef& head)
 {
     const XrQuaternionf& o = head.orientation;
@@ -581,6 +581,24 @@ static XrVector3f BeltPoint(const XrPosef& head)
     if (l < 1e-3f) { fx = 0; fz = -1; } else { fx /= l; fz /= l; }
     const float* b = g_cfg.beltOffset;   // right = (-fz, fx) in x/z
     return { head.position.x + b[0] * -fz + b[2] * fx, head.position.y + b[1], head.position.z + b[0] * fx + b[2] * fz };
+}
+
+// A grenade can be taken blind: near the pouch (0.25 m), or anywhere on the body - from the collarbones (0.2 m under the
+// eyes) down to the hips, within 0.3 m of the body's axis and not reached out in front of it.
+static bool InPouch(const XrPosef& head, const Vec3f& hand)
+{
+    XrVector3f b = BeltPoint(head);
+    float dx = hand.x - b.x, dy = hand.y - b.y, dz = hand.z - b.z;
+    if (dx * dx + dy * dy + dz * dz < 0.25f * 0.25f) return true;
+    const XrQuaternionf& o = head.orientation;
+    float fx = -2 * (o.x * o.z + o.y * o.w), fz = -(1 - 2 * (o.x * o.x + o.y * o.y));
+    float l = sqrtf(fx * fx + fz * fz);
+    if (l < 1e-3f) { fx = 0; fz = -1; } else { fx /= l; fz /= l; }
+    // the body's axis is a little behind the eyes
+    float cx = head.position.x - fx * 0.08f, cz = head.position.z - fz * 0.08f;
+    float hx = hand.x - cx, hz = hand.z - cz, below = head.position.y - hand.y;
+    float ahead = hx * fx + hz * fz, side = hx * -fz + hz * fx;
+    return below > 0.2f && below < head.position.y - b.y + 0.2f && fabsf(side) < 0.3f && ahead < 0.32f && ahead > -0.2f;
 }
 
 // How the gun sits in hand h: the right hand's GunGrip; the left hand's own per weapon (GunGripL, set in the setup),
@@ -725,9 +743,7 @@ static void UpdateGestures(XINPUT_GAMEPAD& p, DWORD now)
         if (!free || squeeze[h] <= 0.6f || xr.gripHeld[h]) continue;
         XrPosef head;
         if (xr.viewSpace && LocateHand(xr.viewSpace, t, head)) {
-            XrVector3f b = BeltPoint(head);
-            float dx = g_gripPos[h].x - b.x, dy = g_gripPos[h].y - b.y, dz = g_gripPos[h].z - b.z;
-            if (dx * dx + dy * dy + dz * dz < kZoneRadius * kZoneRadius) {
+            if (InPouch(head, g_gripPos[h])) {
                 xr.grenade = true;
                 xr.grenadeHand = h;
                 xr.grenadeArmed = false;
@@ -735,6 +751,7 @@ static void UpdateGestures(XINPUT_GAMEPAD& p, DWORD now)
             }
         }
     }
+    if (xr.grenade || GrenadeHeld()) xr.grenadeAt = now;
     if (xr.grenade) {
         int h = xr.grenadeHand;
         if (!xr.grenadeArmed && GetFloat(xr.trigger[h]) > 0.6f) {
@@ -755,6 +772,21 @@ static void UpdateGestures(XINPUT_GAMEPAD& p, DWORD now)
         if (squeeze[h] < 0.35f) xr.pullSqueeze[h] = false;
     }
     if (PullWantInteract()) p.wButtons |= XINPUT_GAMEPAD_X;   // a pulled weapon: "hold X" takes it
+    // the use button (X) on the grip: a new squeeze of a free hand reached out from the body (at the body it is a
+    // grenade) that did nothing else - takes a weapon lying there, pulls a lever, presses a button, gets into a turret
+    XrPosef useHead;
+    bool useHeadOk = g_cfg.gripUse && xr.viewSpace && LocateHand(xr.viewSpace, t, useHead);
+    for (int h = 0; h < 2; h++) {
+        bool busy = (xr.twoHand && h == S) || (xr.grenade && xr.grenadeHand == h) || xr.pullSqueeze[h] ||
+                    (h == G && VRGunHand() >= 0) || WeaponsMeleeHeld() == h || IKPawnIsVehicle() ||
+                    WeaponsOnTurret();   // (the hands hold the turret's handles: getting off is the wheel's empty hand)
+        if (useHeadOk && !busy && squeeze[h] > 0.6f && !xr.gripHeld[h] && !InPouch(useHead, g_gripPos[h])) {
+            xr.use[h] = true;
+            VRHaptic(h, 0.2f, 0.02f);
+        }
+        if (squeeze[h] < 0.35f || busy || !g_cfg.gripUse) xr.use[h] = false;
+        if (xr.use[h]) p.wButtons |= XINPUT_GAMEPAD_X;
+    }
     for (int h = 0; h < 2; h++) xr.gripHeld[h] = squeeze[h] > 0.6f || (xr.gripHeld[h] && squeeze[h] > 0.35f);   // grab only on a new squeeze
     xr.leftGripHeld = xr.gripHeld[0];
     if (VRGunHand() < 0) p.bRightTrigger = 0;   // the gun put away: nothing to fire
@@ -828,7 +860,9 @@ static void UpdateGestures(XINPUT_GAMEPAD& p, DWORD now)
     int meleeHand = -1;
     static int strikeHand = 1;   // hand of the last strike (a left one shows the attack's weapon in the left hand)
     XrPosef mh;
-    if (g_cfg.meleeGesture && !WheelIsOpen() && !IKPawnIsVehicle() && xr.viewSpace && LocateHand(xr.viewSpace, t, mh)) {
+    // (a grenade taken, held or just thrown: the throw is no punch - with either hand)
+    bool grenadeNow = xr.grenade || GrenadeHeld() || now - xr.grenadeAt < 1000;
+    if (g_cfg.meleeGesture && !grenadeNow && !WheelIsOpen() && !IKPawnIsVehicle() && xr.viewSpace && LocateHand(xr.viewSpace, t, mh)) {
         XrVector3f hf = Rotate(mh.orientation, { 0, 0, -1 });
         for (int h = 0; h < 2 && meleeHand < 0; h++) {
             bool free = h == 0 ? !xr.twoHand && VRGunHand() != 0 : VRGunHand() != 1 || WeaponsMeleeHeld() == 1;
@@ -837,7 +871,7 @@ static void UpdateGestures(XINPUT_GAMEPAD& p, DWORD now)
             if ((v.x * hf.x + v.y * hf.y + v.z * hf.z) / speed[h] > 0.5f) meleeHand = h;
         }
     }
-    if (meleeHand < 0 && g_cfg.meleeContact) meleeHand = WeaponsMeleeHeld();   // (MeleeContact=1: a held weapon's swing that reaches a robot)
+    if (meleeHand < 0 && g_cfg.meleeContact && !grenadeNow) meleeHand = WeaponsMeleeHeld();   // (MeleeContact=1: a held weapon's swing that reaches a robot)
     if (g_cfg.meleeGesture && meleeHand >= 0 && !WheelIsOpen()) {
         int h = meleeHand;
         bool swinging = speed[h] > g_cfg.meleeSpeed;
@@ -906,14 +940,14 @@ static void UpdateInput()
         // VR layout: the grips hold things (the weapon's front, grenades, pickups); the left trigger stays the game's
         // (fine aim / the weapon's second action, e.g. detonating grenades; vehicle boost). Nothing important is on the
         // stick clicks (pressing them wears the sticks): the left click is only the game's transform (LS, one press),
-        // the right one does nothing. Y tapped = main ability (RB), held = second ability (LB); B tapped = the game's
-        // B (grenade), held = the weapon wheel (UpdateWeaponWheel). Melee: a punch forward with a hand.
+        // the right one does nothing. Y = main ability (RB) at once, for as long as it is down; B tapped = second
+        // ability (LB), held = the weapon wheel (UpdateWeaponWheel). Grenades: taken from the belt with a grip (no
+        // button). Melee: a punch forward with a hand.
         if (GetBool(xr.btn[kLClick])) p.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
         UpdateWeaponWheel(p, grip, now);
-        if (xr.clickPulse[1] > 0) { p.wButtons |= XINPUT_GAMEPAD_B; xr.clickPulse[1]--; }
-        if (xr.clickPulse[0] > 0) { p.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER; xr.clickPulse[0]--; }
-        // Y held 0.35 s: the second ability, pressed for as long as Y stays down
-        if (xr.clickHeld[0] && GetBool(xr.btn[kY])) p.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+        if (GetBool(xr.btn[kY])) p.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+        if (xr.clickPulse[1] > 0) { p.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER; xr.clickPulse[1]--; }
+        if (xr.exitPulse > 0) { p.wButtons |= XINPUT_GAMEPAD_X; xr.exitPulse--; }
     }
 
     // Menu button: short press = Start (pause). In gameplay, held 1.5 s = adjust how the gun sits in the hand;
@@ -1264,6 +1298,11 @@ static void WheelChoose()
     if (w.hot < 0 || w.hot >= w.count) return;
     int item = w.item[w.hot];
     int melee = WeaponsMeleeHand();
+    // on a mounted turret the empty hand gets off it (the game's use button)
+    if (item == kItemEmpty && WeaponsOnTurret()) {
+        xr.exitPulse = 10;
+        Log("vr: weapon wheel -> empty hand: off the turret");
+    }
     // the gun is in one hand at a time: taken into the other, it leaves the first (mirrored); a left hand that gives it
     // up (melee weapon, empty) hands it back to the right
     if (item == kItemMelee) {
@@ -1309,11 +1348,11 @@ static void UpdateWeaponWheel(XINPUT_GAMEPAD& p, const float grip[2], DWORD now)
         g_dbgWheelHand = -2;
     }
     // The wheel is on B held (not the grips: grabbing things kept opening it; not the stick clicks: they wear the
-    // sticks): B held 0.35 s opens the right hand's wheel, let go to choose; a short B is the game's B (grenade), sent
-    // when it is let go. In vehicle form B held switches the vehicle's weapon (the game's "next weapon").
-    // Y the same way: tapped = main ability (sent when let go), held = second ability (VRInput).
+    // sticks): B held 0.35 s opens the right hand's wheel, let go to choose; a short B is the second ability, sent
+    // when it is let go (grenades are taken from the belt, not on a button). In vehicle form B held switches the
+    // vehicle's weapon (the game's "next weapon"). Y is the main ability at once (VRInput).
     bool vehicle = IKPawnIsVehicle();
-    for (int h = 0; h < 2 && !debug; h++) {   // h: 1 = B (right hand), 0 = Y
+    for (int h = 1; h < 2 && !debug; h++) {   // h: 1 = B (right hand)
         DWORD& at = xr.clickAt[h];
         bool click = GetBool(xr.btn[h ? kB : kY]);
         if (click) {
@@ -1747,6 +1786,7 @@ static const SettingItem kSettings[] = {
     { L"Input", L"SnapTurnDegrees", L"\x041F\x043E\x0432\x043E\x0440\x043E\x0442 \x0440\x044B\x0432\x043A\x043E\x043C (0 = \x043F\x043B\x0430\x0432\x043D\x043E)", L"Snap turn (0 = smooth)", 0, 15, 0, 90 },
     { L"Input", L"SmoothTurnSpeed", L"\x0421\x043A\x043E\x0440\x043E\x0441\x0442\x044C \x043F\x043E\x0432\x043E\x0440\x043E\x0442\x0430", L"Turn speed", 120, 15, 30, 360 },
     { L"Input", L"MoveByHead", L"\x0418\x0434\x0442\x0438 \x043A\x0443\x0434\x0430 \x0441\x043C\x043E\x0442\x0440\x044E", L"Walk where I look", 1, 1, 0, 1 },
+    { L"Input", L"GripUse", L"\x0413\x0440\x0438\x043F = \x0434\x0435\x0439\x0441\x0442\x0432\x0438\x0435 (\x0432\x0437\x044F\x0442\x044C, \x0440\x044B\x0447\x0430\x0433, \x0441\x0435\x0441\x0442\x044C)", L"Grip = use (take, lever, get in)", 1, 1, 0, 1 },
     { L"Input", L"TwoHanded", L"\x0414\x0432\x0443\x0440\x0443\x0447\x043D\x044B\x0439 \x0445\x0432\x0430\x0442", L"Two-handed grip", 1, 1, 0, 1 },
     { L"Input", L"GrenadeGrab", L"\x0413\x0440\x0430\x043D\x0430\x0442\x044B \x0440\x0443\x043A\x043E\x0439 \x0441 \x043F\x043E\x044F\x0441\x0430", L"Grenades by hand from the belt", 1, 1, 0, 1 },
     { L"Input", L"GrenadeThrowScale", L"\x0421\x0438\x043B\x0430 \x0431\x0440\x043E\x0441\x043A\x0430 \x0433\x0440\x0430\x043D\x0430\x0442\x044B", L"Grenade throw strength", 3, 0.25f, 0.5f, 8 },
@@ -2868,8 +2908,29 @@ static void UpdateGameReticle(ID3D11ShaderResourceView* hud)
 
 // The ray shots travel along (LOCAL space, forward = -Z of the pose): the right controller, the line from the
 // right hand to the left one when held two-handed, or the gaze in vehicles.
+void VRTurretAim(const VREyeView::Hand& l, const VREyeView::Hand& r, float q[4], float p[3])
+{
+    float s = l.qx * r.qx + l.qy * r.qy + l.qz * r.qz + l.qw * r.qw < 0.0f ? -1.0f : 1.0f;
+    float x = l.qx + s * r.qx, y = l.qy + s * r.qy, z = l.qz + s * r.qz, w = l.qw + s * r.qw;
+    float n = sqrtf(x * x + y * y + z * z + w * w);
+    if (n < 1e-4f) { x = r.qx; y = r.qy; z = r.qz; w = r.qw; n = 1.0f; }
+    q[0] = x / n; q[1] = y / n; q[2] = z / n; q[3] = w / n;
+    p[0] = (l.px + r.px) * 0.5f; p[1] = (l.py + r.py) * 0.5f; p[2] = (l.pz + r.pz) * 0.5f;
+}
+
 static bool AimRay(XrTime t, XrPosef& hand)
 {
+    // a mounted turret: both hands on its handles aim it (as camera.cpp does)
+    XrPosef l, r;
+    if (WeaponsOnTurret() && !IKPawnIsVehicle() && LocateHand(xr.aimSpace[0], t, l) && LocateHand(xr.aimSpace[1], t, r)) {
+        VREyeView::Hand hl = { true, l.position.x, l.position.y, l.position.z, l.orientation.x, l.orientation.y, l.orientation.z, l.orientation.w };
+        VREyeView::Hand hr = { true, r.position.x, r.position.y, r.position.z, r.orientation.x, r.orientation.y, r.orientation.z, r.orientation.w };
+        float q[4], p[3];
+        VRTurretAim(hl, hr, q, p);
+        hand.orientation = { q[0], q[1], q[2], q[3] };
+        hand.position = { p[0], p[1], p[2] };
+        return true;
+    }
     // vehicles aim with the head (their gun is below the eyes; a gaze ray keeps the ring on the hit point)
     if (CameraVehicleAim() && xr.viewSpace) { if (!LocateHand(xr.viewSpace, t, hand)) return false; }
     else if (!LocateRightAim(t, hand, nullptr)) return false;
@@ -2880,7 +2941,8 @@ static bool AimRay(XrTime t, XrPosef& hand)
 
 static bool BuildReticle(XrTime t, XrCompositionLayerQuad& q)
 {
-    if (!g_cfg.reticle || g_cfg.aimMode != 1 || VRGunHand() < 0 || WeaponsMeleeHeld() == VRGunHand()) return false;   // no gun in hand
+    bool turret = WeaponsOnTurret() && !IKPawnIsVehicle();   // (a turret has its ring always)
+    if (!g_cfg.reticle || g_cfg.aimMode != 1 || (!turret && (VRGunHand() < 0 || WeaponsMeleeHeld() == VRGunHand()))) return false;   // no gun in hand
     if (!g_reticle.sc && !CreateReticle()) { g_cfg.reticle = 0; return false; }
     XrPosef hand;
     if (!AimRay(t, hand)) return false;

@@ -27,12 +27,15 @@ static DWORD g_moveTick;
 static bool g_chaseValid;            // the latched base is a chase camera position (smoothed)
 static float g_baseFwd, g_baseUp;    // eye base relative to the pawn (forward, up), gliding when transforming
 static bool g_baseInit;
+static float g_turretLift;           // on a mounted turret: eyes raised by (Unreal units, gliding)
 
 void CameraBaseOffset(float& forward, float& up)
 {
     forward = g_baseInit ? g_baseFwd : g_cfg.eyeForward;
-    up = g_baseInit ? g_baseUp : g_cfg.eyeHeight;
+    up = (g_baseInit ? g_baseUp : g_cfg.eyeHeight) + g_turretLift;
 }
+
+float CameraTurretLift() { return g_turretLift; }
 static void UpdateAimHit(void* pc, float ox, float oy, float oz);
 static volatile DWORD g_vehicleAimTick;   // last camera update in vehicle form with gaze aiming
 
@@ -227,8 +230,12 @@ void CameraOnUpdate(TPOV* pov, void* viewTarget, void* pc, float dt)
             g_baseUp += (height - g_baseUp) * kb;
             if (fabsf(forward - g_baseFwd) < 0.5f) g_baseFwd = forward;
             if (fabsf(height - g_baseUp) < 0.5f) g_baseUp = height;
+            // on a mounted turret the robot sits low behind it: eyes (and body, ik.cpp) go up to see over it
+            float lift = !vehicle && WeaponsOnTurret() ? g_cfg.turretEyeUp * g_cfg.worldScale : 0.0f;
+            g_turretLift += (lift - g_turretLift) * (1.0f - expf(-pdt / 0.25f));
+            if (fabsf(lift - g_turretLift) < 0.5f) g_turretLift = lift;
             Vec3 fwd = Mul(yawOnly, Vec3{ g_baseFwd, 0.0f, 0.0f });
-            Vec3f want = { pawn.x + fwd.x, pawn.y + fwd.y, pawn.z + g_baseUp };
+            Vec3f want = { pawn.x + fwd.x, pawn.y + fwd.y, pawn.z + g_baseUp + g_turretLift };
             if (chase && g_chaseValid) {
                 // chase camera (vehicle form): behind and above, catching up smoothly; the horizon stays level and
                 // it never turns with the vehicle (the vehicle steers towards the aim)
@@ -261,7 +268,7 @@ void CameraOnUpdate(TPOV* pov, void* viewTarget, void* pc, float dt)
                 g_latchBase.z += pawn.z - g_latchPawn.z;
             } else {
                 Vec3 fwd = Mul(RotatorToMat(0, (int)g_latchYaw & 0xFFFF, 0), Vec3{ g_baseFwd, 0.0f, 0.0f });
-                g_latchBase = { pawn.x + fwd.x, pawn.y + fwd.y, pawn.z + g_baseUp };
+                g_latchBase = { pawn.x + fwd.x, pawn.y + fwd.y, pawn.z + g_baseUp + g_turretLift };
             }
             g_latchPawn = pawn;
         }
@@ -356,9 +363,7 @@ void CameraOnUpdate(TPOV* pov, void* viewTarget, void* pc, float dt)
         if (g_chaseValid && ReadActorLocation(viewTarget, pawn)) o = { pawn.x, pawn.y, pawn.z + g_cfg.vehicleEyeHeight };
         float d = CameraAimHitMeters() > 0.0f ? CameraAimHitMeters() * g_cfg.worldScale : 5000.0f;
         Vec3 t = { rayO.x + dir.x * d - o.x, rayO.y + dir.y * d - o.y, rayO.z + dir.z * d - o.z };
-        float pitch = atan2f(t.z, sqrtf(t.x * t.x + t.y * t.y));
-        // aiming steeply up or down threw the vehicle off the map: the vehicle aims within -20..+35 degrees
-        pitch = fminf(fmaxf(pitch, -20.0f * 0.0174533f), 35.0f * 0.0174533f);
+        float pitch = atan2f(t.z, sqrtf(t.x * t.x + t.y * t.y));   // (the game limits it per vehicle: jets climb)
         int ap = (int)(pitch / kUURotToRad) & 0xFFFF;
         int ay = (int)(atan2f(t.y, t.x) / kUURotToRad) & 0xFFFF;
         GameSetAim(true, ap, ay, o.x, o.y, o.z);
@@ -373,9 +378,18 @@ void CameraOnUpdate(TPOV* pov, void* viewTarget, void* pc, float dt)
         g_moveTick = GetTickCount();
     } else if (g_cfg.aimMode == 1 && eye.aim[VRGunHand() == 0 ? 0 : 1].valid) {
         int gh = VRGunHand() == 0 ? 0 : 1;   // the gun's hand (the left one when the gun was taken there)
-        const auto& a = eye.aim[gh];
+        auto a = eye.aim[gh];
         int ap, ay, ar;
-        MatToRotator(Mul(body, XrRotToUE(HandAimXR(eye, gh))), ap, ay, ar);
+        if (WeaponsOnTurret() && eye.aim[0].valid && eye.aim[1].valid) {
+            // a mounted turret is aimed with both hands on its handles: between the two controllers (VRTurretAim)
+            float q[4], p[3];
+            VRTurretAim(eye.aim[0], eye.aim[1], q, p);
+            a.qx = q[0]; a.qy = q[1]; a.qz = q[2]; a.qw = q[3];
+            a.px = p[0]; a.py = p[1]; a.pz = p[2];
+            MatToRotator(Mul(body, XrRotToUE(QuatToMat(a.qx, a.qy, a.qz, a.qw))), ap, ay, ar);
+        } else {
+            MatToRotator(Mul(body, XrRotToUE(HandAimXR(eye, gh))), ap, ay, ar);
+        }
         float sx, sz;
         int hitYaw;
         if (MeleeTargetYaw(hitYaw)) {   // the weapon hit a robot: the game's attack goes at it
