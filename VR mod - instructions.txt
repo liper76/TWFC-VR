@@ -35,12 +35,18 @@ CONTROLS (main mode; the buttons work like an Xbox gamepad)
   Right trigger ................... fire (with a melee weapon in the right hand: swing it)
   Left trigger .................... as in the game: precise aim / the weapon's second action (detonating grenades);
                                     in vehicle form - boost
-  Y ............................... main ability (RB), at once, held while you hold Y
-  B: short press .................. the game's B: throws a grenade (and whatever else the game has on B); grenades also from the belt with the grip
-  B: hold 0.35 s .................. the right hand's WEAPON WHEEL (like Half-Life: Alyx): point the hand at an item
-                                    and release B. Items: your weapons / "Empty hand". (The grips do not open the
-                                    wheel - they only grab.) In a vehicle, holding B switches the vehicle's weapon.
-  Left stick click ................ transform. Right stick click: second ability (LB).
+  (the left thumb stays on the movement stick, so both abilities are under the right thumb)
+  B ............................... main ability (RB), at once, held while you hold B
+  Right stick UP (hold) ........... second ability (LB), held while you hold the stick up (the right stick click
+                                    does the same). Turning is sideways only: up/down do not turn.
+  Right stick DOWN: hold 0.3 s .... the right hand's WEAPON WHEEL (like Half-Life: Alyx): point the hand at an item
+                                    and let the stick go. Items: your weapons / "Empty hand". (The grips do not open
+                                    the wheel - they only grab.)
+  Right stick DOWN: short flick ... next weapon; with an empty right hand - the gun back into it.
+                                    In a vehicle - the vehicle's next weapon.
+  Y ............................... the game's B: throws a grenade (and whatever else the game has on B);
+                                    grenades also from the belt with the grip
+  Left stick click ................ transform.
                                     Empty right hand: the gun is put away and does not fire, the hand is free
                                     (grenades from the belt, pulling, fingers); its position on the controller
                                     is its own, set in "Weapon setup" while the hand is empty (EmptyGripR)
@@ -52,7 +58,7 @@ CONTROLS (main mode; the buttons work like an Xbox gamepad)
   Grip (free hand, not at the belt) . use: pick up, levers, buttons (GripUse=1 in [Input])
   "Empty hand" in the wheel on a turret: get off the turret. On a turret: aim with both hands
                                     (between them), the eyes are raised by TurretEyeUp=0.35 m ([VR])
-  (in a vehicle: Y - the vehicle's special move)
+  (in a vehicle: B - the vehicle's special move)
   The old layout (grips = abilities, Y = next weapon): GripAbilities=1 in [Input].
   (in the old layout the stick clicks are LS / RS)
   Menu button (left): short press .. Start (pause)
@@ -146,7 +152,7 @@ PHYSICAL CONTROLS (new)
     the hand, strike by swinging (or with the right trigger if it is in the right hand). Put it away - pick
     a gun in the wheel or briefly squeeze the right grip. In the left hand: a gun in the right, the melee
     weapon in the left at the same time. Transforming puts it away.
-  Abilities (left trigger, Y) - for AbilityAnimation=1.2 s the arms are given to the game's animation (spins,
+  Abilities (B, right stick up) - for AbilityAnimation=1.2 s the arms are given to the game's animation (spins,
     special attacks), then smoothly return to the controllers.
   BodyFollowHead=1 - the body stays under your head when you walk around the room.
   MoveByHead=1 ([Input] section) - the left stick moves where your head looks.
@@ -155,7 +161,7 @@ PHYSICAL CONTROLS (new)
   Grenade (like Half-Life: Alyx): squeeze the grip of the free left hand at your chest or belt - a grenade from
     the "pouch" appears in the hand (light vibration; no grenades - a short click). Left trigger - arm it
     (strong vibration). Release the grip mid-swing - the grenade flies with the hand's speed and direction,
-    in an arc. Released without arming it goes back to the pouch (the count is not spent). The B button throws
+    in an arc. Released without arming it goes back to the pouch (the count is not spent). The Y button throws
     as in the game.
     Settings in [Input]: GrenadeGrab=1 (0 - the old throwing gesture), GrenadeThrowScale (throw strength =
     hand speed x this), GrenadeGravity=1 (the arc; 0 - flies almost straight, as in the game).

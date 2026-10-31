@@ -238,9 +238,9 @@ struct XR {
     bool pullSqueeze[2] = {}; // this squeeze pulled a pickup (no weapon wheel for it)
     WORD prevButtons = 0;
     DWORD gripAt[2] = {};     // grip squeezed since
-    DWORD clickAt[2] = {};    // thumbstick click held since (weapon wheel)
-    bool clickHeld[2] = {};   // ... long enough: the wheel (no tap)
-    int clickPulse[2] = {};   // a tap of the click: its button for a few updates
+    int stickDir = 0;         // the right stick held up (1) or down (-1) - not sideways (VR layout: StickVertical)
+    DWORD stickAt = 0;        // ... since
+    bool stickHeld = false;   // ... down long enough: the weapon wheel (no flick)
     int exitPulse = 0;        // the game's use button (X) for a few updates: off a mounted turret
     DWORD throwAt = 0;        // grenade throw gesture
     int throwPulse = 0;
@@ -823,6 +823,8 @@ static void UpdateGestures(XINPUT_GAMEPAD& p, DWORD now)
     // ability buttons (bumpers): pressed now
     WORD bumpers = p.wButtons & (XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_RIGHT_SHOULDER);
     if (bumpers & ~xr.prevButtons) g_abilityAt = now;
+    if (g_cfg.logFps && (bumpers ^ xr.prevButtons) & (XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_RIGHT_SHOULDER))
+        Log("vr: abilities LB %d RB %d", !!(bumpers & XINPUT_GAMEPAD_LEFT_SHOULDER), !!(bumpers & XINPUT_GAMEPAD_RIGHT_SHOULDER));
     xr.prevButtons = p.wButtons;
 
     // aiming without the zoom button: weapon held with both hands and raised to the ready position (in front of the
@@ -931,7 +933,7 @@ static void UpdateInput()
     p.bRightTrigger = (BYTE)(GetFloat(xr.trigger[GunIdx()]) * 255.0f);
     if (GetBool(xr.btn[kA])) p.wButtons |= XINPUT_GAMEPAD_A;
     bool gameplay = CameraInGameplay();
-    if (GetBool(xr.btn[kB]) && (!gameplay || g_cfg.gripAbilities)) p.wButtons |= XINPUT_GAMEPAD_B;   // (VR layout: UpdateWeaponWheel)
+    if (GetBool(xr.btn[kB]) && (!gameplay || g_cfg.gripAbilities)) p.wButtons |= XINPUT_GAMEPAD_B;   // (VR layout: below)
     if (GetBool(xr.btn[kX])) p.wButtons |= XINPUT_GAMEPAD_X;
     float grip[2] = { GetFloat(xr.grip[0]), GetFloat(xr.grip[1]) };
     DWORD now = GetTickCount();
@@ -944,16 +946,19 @@ static void UpdateInput()
         if (GetBool(xr.btn[kRClick])) p.wButtons |= XINPUT_GAMEPAD_RIGHT_THUMB;
     } else {
         // VR layout: the grips hold things (the weapon's front, grenades, pickups); the left trigger stays the game's
-        // (fine aim / the weapon's second action, e.g. detonating grenades; vehicle boost). Nothing important is on the
-        // stick clicks (pressing them wears the sticks): the left click is only the game's transform (LS, one press),
-        // the right one the second ability (LB). Y = main ability (RB) at once, for as long as it is down; B tapped =
-        // the game's B (the grenade throw, and whatever else the game has on it), held = the weapon wheel
-        // (UpdateWeaponWheel). Grenades also from the belt with a grip. Melee: a punch forward with a hand.
+        // (fine aim / the weapon's second action, e.g. detonating grenades; vehicle boost). The left thumb moves, so
+        // both abilities are on the right one, at once and for as long as they are held: B = main ability (RB), the
+        // right stick held up = second ability (LB; the stick's vertical axis is not the game's - turning is only
+        // sideways); the right stick down = the weapon wheel (UpdateWeaponWheel). Left: Y = the game's B (grenade
+        // throw - grenades also from the belt with a grip), X = the game's X, the click = transform (LS, one press).
+        // The right click is the second ability too. Melee: a punch forward with a hand.
+        UpdateWeaponWheel(p, grip, now);   // (takes up the right stick's direction)
+        if (xr.stickDir) p.sThumbRX = 0;   // (held up or down: no turning meanwhile)
+        p.sThumbRY = 0;
+        if (GetBool(xr.btn[kB])) p.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+        if (xr.stickDir == 1 || GetBool(xr.btn[kRClick])) p.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+        if (GetBool(xr.btn[kY])) p.wButtons |= XINPUT_GAMEPAD_B;
         if (GetBool(xr.btn[kLClick])) p.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
-        if (GetBool(xr.btn[kRClick])) p.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
-        UpdateWeaponWheel(p, grip, now);
-        if (GetBool(xr.btn[kY])) p.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
-        if (xr.clickPulse[1] > 0) { p.wButtons |= XINPUT_GAMEPAD_B; xr.clickPulse[1]--; }
         if (xr.exitPulse > 0) { p.wButtons |= XINPUT_GAMEPAD_X; xr.exitPulse--; }
     }
 
@@ -1335,6 +1340,32 @@ static void WheelChoose()
 static volatile int g_dbgWheelHand = -2, g_dbgWheelHot = -1;   // debug "wheel <hand> <slot>" (hand -1 = choose)
 void VRDebugWheel(int hand, int hot) { g_dbgWheelHot = hot; g_dbgWheelHand = hand; }
 
+// The right stick pushed well up (1) or down (-1), not sideways (that turns); once held, it lets go only near the
+// middle or when turned sideways.
+static int StickVertical(XrVector2f s, int was)
+{
+    float ax = fabsf(s.x), ay = fabsf(s.y);
+    if (was && s.y * was > 0.4f && ay > ax) return was;
+    if (ay > 0.7f && ay > ax * 1.5f) return s.y > 0 ? 1 : -1;
+    return 0;
+}
+
+// The right stick flicked down: an empty right hand takes its gun back, else the next weapon (the game's Y).
+static void WheelQuickSwitch()
+{
+    Wheel& w = g_wheel;
+    if (WeaponsMeleeHand() == 1) WeaponsSetMeleeHand(-1);
+    if (g_gunHand == 1 && g_rightEmpty) {
+        g_rightEmpty = false;
+        Log("vr: right stick down -> the gun back in the right hand");
+    } else {
+        w.presses = 1;
+        Log("vr: right stick down -> next weapon");
+    }
+    xr.twoHand = false;
+    VRHaptic(1, 0.6f, 0.05f);
+}
+
 // grip[h]: squeeze of each hand; a hand whose grip holds the weapon's front (two-handed) does not open a wheel.
 static void UpdateWeaponWheel(XINPUT_GAMEPAD& p, const float grip[2], DWORD now)
 {
@@ -1343,6 +1374,7 @@ static void UpdateWeaponWheel(XINPUT_GAMEPAD& p, const float grip[2], DWORD now)
     if (g_setup.active) {   // the grips set up the gun there
         w.open = false;
         xr.gripAt[0] = xr.gripAt[1] = 0;
+        xr.stickDir = 0;
         return;
     }
     bool debug = g_dbgWheelHand != -2;
@@ -1354,29 +1386,27 @@ static void UpdateWeaponWheel(XINPUT_GAMEPAD& p, const float grip[2], DWORD now)
         w.open = false;
         g_dbgWheelHand = -2;
     }
-    // The wheel is on B held (not the grips: grabbing things kept opening it; not the stick clicks: they wear the
-    // sticks): B held 0.35 s opens the right hand's wheel, let go to choose; a short B is the game's B (grenade), sent
-    // when it is let go. In vehicle form B held switches the
-    // vehicle's weapon (the game's "next weapon"). Y is the main ability at once (VRInput).
+    // The wheel is on the right stick held down (not the grips: grabbing things kept opening it; not a button: B is
+    // the main ability, held up the second - UpdateInput): held 0.3 s it opens the right hand's wheel, let go to
+    // choose; flicked down = WheelQuickSwitch. In vehicle form down switches the vehicle's weapon at once (the game's
+    // "next weapon").
     bool vehicle = IKPawnIsVehicle();
-    for (int h = 1; h < 2 && !debug; h++) {   // h: 1 = B (right hand)
-        DWORD& at = xr.clickAt[h];
-        bool click = GetBool(xr.btn[h ? kB : kY]);
-        if (click) {
-            if (!at) at = now;
-            if (now - at > 350 && !xr.clickHeld[h]) {
-                xr.clickHeld[h] = true;
-                if (h == 1) {
-                    if (vehicle) w.presses = 1;
-                    else if (!w.open && t) WheelOpen(t, 1);
-                }
+    if (!debug) {
+        int was = xr.stickDir, dir = StickVertical(GetStick(xr.stick[1]), was);
+        if (dir != was) {
+            if (was == -1) {   // let go of down
+                if (w.open && w.hand == 1) { WheelChoose(); w.open = false; }
+                else if (!xr.stickHeld && !vehicle) WheelQuickSwitch();
             }
-        } else {
-            if (at && w.open && w.hand == h) WheelChoose();
-            else if (at && !xr.clickHeld[h]) xr.clickPulse[h] = 8;   // a tap
-            if (w.open && w.hand == h) w.open = false;
-            at = 0;
-            xr.clickHeld[h] = false;
+            xr.stickDir = dir;
+            xr.stickAt = now;
+            xr.stickHeld = false;
+            if (dir == -1 && vehicle) { w.presses = 1; xr.stickHeld = true; }
+            if (dir) VRHaptic(1, 0.15f, 0.02f);   // (a stick has no click to feel)
+            if (dir && g_cfg.logFps) Log("vr: right stick %s", dir > 0 ? "up (second ability)" : "down");
+        } else if (dir == -1 && !xr.stickHeld && now - xr.stickAt > 300) {
+            xr.stickHeld = true;
+            if (!w.open && t) WheelOpen(t, 1);
         }
     }
     (void)grip;

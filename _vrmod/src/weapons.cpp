@@ -98,9 +98,12 @@ void Remember(void** arr, void* v)
 // detaches them itself through the original function.
 bool __stdcall KeepAttached(uint8_t* mesh, uint8_t* comp, uintptr_t ret)
 {
-    if (g_meleeState != kHolding || mesh != g_mesh || !Contains((void* const*)g_kept, g_keptCount, comp)) return false;
-    if (g_cfg.logFps) Log("weapons: detach of %p from %08X refused", comp, (unsigned)ret);
-    return true;
+    if (g_meleeState == kHolding && mesh == g_mesh && Contains((void* const*)g_kept, g_keptCount, comp)) {
+        if (g_cfg.logFps) Log("weapons: detach of %p from %08X refused", comp, (unsigned)ret);
+        return true;
+    }
+    // ik.cpp: the arm model on the empty right hand stays; the records of what is attached
+    __try { return !IKOnDetach(mesh, comp); } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
 __declspec(naked) void HookDetach()
@@ -146,12 +149,14 @@ AttachFn g_origAttach;
 
 void __fastcall HookAttach(uint8_t* mesh, uint8_t* comp, void* bone, void* loc, void* rot, void* scale)
 {
-    if (g_meleeState == kHolding && mesh == g_mesh && Contains((void* const*)g_kept, g_keptCount, comp)) {
+    // (the same for the arm model ik.cpp keeps on the empty right hand: a grenade throw attaches it)
+    if ((g_meleeState == kHolding && mesh == g_mesh && Contains((void* const*)g_kept, g_keptCount, comp)) || IKArmModelHeld(mesh, comp)) {
         bool attached = false;
         __try { attached = IsAttached(mesh, comp); } __except (EXCEPTION_EXECUTE_HANDLER) {}
         if (attached) return;
     }
     g_origAttach(mesh, comp, bone, loc, rot, scale);
+    __try { IKOnAttach(mesh, comp); } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
 void ReleaseMelee(bool detach)
@@ -210,7 +215,7 @@ void UpdateMelee(uint8_t* mesh, bool vehicle, DWORD now)
     if (g_meleeState == kEquipping) {
         for (int i = 0; i < g_seenCount && g_keptCount < 8; i++) {
             const Seen& s = g_seen[i];
-            if (s.since + 30 < g_meleeStart || Contains((void* const*)g_kept, g_keptCount, s.comp)) continue;
+            if (s.since + 30 < g_meleeStart || Contains((void* const*)g_kept, g_keptCount, s.comp) || IKArmModelHeld(mesh, s.comp)) continue;
             g_kept[g_keptCount] = s.comp;
             g_keptBone[g_keptCount++] = 0;
             if (!g_meleeFirst) g_meleeFirst = now;
@@ -516,6 +521,26 @@ void UpdateTurrets(uint8_t* pawn, DWORD now)
 
 }   // namespace
 
+// For ik.cpp's arm model: attach/detach through the original functions (not the hooks), and what is attached.
+void WeaponsAttachOriginal(void* mesh, void* comp, unsigned bone, const float* loc, const int* rot, const float* scale)
+{
+    AttachFn fn = g_origAttach ? g_origAttach : (AttachFn)kMeshAttach;
+    fn((uint8_t*)mesh, (uint8_t*)comp, (void*)(uintptr_t)bone, (void*)loc, (void*)rot, (void*)scale);
+}
+
+void WeaponsDetachOriginal(void* mesh, void* comp)
+{
+    if (g_origDetach) CallDetach((uint8_t*)mesh, (uint8_t*)comp);
+}
+
+bool WeaponsIsAttached(void* mesh, void* comp)
+{
+    __try { return mesh && comp && IsAttached((uint8_t*)mesh, (uint8_t*)comp); } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// A mesh a punch with the empty left hand moved to the left side (MirrorStrike).
+bool WeaponsIsFlipped(void* comp) { return comp && g_flipCount && Contains((void* const*)g_flipped, g_flipCount, comp); }
+
 void WeaponsInstall()
 {
     bool ok = MH_CreateHook((void*)kMeshAttach, (void*)HookAttach, (void**)&g_origAttach) == MH_OK &&
@@ -542,6 +567,8 @@ void WeaponsUpdate(void* pawnPtr)
             g_seenCount = 0;
             if (!pawn) { g_meleeHand = -1; g_want = nullptr; }
         }
+        // the arm model on the empty right hand (ik.cpp; not while the right hand takes the melee weapon)
+        IKArmModelUpdate(mesh && g_origDetach ? pawn : nullptr, g_meleeHand != 1);
         if (!pawn || !mesh || !g_origDetach) { g_onTurret = false; return; }
         UpdateTurrets(pawn, now);
         bool vehicle = IKPawnIsVehicle();
