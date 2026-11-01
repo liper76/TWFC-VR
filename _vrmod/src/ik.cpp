@@ -357,6 +357,8 @@ float g_armGameLoc[3], g_armGameScale[3];
 int g_armGameRot[3];
 bool g_armGameSaved;
 bool g_armBindOff;                   // debug: armbind 0 - the plates as the game poses them
+int g_armTurn = 1;                   // debug armfix: the half turn of the shell (0 about z, 1 about y)
+float g_armShift[3];                 // debug armfix: and its shift (elbow plates' frame)
 
 bool MatchesScopeList(const std::wstring& names)
 {
@@ -814,6 +816,7 @@ void HandAxesFor(int side, const Pose* pose, const Vec3 ctrl[3], Vec3 out[3])
 // plates go with the forearm, both at their full size.
 Pose g_padFrame[2][2];      // per side: shoulder pads, elbow plates (component space)
 bool g_padValid[2];
+float g_foreExtra[2];       // per side: how much longer the forearm is than in the bind pose (component space)
 
 // The bend of an arm: the direction of its bone and the elbow's hinge axis (the same for both bones of a
 // two-bone limb) as a frame.
@@ -964,6 +967,7 @@ void SolveArm(int side, Pose* pose, Vec3 wrist, const Vec3 ctrl[3], const Vec3 h
     StretchThin(g_padFrame[side][0], Sub(E, S), 1.0f, thick);
     StretchThin(g_padFrame[side][1], foreDir, 1.0f, thick);
     g_padValid[side] = true;
+    g_foreExtra[side] = holdAx ? 0.0f : Len(foreDir) - L2;
 
     StretchThin(sh, Sub(E, S), stretch1, g_cfg.limbThickness * thick);
     StretchThin(el, foreDir, stretch2, thick);
@@ -1090,8 +1094,9 @@ Pose GunInComponent()
 // The arm model on the empty right hand: where the game attaches it on the forearm, relative to the forearm as
 // posed at its full thickness (the elbow plates' frame; the bone itself is slimmed), written onto the hand bone
 // (not sheared). The plates in the bind pose (the mod's empty hand) run along the model's +x from its root, and the
-// game attaches the root to the elbow bone, whose +x points back at the shoulder: the shell turned half about z lies
-// on the forearm, its striped face up like the left forearm's.
+// game attaches the root to the elbow bone, whose +x points back at the shoulder: the shell turned half about y lies
+// on the forearm as the left forearm's armour, mirrored (its blade on the outside, the point at the hand; about z it
+// lay turned over - the headset). It keeps to the wrist: shifted toward the hand as far as the forearm is stretched.
 bool PlaceArmModel(const Pose* pose)
 {
     Att* r = FindAtt(g_armComp);
@@ -1102,7 +1107,10 @@ bool PlaceArmModel(const Pose* pose)
     for (int k = 0; k < 3; k++) rel.ax[k] = Scale(rel.ax[k], r->scale[k]);
     rel.pos = { r->loc[0], r->loc[1], r->loc[2] };
     if (g_armOurs && !g_armBindOff) {
-        Pose t = { { { -1, 0, 0 }, { 0, -1, 0 }, { 0, 0, 1 } }, { 0, 0, 0 } };
+        static const Pose kTurn[2] = { { { { -1, 0, 0 }, { 0, -1, 0 }, { 0, 0, 1 } }, {} },
+                                       { { { -1, 0, 0 }, { 0, 1, 0 }, { 0, 0, -1 } }, {} } };
+        Pose t = kTurn[g_armTurn & 1];
+        t.pos = { -(g_foreExtra[1] + g_armShift[0]), g_armShift[1], g_armShift[2] };
         rel = Compose(t, rel);
     }
     WriteEntry(r, g_armEntry, Compose(rel, g_padFrame[1][1]), hb, pose);
@@ -1897,6 +1905,14 @@ bool IKArmModelHeld(void* mesh, void* comp) { return comp && comp == g_armComp &
 
 // debug: the empty hand's arm model in the bind pose (default) or as the game poses it
 void IKArmBindPose(bool on) { g_armBindOff = !on; Log("debug: arm model bind pose %s", on ? "on" : "off"); }
+
+// debug: the empty hand's shell turned half about z (0) or y (1) and shifted (forward along the forearm, y, z)
+void IKArmFix(int turn, float fwd, float y, float z)
+{
+    g_armTurn = turn;
+    g_armShift[0] = fwd; g_armShift[1] = y; g_armShift[2] = z;
+    Log("debug: arm model turn %s, shift %.1f %.1f %.1f (forearm +%.1f)", turn & 1 ? "y" : "z", fwd, y, z, g_foreExtra[1]);
+}
 
 // The arm model on the empty right hand (weapons.cpp, each frame, game thread): the robot's own arm shell (the
 // model the game shows on a grenade throw), attached where the game attaches it while the hand is empty and
