@@ -276,6 +276,10 @@ void InputBlockInstall();
 // ---- hints.cpp ----
 void HintsInstall();
 
+// ---- gfx.cpp: the game's Scaleform movies (HUD) ----
+void GfxQueue(const char* line);            // "gfxget [movie:]path" / "gfxset [movie:]path value" / "gfxcall [movie:]method args", run on the game thread
+void GfxTick();                             // game thread, each frame
+
 // ---- game.cpp (movies) ----
 void GameInstallMovieHook();
 bool GameMoviePlaying();                    // a Bink movie is playing (shown on the virtual screen)

@@ -83,6 +83,7 @@ C:\Games\Transformers - War for Cybertron\
 - Свой OpenXR-рантайм (`mockxr.dll`, сборка `build_mock.bat`). Подключается только к тестовому процессу через
   переменную `XR_RUNTIME_JSON=...\mockxr\mockxr.json`.
 - Каждые 450 кадров пишет `mockxr_<кадр>_eye0/eye1/overlayN/quad.bmp` и лог `mockxr.log` (слои, позы квадов).
+  Дампы копятся сотнями: удалять `mockxr_*_*.bmp` после каждой проверки, папку целиком не листать.
 - Как реальный рантайм, отвергает квады с ненормированным кватернионом (`xrEndFrame` = -39 POSE_INVALID).
 - Позы и кнопки задаются файлом `mockxr\mockxr_pose.txt` (перечитывается на лету):
   ```
@@ -244,8 +245,13 @@ LocalToWorld +0x50, флаги +0xF0 (HiddenGame 0x4), Translation +0x160, Scale
 Турель (TnMountable*): пределы поворота +0x2B0 (рыскание −90..90 от базы, тангаж −30..25), меш пушки — оружие
 +0x20C/+0x208; SkeletalMeshComponent SpaceBases +0x1EC (матрицы 64 байта, перенос +48), Bounds +0xBC.
 Scaleform: GGFxEngine `[0x12B000B4]`, +0x40 TArray FGFxMovie*; FGFxMovie +0x34 GFxMovieView, +0x40 видим, +0x50
-UGFxMovie («Hud_GFX»). Vtable вида: +0x2C SetVariable(path, GFxValue&, 1), +0x38 GetVariable(GFxValue* out, path);
+UGFxMovie («Hud_GFX»). Vtable вида: +0x2C SetVariable(path, GFxValue&, 1), +0x38 GetVariable(GFxValue* out, path),
++0x60 Invoke(путь метода, GFxValue* result, args (шаг 0x20), n), +0x90 Advance, +0x94 Display (2 раза за тик);
 GFxValue: тип +0 (2 bool, 3 number, 4 string, 6 object, 7 array, 8 display object), значение +8. Только из игрового потока.
+Клипы из GetVariable приходят строкой-путём. HUD: прицел `_root.hud_mc.midCenter_mc.instance17.crosshairAnchor_mc`
+(клип «crosshair»N«_mc» через attachMovie), менеджер меток `_root.instance24` (markerArray, клипы «marker»N«_mc»,
+screenCenterX/Y = 900, Stage 1800 = картинка 1800², _x/_y метки — пиксели экрана). Debug-команды: `gfxget`,
+`gfxset`, `gfxcall [movie:]метод арг…`, `gfxprobe` (src\gfx.cpp).
 Классы: TnPlayerPawn, TnAiPawn, TnAiController, TnPlayerControllerCampaign, TnAmmoCratePickupFactory,
 TnHealthPickupFactory, TnWeaponPickupFactory, TnDroppedPickup*, TnProjectileGrenade*, TnWeaponFlakGrenades.
 

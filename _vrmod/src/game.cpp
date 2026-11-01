@@ -117,6 +117,7 @@ __declspec(naked) static void HookUpdateTime()
 static void __stdcall OnFrameDelta()
 {
     if (!g_gameThread) g_gameThread = GetCurrentThreadId();
+    GfxTick();   // the mod's requests to the Scaleform movies (game thread)
     double* dt = (double*)addr::kGDeltaTime;
     if (g_cfg.logCameraSeq > 0) Log("seq: frame dt %.2f ms (held %.2f)", *dt * 1000.0, g_heldDelta * 1000.0);
     int eye;

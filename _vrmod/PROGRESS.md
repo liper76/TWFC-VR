@@ -878,3 +878,9 @@ $env:XR_RUNTIME_JSON="...\_vrmod\tools\mockxr\mockxr.json"; Start-Process Binari
 - `turretdbg 2` (команда автоматизации): лог трасс турели раз в секунду, с пометкой «(moved)» для перенесённых.
 - Проверено MockXR в Kaon (турель у входа): позы 0/60, 0/20, 0/0, 0/-70, ±130/60, 130/-60, -130/0 — все трассы выстрелов перенесены, попадания в стены/пол (StaticMeshActor, StaticMeshCollectionActor), FlashLocation пешки совпадает, попаданий в TnMountableTurret нет; на кадре вверх искр и дыма у турели нет.
 - Не проверено: шлем; другие турели (ракетная и т. п.).
+
+## 2026-11-01: мост к Scaleform HUD (gfx.cpp, MockXR, не в шлеме)
+- Новый `src\gfx.cpp`: из игрового потока (`GfxTick` в OnFrameDelta) читает/пишет переменные и вызывает методы мувиков GGFxEngine. Debug-команды: `gfxget [movie:]путь`, `gfxset [movie:]путь значение`, `gfxcall [movie:]метод арг…` (true/false, числа, строки), `gfxprobe` (лог vtable вида).
+- Найдено: Invoke = vtable вида +0x60 (аргументы GFxValue с шагом 0x20). Прицел — `_root.hud_mc.midCenter_mc.instance17.crosshairAnchor_mc`, менеджер меток — `_root.instance24` (через `_root.getInstanceAtDepth -16383`): screenCenter 900,900, Stage 1800, т. е. _x/_y меток — пиксели картинки HUD.
+- Проверено MockXR (Kaon, турель): get/set/call работают, пути читаются. На этом чекпоинте markerArray пуст.
+- Цель: повернуть метки и имена по миру (следующий шаг).
