@@ -843,6 +843,8 @@ float TwistAbout(Vec3 d, const Vec3 a[3], const Vec3 b[3])
 // armour on them are ArmSize thick (the upper arm also LimbThickness). With `holdAx` the forearm is part of the gun
 // instead (see SolveGunArm).
 const float kMaxReach = 1.4f;
+const float kGunReach = 3.0f;   // the upper arm of the gun arm (the elbow stays in the gun's back end)
+float g_gunArmDbg[5];       // debug (armdump aim): the gun arm's upper arm and forearm, the shoulder to the elbow wanted, got
 void SolveArm(int side, Pose* pose, Vec3 wrist, const Vec3 ctrl[3], const Vec3 handAx[3], float handSize,
               const Vec3* holdAx = nullptr)
 {
@@ -919,15 +921,17 @@ void SolveArm(int side, Pose* pose, Vec3 wrist, const Vec3 ctrl[3], const Vec3 h
     Vec3 foreDir = Sub(H, E);
     if (holdAx) {
         // the gun arm: the forearm turns into the gun from the elbow (the game hangs the gun on it, its back end
-        // over the forearm) - fixed to it as the game has it, the wrist straight, the wrist at `wrist`. The elbow
-        // goes where that puts it; the upper arm gives (0.6..kMaxReach of its length) and beyond that it falls
-        // short of the gun, which stays on the controller.
+        // over the forearm) - fixed to it as the game has it, the wrist straight, the wrist at `wrist`, at the
+        // gun's WeaponScale (the gun is drawn at it about the hand). The elbow goes where that puts it; the upper
+        // arm gives (0.6..kGunReach of its length) and beyond that it falls short of the gun, which stays on the
+        // controller.
         Vec3 rhAx[3];
         UnitAxes(rh, rhAx);
         Vec3 d = Norm(FromFrame(InFrame(Norm(Sub(rh.pos, re.pos)), rhAx), holdAx));   // the forearm, turned with the gun
-        Vec3 v = Sub(Sub(wrist, Scale(d, L2)), S);
+        Vec3 v = Sub(Sub(wrist, Scale(d, L2 * g_cfg.weaponScale)), S);
         float len = Len(v);
-        float k = fminf(fmaxf(len, 0.6f * L1), kMaxReach * L1);
+        float k = fminf(fmaxf(len, 0.6f * L1), kGunReach * L1);
+        g_gunArmDbg[0] = L1; g_gunArmDbg[1] = L2; g_gunArmDbg[2] = len; g_gunArmDbg[3] = k; g_gunArmDbg[4] = stretch;
         E = Add(S, Scale(len > 1e-3f ? Scale(v, 1.0f / len) : perp, k));
         foreDir = d;
         Vec3 dirN = Norm(Sub(H, S)), eN = Sub(E, S);
@@ -966,6 +970,8 @@ void SolveArm(int side, Pose* pose, Vec3 wrist, const Vec3 ctrl[3], const Vec3 h
     g_padFrame[side][1] = el;
     StretchThin(g_padFrame[side][0], Sub(E, S), 1.0f, thick);
     StretchThin(g_padFrame[side][1], foreDir, 1.0f, thick);
+    if (holdAx)   // the elbow plates on the gun's back end, at its size
+        for (auto& ax : g_padFrame[side][1].ax) ax = Scale(ax, g_cfg.weaponScale);
     g_padValid[side] = true;
     g_foreExtra[side] = holdAx ? 0.0f : Len(foreDir) - L2;
 
@@ -1473,6 +1479,8 @@ void OnSkelPose(uint8_t* comp)
                         Log("armdump aim: fwd %.2f %.2f %.2f right %.2f %.2f %.2f up %.2f %.2f %.2f | gun origin %.1f %.1f %.1f (k %.2f), elbow %.1f %.1f %.1f",
                             ctrl[0].x, ctrl[0].y, ctrl[0].z, ctrl[1].x, ctrl[1].y, ctrl[1].z, ctrl[2].x, ctrl[2].y, ctrl[2].z,
                             go.x, go.y, go.z, g_gun.size * g_cfg.weaponScale, el.x, el.y, el.z);
+                        Log("armdump aim: upper arm %.1f forearm %.1f, shoulder to the elbow wanted %.1f got %.1f (stretch %.2f)",
+                            g_gunArmDbg[0], g_gunArmDbg[1], g_gunArmDbg[2], g_gunArmDbg[3], g_gunArmDbg[4]);
                         for (int f = 0; f < 4; f++)
                             for (int j = 0; j < 2; j++) {
                                 int b = g_sk.fingers[s][f][j];
