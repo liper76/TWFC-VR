@@ -20,6 +20,7 @@ struct Config {
     int   vrMode = 1;               // 0 = theater (virtual screen) always, 1 = stereo 3D in gameplay
     float worldScale = 200.0f;       // Unreal units per real metre for head movement
     float fovScale = 1.0f;          // >1 renders a wider frustum than the headset needs
+    int   levelView = 1;            // the game draws the eyes without the head's roll (names and markers stay level)
     int   renderWidth = 1800;       // game resolution override for VR (0 = game setting)
     int   renderHeight = 1800;
     int   aimMode = 1;              // 0 = aim where you look, 1 = aim with the right controller

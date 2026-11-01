@@ -87,7 +87,7 @@ C:\Games\Transformers - War for Cybertron\
 - Как реальный рантайм, отвергает квады с ненормированным кватернионом (`xrEndFrame` = -39 POSE_INVALID).
 - Позы и кнопки задаются файлом `mockxr\mockxr_pose.txt` (перечитывается на лету):
   ```
-  head x y z yaw pitch
+  head x y z yaw pitch [roll]           (roll + = наклон головы вправо)
   left_aim_pose x y z yaw pitch roll      (также right_aim_pose, *_grip_pose; yaw + = влево, pitch + = вверх)
   left_grip 1 / right_trigger 1 / button_a 1 / menu 1 / right_stick_click 1 / left_stick 0 0.8
   vel_left 0 0 -5                         скорость руки (м/с), -z = вперёд
@@ -249,7 +249,8 @@ UGFxMovie («Hud_GFX»). Vtable вида: +0x2C SetVariable(path, GFxValue&, 1),
 +0x60 Invoke(путь метода, GFxValue* result, args (шаг 0x20), n), +0x90 Advance, +0x94 Display (2 раза за тик);
 GFxValue: тип +0 (2 bool, 3 number, 4 string, 6 object, 7 array, 8 display object), значение +8. Только из игрового потока.
 Клипы из GetVariable приходят строкой-путём. HUD: прицел `_root.hud_mc.midCenter_mc.instance17.crosshairAnchor_mc`
-(клип «crosshair»N«_mc» через attachMovie), менеджер меток `_root.instance24` (markerArray, клипы «marker»N«_mc»,
+(клип «crosshair»N«_mc» через attachMovie), менеджер меток `_root.instance24` (в кампании пуст: имена над
+напарниками и синие метки рисует не он) (markerArray, клипы «marker»N«_mc»,
 screenCenterX/Y = 900, Stage 1800 = картинка 1800², _x/_y метки — пиксели экрана). Debug-команды: `gfxget`,
 `gfxset`, `gfxcall [movie:]метод арг…`, `gfxprobe` (src\gfx.cpp).
 Классы: TnPlayerPawn, TnAiPawn, TnAiController, TnPlayerControllerCampaign, TnAmmoCratePickupFactory,
@@ -264,7 +265,8 @@ TnHealthPickupFactory, TnWeaponPickupFactory, TnDroppedPickup*, TnProjectileGren
 1 сзади), ChaseDistance/Height, VehicleEyeHeight/Forward, VehicleHeadAim, SyncEyeTime, SyncEyeTimeVehicle,
 HeldFrameTime, SingleThreadRender, StereoPerFrame=0, HandIK, ShowBody, ArmSize=0.8, LimbThickness, LegThickness, HandScale,
 WeaponScale, FingerPoses, NearClip=10, NoNearFade, MuzzleFlashScale, Reticle, ReticleSize, ReticleStyle,
-Cutscenes3D=0, GunGrip, Foregrip, EmptyGripR, AbilityAnimation=0.
+Cutscenes3D=0, GunGrip, Foregrip, EmptyGripR, AbilityAnimation=0, LevelView=1 (глаза рисуются без крена головы, рантайм
+доворачивает: имена и метки ровно по миру; фрустум растёт на крен).
 [Input]: AimMode=1, SnapTurnDegrees, SmoothTurnSpeed, MoveByHead, TwoHanded, TwoHandReach/Radius, GrenadeGrab,
 GrenadeThrowScale=3, GrenadeGravity, GrenadeBelt, GrenadeScale=0.5, BeltOffset, MeleeGesture, MeleeSpeed=3, MeleeContact=0,
 MeleeReach, MeleeHitRadius, Pull, PullRange=12, PullCone=15, PullSpeed=0, PullAutoTake=1, PullTrace, Scope=0,

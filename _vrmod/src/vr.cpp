@@ -2564,7 +2564,8 @@ static void PollEvents()
 
 struct EyeFrame {
     int eye;
-    XrPosef pose;
+    XrPosef pose;            // the pose the game draws the eye with (LevelView: without the head's roll)
+    XrQuaternionf real;      // the head's real orientation
     XrFovf fov;
     XrTime time;   // display time the pose (and the hands the game aimed with) was predicted for
 };
@@ -2618,6 +2619,25 @@ bool VRNextStereoEye(int& eye)
     return GetTickCount() - g_lastStereoTick < 250;
 }
 
+// LevelView: the orientation without the head's roll (yaw and pitch kept), and the roll taken off (radians, about
+// the view's +Z: tangent (x, y) of the real view is (x cos - y sin, x sin + y cos) in the levelled one). The game
+// draws the eye levelled and the runtime turns the image back by the roll, so what the game draws flat on the
+// screen (names over teammates, waypoints) stays level with the world. Looking nearly straight up or down the roll
+// is kept: there the yaw is not defined.
+static XrQuaternionf LevelOrientation(const XrQuaternionf& q, float& roll)
+{
+    float fx = -2 * (q.x * q.z + q.y * q.w), fy = -2 * (q.y * q.z - q.x * q.w), fz = -(1 - 2 * (q.x * q.x + q.y * q.y));
+    float yaw = atan2f(-fx, -fz), pitch = asinf(std::max(-1.0f, std::min(1.0f, fy)));
+    XrQuaternionf level = QuatMul({ 0, sinf(yaw * 0.5f), 0, cosf(yaw * 0.5f) }, { sinf(pitch * 0.5f), 0, 0, cosf(pitch * 0.5f) });
+    XrQuaternionf rel = QuatMul(QuatConj(level), q);   // about +Z only
+    roll = 2.0f * atan2f(rel.z, rel.w);
+    if (roll > 3.14159265f) roll -= 6.2831853f;
+    if (roll < -3.14159265f) roll += 6.2831853f;
+    float k = std::max(0.0f, std::min(1.0f, (sqrtf(fx * fx + fz * fz) - 0.1f) / 0.15f));   // 1 below ~80 degrees up/down
+    roll *= k;
+    return QuatMul(q, { 0, 0, -sinf(roll * 0.5f), cosf(roll * 0.5f) });
+}
+
 // Locates both eyes for the coming frame(s); fills `out` for each requested eye (in order) and queues the eye
 // frames for the present thread. Hands are located once and shared.
 static bool LocateEyes(const int* eyes, int count, VREyeView* out)
@@ -2642,12 +2662,24 @@ static bool LocateEyes(const int* eyes, int count, VREyeView* out)
         return false;
     }
 
-    // Symmetric frustum covering both eyes' FOV at the back buffer's aspect ratio.
+    // Symmetric frustum covering both eyes' FOV at the back buffer's aspect ratio (levelled: the eyes' FOV turned
+    // by the roll taken off)
     float aspect = g_aspect.load();
     float tanH = 0.0f, tanV = 0.0f;
-    for (auto& v : views) {
-        tanH = std::max(tanH, std::max(tanf(-v.fov.angleLeft), tanf(v.fov.angleRight)));
-        tanV = std::max(tanV, std::max(tanf(v.fov.angleUp), tanf(-v.fov.angleDown)));
+    XrQuaternionf level[2];
+    float maxRoll = 0.0f;
+    for (int e = 0; e < 2; e++) {
+        const XrView& v = views[e];
+        float roll = 0.0f;
+        level[e] = g_cfg.levelView ? LevelOrientation(v.pose.orientation, roll) : v.pose.orientation;
+        maxRoll = std::max(maxRoll, fabsf(roll));
+        float c = cosf(roll), sn = sinf(roll);
+        float xs[2] = { tanf(v.fov.angleLeft), tanf(v.fov.angleRight) }, ys[2] = { tanf(v.fov.angleDown), tanf(v.fov.angleUp) };
+        for (float x : xs)
+            for (float y : ys) {
+                tanH = std::max(tanH, fabsf(x * c - y * sn));
+                tanV = std::max(tanV, fabsf(x * sn + y * c));
+            }
     }
     tanH = std::max(tanH, tanV * aspect) * g_cfg.fovScale;
     float half = atanf(tanH);
@@ -2684,6 +2716,8 @@ static bool LocateEyes(const int* eyes, int count, VREyeView* out)
         EyeFrame f;
         f.eye = eye;
         f.pose = views[eye].pose;
+        f.real = f.pose.orientation;
+        f.pose.orientation = level[eye];
         f.time = li.displayTime;
         f.fov.angleLeft = -half;
         f.fov.angleRight = half;
@@ -3186,6 +3220,7 @@ static void PresentStereo(ID3D11Texture2D* bb, const EyeFrame& f)
     bool haveReticle = fs.shouldRender && BuildReticle(fs.predictedDisplayTime, reticle);
     // head pose for the HUD panel: between the two eyes, oriented like the left eye
     XrPosef head = g_eyeDone[0].pose;
+    head.orientation = g_eyeDone[0].real;
     head.position = { (g_eyeDone[0].pose.position.x + g_eyeDone[1].pose.position.x) * 0.5f,
                       (g_eyeDone[0].pose.position.y + g_eyeDone[1].pose.position.y) * 0.5f,
                       (g_eyeDone[0].pose.position.z + g_eyeDone[1].pose.position.z) * 0.5f };
