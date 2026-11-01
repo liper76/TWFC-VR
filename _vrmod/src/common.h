@@ -28,8 +28,7 @@ struct Config {
     float hudDistance = 1.6f;       // metres
     float hudWidth = 1.5f;          // metres
     float hudFollowSpeed = 3.0f;    // how fast the panel catches up with the gaze (1/s)
-    float hudCrosshairMask = 0.04f; // radius (fraction of HUD width) hidden at the centre: the game's crosshair
-    int   hudMinimal = 1;           // HUD panel shows only health, abilities, weapon and ammo
+    int   hudMinimal = 1;           // HUD panel shows only health, abilities, weapon, ammo and grenades
     int   hudPrompts = 1;           // ... and the button hints ("Hold X for ...") below the centre
     int   reticle = 1;              // VR crosshair along the controller ray
     float reticleDistance = 8.0f;   // metres
@@ -57,7 +56,7 @@ struct Config {
     int   grenadeGrab = 1;         // grenades taken from the body with the left hand, armed, thrown (replaces the gesture)
     float grenadeThrowScale = 3.0f; // thrown grenade speed = hand speed x this
     float grenadeGravity = 1.0f;    // a thrown grenade falls (x 9.8 m/s²; the game's own fly almost straight)
-    int   hudMarkersInEyes = 1;     // minimal HUD: its other parts (waypoints, names, lock-on marks) drawn into the eyes
+    int   hudMarkersInEyes = 1;     // the HUD's markers (waypoints, names, lock-on marks) drawn into the eyes
     int   cutscenes3D = 0;          // 1 = in-engine cutscenes in 3D around you (0 = on the virtual screen)
     int   grenadeBelt = 1;          // a grenade is seen on the belt (where they are taken from) while there are any
     float grenadeScale = 0.5f;      // size of the grenade on the belt and in the hand (1 = the game's thrown one)
@@ -269,6 +268,7 @@ bool VRIsRunningOrFake();
 // ---- registry.cpp / d3d9modes.cpp ----
 void RegistryInstallHooks();
 void D3D9ModesInstall();
+void D3D9Flush();                           // the game's D3D9 draws so far reach D3D11 now
 
 // ---- focus.cpp / inputblock.cpp ----
 void FocusStart();
@@ -280,6 +280,14 @@ void HintsInstall();
 // ---- gfx.cpp: the game's Scaleform movies (HUD) ----
 void GfxQueue(const char* line);            // "gfxget [movie:]path" / "gfxset [movie:]path value" / "gfxcall [movie:]method args", run on the game thread
 void GfxTick();                             // game thread, each frame
+void GfxInstall();                          // the HUD movie drawn in layers (below)
+
+// ---- d3dtrace.cpp: HUD split ----
+// The HUD's draws go into layers of their own: kHudEyes (the game's Canvas and the HUD movie's markers: into each
+// eye image), kHudPanel (the floating panel), kHudReticle (the game's crosshair: the VR reticle).
+enum { kHudEyes, kHudPanel, kHudReticle, kHudLayers };
+bool HudSplitActive();                      // this frame's HUD is being split off
+void HudSetLayer(int layer);                // where the coming draws go (kHudEyes outside the HUD movie)
 
 // ---- game.cpp (movies) ----
 void GameInstallMovieHook();

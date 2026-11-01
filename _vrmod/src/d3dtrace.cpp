@@ -2,11 +2,15 @@
 // - research trace of one frame ("d3dtrace N" debug command);
 // - HUD split: the game draws its 3D scene into dgVoodoo's D3D9-backbuffer texture with one final
 //   full-screen pass and then the 2D HUD on top. While the VR gameplay view is active, every draw into that
-//   texture after the first one is redirected into our own transparent texture. The eyes then get the scene
-//   without HUD, and vr.cpp shows the HUD texture as a floating panel.
+//   texture after the first one is redirected into our own transparent textures, one per HUD layer (the layer is
+//   set by gfx.cpp around the HUD movie's drawing; the rest - the game's Canvas - goes to kHudEyes). The eyes then
+//   get the scene without HUD, and vr.cpp puts the layers where they belong.
 #include "common.h"
 #include <d3d11.h>
 #include "MinHook.h"
+#include <vector>
+#include <algorithm>
+#include <math.h>
 
 typedef void(STDMETHODCALLTYPE* PFN_OMSetRT)(ID3D11DeviceContext*, UINT, ID3D11RenderTargetView* const*, ID3D11DepthStencilView*);
 typedef void(STDMETHODCALLTYPE* PFN_Draw)(ID3D11DeviceContext*, UINT, UINT);
@@ -39,10 +43,16 @@ static bool g_hudActive;              // redirect is active in this frame
 static ID3D11Resource* g_bbTex;       // dgVoodoo's D3D9 backbuffer texture (source of the first copy each frame)
 static bool g_copySeen;
 static int g_drawsOnBB;
-static bool g_hudBound, g_hudCleared, g_hudHadDraws;
-static ID3D11Texture2D* g_hudTex;
-static ID3D11RenderTargetView* g_hudRTV;
-static ID3D11ShaderResourceView* g_hudSRV;
+static int g_hudLayer;                // where the HUD's draws go now
+static int g_boundLayer = -1;         // the layer whose target is bound instead of the backbuffer texture's
+struct HudLayer {
+    ID3D11Texture2D* tex;
+    ID3D11RenderTargetView* rtv;
+    ID3D11ShaderResourceView* srv;
+    bool cleared;
+    long draws;                       // this frame
+};
+static HudLayer g_layers[kHudLayers];
 static UINT g_hudW, g_hudH;
 
 static bool TexSize(ID3D11Resource* r, UINT& w, UINT& h)
@@ -70,43 +80,58 @@ static void Desc(ID3D11Resource* r, char* out, size_t n)
     }
 }
 
-static bool EnsureHudTex(UINT w, UINT h)
+static bool EnsureLayers(UINT w, UINT h)
 {
-    if (g_hudTex && g_hudW == w && g_hudH == h) return true;
-    if (g_hudSRV) { g_hudSRV->Release(); g_hudSRV = nullptr; }
-    if (g_hudRTV) { g_hudRTV->Release(); g_hudRTV = nullptr; }
-    if (g_hudTex) { g_hudTex->Release(); g_hudTex = nullptr; }
+    if (g_layers[0].tex && g_hudW == w && g_hudH == h) return true;
+    for (HudLayer& l : g_layers) {
+        if (l.srv) l.srv->Release();
+        if (l.rtv) l.rtv->Release();
+        if (l.tex) l.tex->Release();
+        l = HudLayer();
+    }
+    g_hudW = g_hudH = 0;
     D3D11_TEXTURE2D_DESC d = { w, h, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, { 1, 0 }, D3D11_USAGE_DEFAULT,
                                D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, 0, 0 };
-    if (FAILED(g_dev->CreateTexture2D(&d, nullptr, &g_hudTex))) return false;
-    g_dev->CreateRenderTargetView(g_hudTex, nullptr, &g_hudRTV);
-    g_dev->CreateShaderResourceView(g_hudTex, nullptr, &g_hudSRV);
+    for (HudLayer& l : g_layers) {
+        if (FAILED(g_dev->CreateTexture2D(&d, nullptr, &l.tex))) return false;
+        g_dev->CreateRenderTargetView(l.tex, nullptr, &l.rtv);
+        g_dev->CreateShaderResourceView(l.tex, nullptr, &l.srv);
+        if (!l.rtv || !l.srv) return false;
+    }
     g_hudW = w;
     g_hudH = h;
-    Log("hud: texture %ux%u", w, h);
-    return g_hudRTV && g_hudSRV;
+    Log("hud: layer textures %ux%u", w, h);
+    return true;
 }
 
-// Before a draw into the backbuffer texture: after the scene's final pass, send the draw to the HUD texture.
+// Before a draw into the backbuffer texture: after the scene's final pass, send the draw to the current layer.
 static void BeforeDraw(ID3D11DeviceContext* c)
 {
-    if (c != g_imm || !g_hudActive || g_curRT != g_bbTex || !g_bbTex || g_drawsOnBB < 1 || g_hudBound) return;
+    if (c != g_imm || !g_hudActive || g_curRT != g_bbTex || !g_bbTex || g_drawsOnBB < 1 || g_boundLayer == g_hudLayer) return;
     UINT w, h;
-    if (!TexSize(g_bbTex, w, h) || !EnsureHudTex(w, h)) return;
-    if (!g_hudCleared) {
+    if (!TexSize(g_bbTex, w, h) || !EnsureLayers(w, h)) return;
+    HudLayer& l = g_layers[g_hudLayer];
+    if (!l.cleared) {
         const FLOAT zero[4] = { 0, 0, 0, 0 };
-        g_oClear(c, g_hudRTV, zero);
-        g_hudCleared = true;
+        g_oClear(c, l.rtv, zero);
+        l.cleared = true;
     }
-    g_oSetRT(c, 1, &g_hudRTV, g_curDSV);
-    g_hudBound = true;
-    g_hudHadDraws = true;
+    g_oSetRT(c, 1, &l.rtv, g_curDSV);
+    g_boundLayer = g_hudLayer;
 }
 
 static void AfterDraw(ID3D11DeviceContext* c)
 {
     if (c == g_imm && g_traceFrames > 0) g_traceDraws++;
     if (c == g_imm && g_curRT && g_curRT == g_bbTex) g_drawsOnBB++;
+    if (c == g_imm && g_boundLayer >= 0) g_layers[g_boundLayer].draws++;
+}
+
+bool HudSplitActive() { return g_hudActive; }
+void HudSetLayer(int layer)
+{
+    g_hudLayer = layer >= 0 && layer < kHudLayers ? layer : kHudEyes;
+    if (g_traceFrames > 0) Log("trace: HUD layer %d", g_hudLayer);
 }
 
 static void STDMETHODCALLTYPE HSetRT(ID3D11DeviceContext* c, UINT n, ID3D11RenderTargetView* const* rtv, ID3D11DepthStencilView* dsv)
@@ -122,23 +147,23 @@ static void STDMETHODCALLTYPE HSetRT(ID3D11DeviceContext* c, UINT n, ID3D11Rende
         }
         g_curRT = r;
         g_curDSV = dsv;
-        g_hudBound = false;
+        g_boundLayer = -1;
     }
     g_oSetRT(c, n, rtv, dsv);
 }
 
 static void STDMETHODCALLTYPE HDraw(ID3D11DeviceContext* c, UINT vc, UINT sv)
 {
-    if (c == g_imm && g_traceFrames > 0 && ++g_drawsOnRT <= 3) Log("trace:   Draw %u", vc);
     BeforeDraw(c);
+    if (c == g_imm && g_traceFrames > 0 && (++g_drawsOnRT <= 3 || g_boundLayer >= 0)) Log("trace:   Draw %u -> layer %d", vc, g_boundLayer);
     g_oDraw(c, vc, sv);
     AfterDraw(c);
 }
 
 static void STDMETHODCALLTYPE HDrawIdx(ID3D11DeviceContext* c, UINT ic, UINT si, INT bv)
 {
-    if (c == g_imm && g_traceFrames > 0 && ++g_drawsOnRT <= 3) Log("trace:   DrawIndexed %u", ic);
     BeforeDraw(c);
+    if (c == g_imm && g_traceFrames > 0 && (++g_drawsOnRT <= 3 || g_boundLayer >= 0)) Log("trace:   DrawIndexed %u -> layer %d", ic, g_boundLayer);
     g_oDrawIdx(c, ic, si, bv);
     AfterDraw(c);
 }
@@ -267,8 +292,55 @@ static void LogEyeBright()
     Log("eyebright: frame %ld pass %d %.2f", GameFrameCount(), GameDrawingRightEye() ? 2 : 1, n ? sum / (3.0 * n) : 0.0);
 }
 
-// Called at Present: closes the frame; returns the HUD texture if this frame's HUD was redirected.
-ID3D11ShaderResourceView* TraceEndFrame()
+// debug "hudsave": the HUD layers of the next split frame are saved as hud_eyes/panel/reticle.bmp in the mod's
+// folder, drawn over grey (their draw counts in the log)
+volatile long g_hudSave;
+
+static void SaveLayer(HudLayer& l, const wchar_t* name)
+{
+    D3D11_TEXTURE2D_DESC d;
+    l.tex->GetDesc(&d);
+    d.Usage = D3D11_USAGE_STAGING;
+    d.BindFlags = 0;
+    d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ID3D11Texture2D* st = nullptr;
+    if (FAILED(g_dev->CreateTexture2D(&d, nullptr, &st))) return;
+    g_oCopy(g_imm, st, l.tex);
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (SUCCEEDED(g_imm->Map(st, 0, D3D11_MAP_READ, 0, &m))) {
+        UINT row = d.Width * 3;
+        std::vector<uint8_t> px((size_t)row * d.Height);
+        for (UINT y = 0; y < d.Height; y++) {
+            const uint8_t* s = (const uint8_t*)m.pData + (size_t)y * m.RowPitch;
+            uint8_t* o = &px[(size_t)(d.Height - 1 - y) * row];   // (bottom-up)
+            for (UINT x = 0; x < d.Width; x++, s += 4, o += 3) {
+                // premultiplied over grey; coverage as the panel's shader takes it
+                float r = s[0] / 255.0f, g = s[1] / 255.0f, b = s[2] / 255.0f;
+                float a = std::min(1.0f, std::max(sqrtf(s[3] / 255.0f), std::max(r, std::max(g, b))));
+                float bg = 0.3f * (1.0f - a);
+                o[0] = (uint8_t)(std::min(1.0f, b + bg) * 255);
+                o[1] = (uint8_t)(std::min(1.0f, g + bg) * 255);
+                o[2] = (uint8_t)(std::min(1.0f, r + bg) * 255);
+            }
+        }
+        g_imm->Unmap(st, 0);
+        BITMAPFILEHEADER fh = { 0x4D42, (DWORD)(sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + px.size()), 0, 0,
+                                sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) };
+        BITMAPINFOHEADER ih = { sizeof(BITMAPINFOHEADER), (LONG)d.Width, (LONG)d.Height, 1, 24, BI_RGB };
+        FILE* f = nullptr;
+        if (!_wfopen_s(&f, (ModDir() + name).c_str(), L"wb") && f) {
+            fwrite(&fh, sizeof fh, 1, f);
+            fwrite(&ih, sizeof ih, 1, f);
+            fwrite(px.data(), 1, px.size(), f);
+            fclose(f);
+        }
+    }
+    st->Release();
+}
+
+// Called at Present: closes the frame; gives the layers this frame's HUD was split into (null: nothing drawn there
+// or no split).
+void TraceEndFrame(ID3D11ShaderResourceView* layers[kHudLayers])
 {
     if (g_eyeBrightFrames > 0) {
         g_eyeBrightFrames--;
@@ -282,15 +354,23 @@ ID3D11ShaderResourceView* TraceEndFrame()
         g_traceDraws = 0;
         g_traceFrames--;
     }
-    ID3D11ShaderResourceView* hud = (g_hudActive && g_hudHadDraws) ? g_hudSRV : nullptr;
+    for (int i = 0; i < kHudLayers; i++) layers[i] = g_hudActive && g_layers[i].draws ? g_layers[i].srv : nullptr;
+    if (g_hudSave && g_hudActive && g_layers[0].tex) {
+        g_hudSave = 0;
+        bool GameDrawingRightEye();
+        Log("hud: saved (pass %d): eyes %ld draws, panel %ld, reticle %ld", GameDrawingRightEye() ? 2 : 1, g_layers[kHudEyes].draws,
+            g_layers[kHudPanel].draws, g_layers[kHudReticle].draws);
+        SaveLayer(g_layers[kHudEyes], L"hud_eyes.bmp");
+        SaveLayer(g_layers[kHudPanel], L"hud_panel.bmp");
+        SaveLayer(g_layers[kHudReticle], L"hud_reticle.bmp");
+    }
     g_hudActive = g_hudWanted;
     g_copySeen = false;
     g_drawsOnBB = 0;
-    g_hudBound = false;
-    g_hudCleared = false;
-    g_hudHadDraws = false;
+    g_boundLayer = -1;
+    g_hudLayer = kHudEyes;
+    for (HudLayer& l : g_layers) { l.cleared = false; l.draws = 0; }
     g_curRT = nullptr;
-    return hud;
 }
 
 void HudSetWanted(bool on) { g_hudWanted = on; }
