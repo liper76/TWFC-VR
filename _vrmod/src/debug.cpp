@@ -300,6 +300,11 @@ static void RunLine(const char* line)
     } else if (!strncmp(line, "armbind", 7)) {   // armbind 1|0: the empty hand's arm model in the bind pose or as the game poses it
         void IKArmBindPose(bool on);
         IKArmBindPose(atoi(line + 7) != 0);
+    } else if (!strncmp(line, "armfix", 6)) {    // armfix <turn 0 z|1 y> <fwd> <y> <z>: the empty hand's shell
+        void IKArmFix(int turn, float fwd, float y, float z);
+        int t = 1; float a = 0, b = 0, c = 0;
+        sscanf_s(line + 6, "%d %f %f %f", &t, &a, &b, &c);
+        IKArmFix(t, a, b, c);
     } else if (!strncmp(line, "putaway", 7)) {   // putaway 1|0: the right hand empty (the gun put away) or back
         void VRDebugPutAway(int on);
         VRDebugPutAway(atoi(line + 7));
