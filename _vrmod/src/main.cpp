@@ -82,9 +82,11 @@ static void LoadConfig()
                   "NearClip=10\n"
                   "; First person body: 0 = arms only, 1 = arms + legs (bulky torso hidden), 2 = whole body\n"
                   "ShowBody=1\n"
-                  "; Upper arms and legs drawn thinner (1 = original; the forearms keep their size)\n"
+                  "; Upper arms and legs drawn thinner (1 = original), on top of ArmSize for the arms\n"
                   "LimbThickness=0.5\n"
                   "LegThickness=0.75\n"
+                  "; Thickness of the whole arms - forearms, armour, the arm on the empty hand (1 = original)\n"
+                  "ArmSize=0.8\n"
                   "; Size of the robot's hands and of the held weapon (1 = original)\n"
                   "HandScale=1.0\n"
                   "WeaponScale=1.0\n"
@@ -166,11 +168,11 @@ static void LoadConfig()
                   "; 1 = weapon held with both hands and raised to your eyes also presses the left trigger (fine aim);\n"
                   "; off by default: on some weapons the left trigger is their second action (detonating grenades)\n"
                   "PhysicalAim=0\n"
-                  "; 0 = VR layout: grips hold things (left = weapon front), B = ability, right stick up = second\n"
-                  ";     ability, right stick down = weapon wheel (held) / next weapon (flick), Y = grenade (game's B);\n"
+                  "; 0 = VR layout: grips hold things (left = weapon front), Y = ability, right stick up = second\n"
+                  ";     ability, B = grenade (game's B) / weapon wheel (held), right stick down = next weapon;\n"
                   ";     1 = old layout: grips = abilities (LB/RB), Y = next weapon\n"
                   "GripAbilities=0\n"
-                  "; Weapon wheel (hold the right stick down) diameter in metres\n"
+                  "; Weapon wheel (hold B) diameter in metres\n"
                   "WheelSize=0.30\n"
                   "; Sniper rifles raised to the eye (or held with both hands) show a scope with a magnified view:\n"
                   "; view angle in degrees, lens size and position (metres in front of / above the right controller),\n"
@@ -285,6 +287,7 @@ static void LoadConfig()
     g_cfg.showBody = (int)IniFloat(ini, L"VR", L"ShowBody", (float)g_cfg.showBody);
     g_cfg.limbThickness = IniFloat(ini, L"VR", L"LimbThickness", g_cfg.limbThickness);
     g_cfg.legThickness = IniFloat(ini, L"VR", L"LegThickness", g_cfg.legThickness);
+    g_cfg.armSize = IniFloat(ini, L"VR", L"ArmSize", g_cfg.armSize);
     g_cfg.handScale = IniFloat(ini, L"VR", L"HandScale", g_cfg.handScale);
     g_cfg.weaponScale = IniFloat(ini, L"VR", L"WeaponScale", g_cfg.weaponScale);
     g_cfg.muzzleFlashScale = IniFloat(ini, L"VR", L"MuzzleFlashScale", g_cfg.muzzleFlashScale);
