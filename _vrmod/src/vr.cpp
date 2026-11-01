@@ -104,14 +104,15 @@ struct Blitter {
     void Draw(ID3D11Device* dev, ID3D11DeviceContext* imm, ID3D11ShaderResourceView* srv, ID3D11RenderTargetView* rtv,
               UINT w, UINT h, bool linearize, bool hud = false, const float* scopeRect = nullptr,
               bool blend = false,   // a HUD layer drawn over the image there (an eye's)
-              bool crop = false)    // scopeRect is a part of the HUD to show as it is (no lens)
+              bool crop = false,    // scopeRect is a part of the HUD to show as it is (no lens)
+              float scale = 1.0f)   // drawn into a centred part of the target: this part of its width and height
     {
         ID3D11DeviceContext* dc = nullptr;
         if (FAILED(dev->CreateDeferredContext(0, &dc))) return;
         float consts[8] = { linearize ? 1.0f : 0.0f, hud ? 1.0f : 0.0f, 0, crop ? 2.0f : scopeRect ? 1.0f : 0.0f, 0, 0, 1, 1 };
         if (scopeRect) for (int i = 0; i < 4; i++) consts[4 + i] = scopeRect[i];
         dc->UpdateSubresource(cb, 0, nullptr, consts, 0, 0);
-        D3D11_VIEWPORT vp = { 0, 0, (float)w, (float)h, 0, 1 };
+        D3D11_VIEWPORT vp = { w * (1.0f - scale) * 0.5f, h * (1.0f - scale) * 0.5f, w * scale, h * scale, 0, 1 };
         dc->RSSetViewports(1, &vp);
         dc->OMSetRenderTargets(1, &rtv, nullptr);
         if (blend) dc->OMSetBlendState(over, nullptr, 0xFFFFFFFF);
@@ -1092,6 +1093,7 @@ static void DrawSetupCubes(ID3D11DeviceContext* imm, ID3D11RenderTargetView* rtv
 static const XrPosef* g_overlayPose;   // set while an eye image is copied: things drawn into it (setup cubes)
 static XrFovf g_overlayFov;
 static ID3D11ShaderResourceView* g_overlayHud;   // this frame's HUD layer for the eyes (markers, names) or null
+static float g_overlayHudShrink = 1.0f;           // ... drawn shrunk about the centre by this (EyeFrame::hudScale)
 
 // Copies the game's back buffer into the next image of a swapchain (or, with scopeRect, a part of it into a
 // size x size round scope image).
@@ -1142,7 +1144,9 @@ static bool CopyToChain(Chain& c, ID3D11Texture2D* bb, const float* scopeRect = 
     if (g_overlayPose && !scopeRect) {
         // the HUD's moving parts (waypoints, names over teammates, lock-on marks): drawn by the game for this eye's
         // view, so they sit at their place in depth - into the eye image, not onto the panel
-        if (g_overlayHud) xr.blit.Draw(xr.device, imm, g_overlayHud, c.rtvs[idx], c.width, c.height, xr.linearize, true, nullptr, true);
+        if (g_overlayHud)
+            xr.blit.Draw(xr.device, imm, g_overlayHud, c.rtvs[idx], c.width, c.height, xr.linearize, true, nullptr, true, false,
+                         g_overlayHudShrink);
         // (the setup's zone marks are compositor quads now - BuildZoneMark: drawing them into the eye image here
         // stopped the frames on the real runtime, black screen)
     }
@@ -2546,6 +2550,7 @@ struct EyeFrame {
     XrQuaternionf real;      // the head's real orientation
     XrFovf fov;
     XrTime time;   // display time the pose (and the hands the game aimed with) was predicted for
+    float hudScale = 1.0f;   // the frustum's width over the one without the roll (VRHudProjectScale)
 };
 static std::mutex g_stereoMutex;
 static std::deque<EyeFrame> g_pending;          // render thread: eye frames in the order their images will come
@@ -2588,6 +2593,13 @@ static bool FakeHeadView(VREyeView& out)
 }
 
 static volatile DWORD g_lastStereoTick;
+static std::atomic<float> g_hudProjScale{ 1.0f };
+
+// LevelView widens the eyes' frustum to cover the roll-turned eyes, and the game draws names and markers at a fixed
+// size in pixels: they grew and shrank with the head's roll. Their positions are projected as for the frustum
+// without the roll (game.cpp spreads Canvas Project's results about the centre by this) and the eyes' HUD layer is
+// drawn shrunk back by the same amount, so they keep both their place and their size.
+float VRHudProjectScale() { return g_hudProjScale.load(); }
 volatile long g_vrViewFailures;   // game frames that wanted an eye view but got none (logged by game.cpp)
 
 // The eye the next stereo game frame will render, if stereo views are being produced right now.
@@ -2622,6 +2634,7 @@ static bool LocateEyes(const int* eyes, int count, VREyeView* out)
 {
     if (g_cfg.fakeHmd) {
         g_lastStereoTick = GetTickCount();
+        g_hudProjScale = 1.0f;
         for (int i = 0; i < count; i++) { g_nextEye = eyes[i]; FakeHeadView(out[i]); }
         g_nextEye = eyes[count - 1] ^ 1;
         return true;
@@ -2663,6 +2676,15 @@ static bool LocateEyes(const int* eyes, int count, VREyeView* out)
     float half = atanf(tanH);
     if (half > 1.39f) half = 1.39f;   // ~160 degrees total
     tanH = tanf(half);
+    // the same without the roll: what the HUD's markers are drawn for
+    float tanH0 = 0.0f, tanV0 = 0.0f;
+    for (int e = 0; e < 2; e++) {
+        tanH0 = std::max(tanH0, std::max(fabsf(tanf(views[e].fov.angleLeft)), fabsf(tanf(views[e].fov.angleRight))));
+        tanV0 = std::max(tanV0, std::max(fabsf(tanf(views[e].fov.angleDown)), fabsf(tanf(views[e].fov.angleUp))));
+    }
+    tanH0 = tanf(std::min(atanf(std::max(tanH0, tanV0 * aspect) * g_cfg.fovScale), 1.39f));
+    float hudScale = g_cfg.levelView && g_cfg.hudMarkersInEyes && tanH0 > 0.01f ? std::max(1.0f, tanH / tanH0) : 1.0f;
+    g_hudProjScale = hudScale;
 
     g_nextEye = eyes[count - 1] ^ 1;
     g_lastStereoTick = GetTickCount();
@@ -2697,6 +2719,7 @@ static bool LocateEyes(const int* eyes, int count, VREyeView* out)
         f.real = f.pose.orientation;
         f.pose.orientation = level[eye];
         f.time = li.displayTime;
+        f.hudScale = hudScale;
         f.fov.angleLeft = -half;
         f.fov.angleRight = half;
         f.fov.angleUp = atanf(tanH / aspect);
@@ -3167,6 +3190,7 @@ static void PresentStereo(ID3D11Texture2D* bb, const EyeFrame& f)
     g_overlayPose = &f.pose;
     g_overlayFov = f.fov;
     g_overlayHud = g_cfg.hudMarkersInEyes && CameraPlayerView() ? g_frameHud[kHudEyes] : nullptr;
+    g_overlayHudShrink = 1.0f / f.hudScale;
     bool copied = CopyToChain(g_eyes[f.eye], bb);
     g_overlayPose = nullptr;
     if (!copied) return;

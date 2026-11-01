@@ -58,8 +58,50 @@ __declspec(naked) static void HookPerspective()
     }
 }
 
+// Canvas Project (the UCanvas in edi, the world point in edx, the result in esi, returned in eax): script's
+// Canvas.Project and the native HUD's markers. While the HUD is split off, the points are spread about the
+// canvas centre as for the eyes' frustum without the head's roll (VRHudProjectScale, vr.cpp).
+namespace addr {
+    const uintptr_t kCanvasProject = 0x115D54E0;
+}
+static void* g_origCanvasProject;
+
+static void __cdecl SpreadProjected(float* out, const unsigned char* canvas)
+{
+    float s = VRHudProjectScale();
+    if (s == 1.0f || !HudSplitActive()) return;
+    float cx = *(const float*)(canvas + 0x34) * 0.5f, cy = *(const float*)(canvas + 0x38) * 0.5f;   // ClipX, ClipY
+    out[0] = cx + (out[0] - cx) * s;
+    out[1] = cy + (out[1] - cy) * s;
+}
+
+__declspec(naked) static void HookCanvasProject()
+{
+    __asm {
+        call dword ptr [g_origCanvasProject]
+        push eax
+        sub esp, 48                  // the original leaves xmm5-7 alone
+        movups [esp], xmm5
+        movups [esp + 16], xmm6
+        movups [esp + 32], xmm7
+        push edi
+        push esi
+        call SpreadProjected
+        add esp, 8
+        movups xmm5, [esp]
+        movups xmm6, [esp + 16]
+        movups xmm7, [esp + 32]
+        add esp, 48
+        pop eax
+        ret
+    }
+}
+
 static void InstallNearClip()
 {
+    if (MH_CreateHook((void*)addr::kCanvasProject, (void*)HookCanvasProject, &g_origCanvasProject) == MH_OK &&
+        MH_EnableHook((void*)addr::kCanvasProject) == MH_OK)
+        Log("game: canvas project hook installed");
     UpdateNearClip();
     if (MH_CreateHook((void*)addr::kPerspectiveMatrix, (void*)HookPerspective, &g_origPerspective) == MH_OK &&
         MH_EnableHook((void*)addr::kPerspectiveMatrix) == MH_OK)

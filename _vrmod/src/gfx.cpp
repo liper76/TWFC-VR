@@ -7,6 +7,7 @@
 #include <vector>
 #include <mutex>
 #include <stdlib.h>
+#include <algorithm>
 
 extern volatile long g_traceFrames;   // d3dtrace.cpp
 
@@ -139,6 +140,49 @@ void Describe(const GFxValue& v, char* out, size_t n)
     }
 }
 
+// The clip at this depth of a clip (its path, "_root." for "_level0.") or "".
+std::string ClipAtDepth(void* view, const std::string& parent, int depth)
+{
+    GFxArg a = {};
+    a.type = 3;
+    a.n = depth;
+    GFxValue r = {};
+    if (!CallInvoke(view, (parent + ".getInstanceAtDepth").c_str(), &r, &a, 1) || (r.type & 0xF) != 4 || !r.s) return "";
+    std::string p = r.s;
+    if (!strncmp(p.c_str(), "_level0.", 8)) p = "_root." + p.substr(8);
+    return p;
+}
+
+// Where a clip puts the clips it attaches: from 0 up to getNextHighestDepth (-1: unknown).
+int NextHighestDepth(void* view, const std::string& clip)
+{
+    GFxValue r = {};
+    if (!CallInvoke(view, (clip + ".getNextHighestDepth").c_str(), &r, nullptr, 0) || (r.type & 0xF) != 3) return -1;
+    return (int)r.n;
+}
+
+// debug "gfxkids [movie:]clip [n]": the clips in a clip - at its timeline's depths 1..n (default 64) and at the ones
+// attached at run time - with _visible, _x, _y, _alpha
+void LogKids(void* view, const char* path, int timeline)
+{
+    int next = NextHighestDepth(view, path);
+    Log("gfx: clips in %s (next highest depth %d):", path, next);
+    auto one = [&](int depth, int shown) {
+        std::string p = ClipAtDepth(view, path, depth);
+        if (p.empty()) return;
+        char vis[64], x[64], y[64], alpha[64];
+        GFxValue v = {};
+        CallGet(view, (p + "._visible").c_str(), &v); Describe(v, vis, sizeof(vis)); v = {};
+        CallGet(view, (p + "._x").c_str(), &v); Describe(v, x, sizeof(x)); v = {};
+        CallGet(view, (p + "._y").c_str(), &v); Describe(v, y, sizeof(y)); v = {};
+        CallGet(view, (p + "._alpha").c_str(), &v); Describe(v, alpha, sizeof(alpha));
+        Log("gfx:   depth %d: %s  visible %s, x %s, y %s, alpha %s", shown, p.c_str(), vis, x, y, alpha);
+    };
+    for (int d = 1; d <= timeline; d++) one(d - 16384, d);
+    for (int d = 0; d < next && d < 2000; d++) one(d, d);
+    for (int d = std::max(2000, next - 200); d < next; d++) one(d, d);
+}
+
 // "gfxget [movie:]path" / "gfxset [movie:]path value" (value: true/false, a number or text) / "gfxcall [movie:]method
 // [args...]" (space separated); the movie defaults to the HUD
 void Run(const std::string& line)
@@ -177,6 +221,8 @@ void Run(const std::string& line)
         bool ok = CallInvoke(view, path, &v, args, n);
         Describe(v, desc, sizeof(desc));
         Log("gfx: %ls %s(%u args) -> %s%s", movie, path, n, desc, ok ? "" : " (failed)");
+    } else if (!_stricmp(cmd, "gfxkids")) {
+        LogKids(view, path, atoi(value) > 0 ? atoi(value) : 64);
     }
 }
 
@@ -231,6 +277,8 @@ DWORD WINAPI ProbeThread(LPVOID)
 //   weapon, ammo, grenades) and, with Prompts, the button hints below the crosshair;
 // - kHudReticle: the crosshair and its hit marks - the VR reticle (ReticleStyle=1).
 // The parts are found by name or, unnamed (instanceN is numbered at run time), by their depth in the timeline.
+// The clips the crosshair's group attaches at run time (hit marks "causeDamageN_mc", the turret's and the range
+// finder's reticles) are the crosshair's: hidden from the panel.
 // Other movies (the mouse cursor) go on the panel. Off the game thread (threaded rendering) the HUD movie goes on
 // the panel whole.
 const uintptr_t kDisplay = 0x110432C0;   // GFxMovieView::Display (vtable +0x94), shared by the movies' views
@@ -272,6 +320,7 @@ const struct { int parent; const char* name; int depth; } kClipDef[kClips] = {
     { cCrossGroup, nullptr, 17 },            // above it
 };
 std::string g_visPath[kClips];   // "<clip>._visible"
+std::string g_crossGroup;        // the crosshair's group
 void* g_clipsView;               // the HUD view they were found in
 DWORD g_clipsFailedAt;
 
@@ -301,6 +350,7 @@ bool FindClips(void* view)
         }
     }
     for (int i = 0; i < kClips; i++) g_visPath[i] = path[i] + "._visible";
+    g_crossGroup = path[cCrossGroup];
     g_clipsView = view;
     g_clipsFailedAt = 0;
     Log("gfx: HUD layers: markers %s, crosshair %s", path[cMarkers].c_str(), path[cCross].c_str());
@@ -333,6 +383,22 @@ void __fastcall HookDisplay(void* view, void* edx)
         }
         orig[i] = cur[i] = v.b;
     }
+    std::vector<std::string> attached;   // "<clip>._visible" of the crosshair group's visible clips attached at run time
+    int next = NextHighestDepth(view, g_crossGroup);
+    for (int d = std::max(0, next - 32); d < next; d++) {   // (they remove themselves: a few at most)
+        std::string p = ClipAtDepth(view, g_crossGroup, d);
+        GFxValue v = {};
+        if (!p.empty() && CallGet(view, (p + "._visible").c_str(), &v) && (v.type & 0xF) == 2 && v.b)
+            attached.push_back(p + "._visible");
+    }
+    auto showAttached = [&](bool on) {
+        for (auto& p : attached) {
+            GFxValue v = {};
+            v.type = 2;
+            v.b = on;
+            CallSet(view, p.c_str(), &v);
+        }
+    };
     auto setVisible = [&](int i, bool on) {
         if (cur[i] == on) return;
         GFxValue v = {};
@@ -362,7 +428,9 @@ void __fastcall HookDisplay(void* view, void* edx)
             panelHidden.push_back(i);
     if (minimal && !g_cfg.hudPrompts)
         for (int i : { cHint1, cHint2, cHint3 }) panelHidden.push_back(i);
+    showAttached(false);
     pass(kHudPanel, panelHidden);
+    showAttached(true);
     if (g_cfg.reticleStyle == 1)
         pass(kHudReticle, { cMarkers, cIncap, cZoom, cTopLeft, cBottomLeft, cTopRight, cBottomRight, cTopCenter, cMidLeft, cMidRight,
                             cBottomCenter, cMidCenter2, cMidCenter3, cHint1, cHint2, cHint3, cAmmoWarn, cLeftOfCross, cAboveCross });

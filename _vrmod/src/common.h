@@ -267,6 +267,7 @@ void VRHaptic(int hand, float amplitude, float seconds);
 bool GameTimeFrozenForRightEye();           // game.cpp: the right-eye frames do not advance game time
 bool VRIsRunning();
 bool VRIsRunningOrFake();
+float VRHudProjectScale();                  // the HUD's projected points spread about the centre by this (LevelView's roll)
 
 // ---- registry.cpp / d3d9modes.cpp ----
 void RegistryInstallHooks();
