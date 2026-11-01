@@ -2301,6 +2301,79 @@ static bool BuildZoneMark(int i, XrTime t, const XrPosef& head, XrCompositionLay
     return true;
 }
 
+// The pickup a squeeze of the pointing hand's grip would pull (pull.cpp, placed by camera.cpp): a pulsing blue ring
+// around it, over the scene. Before, only a tick in the controller told it, and the hand often grabbed at air.
+static std::mutex g_pullMarkMutex;
+static struct { bool on; XrVector3f at; float radius; DWORD tick; } g_pullMark;
+static Chain g_pullRing;
+
+void VRSetPullMark(bool on, const float local[3], float radiusM)
+{
+    std::lock_guard<std::mutex> lock(g_pullMarkMutex);
+    g_pullMark.on = on;
+    if (on) { g_pullMark.at = { local[0], local[1], local[2] }; g_pullMark.radius = radiusM; g_pullMark.tick = GetTickCount(); }
+}
+
+static bool MakeRingChain(Chain& c, float r, float g, float b)
+{
+    const UINT S = 64;
+    if (!CreateChain(c, S, S)) return false;
+    std::vector<uint32_t> px(S * S);
+    bool rgba = xr.format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || xr.format == DXGI_FORMAT_R8G8B8A8_UNORM;
+    for (UINT y = 0; y < S; y++)
+        for (UINT x = 0; x < S; x++) {
+            float dx = x + 0.5f - S / 2.0f, dy = y + 0.5f - S / 2.0f, d = sqrtf(dx * dx + dy * dy);
+            // coloured ring (radius 24.5..29.5 of 32) with a dark outline; premultiplied alpha
+            float ring = d > 24.5f && d < 29.5f ? 1.0f : 0.0f;
+            float a = ring ? 0.95f : d > 23.0f && d < 31.0f ? 0.6f : 0.0f;
+            uint32_t R = (uint32_t)(255 * r * ring * a), G = (uint32_t)(255 * g * ring * a), B = (uint32_t)(255 * b * ring * a);
+            px[y * S + x] = (rgba ? (R | (G << 8) | (B << 16)) : (B | (G << 8) | (R << 16))) | ((uint32_t)(255 * a) << 24);
+        }
+    ID3D11DeviceContext* imm = nullptr;
+    xr.device->GetImmediateContext(&imm);
+    for (auto& img : c.images) imm->UpdateSubresource(img.texture, 0, nullptr, px.data(), S * 4, 0);
+    imm->Release();
+    for (size_t k = 0; k < c.images.size(); k++) {   // (each image released once: content to show)
+        uint32_t idx;
+        XrSwapchainImageAcquireInfo ai = { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
+        XrSwapchainImageWaitInfo wi = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
+        wi.timeout = XR_INFINITE_DURATION;
+        XrSwapchainImageReleaseInfo ri = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+        if (XR_SUCCEEDED(xrAcquireSwapchainImage(c.sc, &ai, &idx))) { xrWaitSwapchainImage(c.sc, &wi); xrReleaseSwapchainImage(c.sc, &ri); }
+    }
+    return true;
+}
+
+static bool BuildPullMark(const XrPosef& head, XrCompositionLayerQuad& q)
+{
+    XrVector3f at;
+    float radius;
+    {
+        std::lock_guard<std::mutex> lock(g_pullMarkMutex);
+        if (!g_pullMark.on || GetTickCount() - g_pullMark.tick > 300) return false;
+        at = g_pullMark.at;
+        radius = g_pullMark.radius;
+    }
+    if (!g_cfg.pullMark || g_setup.active) return false;
+    if (!g_pullRing.sc && !MakeRingChain(g_pullRing, 0.3f, 0.8f, 1.0f)) { g_cfg.pullMark = 0; return false; }
+    float dx = at.x - head.position.x, dy = at.y - head.position.y, dz = at.z - head.position.z;
+    float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+    if (dist < 0.05f) return false;
+    // around the drawn item (its bounds), at least ~4 degrees wide for far pickups, gently pulsing
+    float size = std::max(radius * 2.2f, dist * 0.07f);
+    size = std::min(size, std::max(dist * 0.6f, 0.1f)) * (1.0f + 0.08f * sinf(GetTickCount() * 0.0094f));
+    q = { XR_TYPE_COMPOSITION_LAYER_QUAD };
+    q.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+    q.space = xr.localSpace;
+    q.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    q.subImage.swapchain = g_pullRing.sc;
+    q.subImage.imageRect = { { 0, 0 }, { 64, 64 } };
+    q.pose.orientation = head.orientation;
+    q.pose.position = at;
+    q.size = { size, size };
+    return true;
+}
+
 static bool BuildPanel(XrCompositionLayerQuad& q)
 {
     if (!g_setup.active || !DrawPanel()) return false;
@@ -3133,8 +3206,9 @@ static void PresentStereo(ID3D11Texture2D* bb, const EyeFrame& f)
                       (g_eyeDone[0].pose.position.y + g_eyeDone[1].pose.position.y) * 0.5f,
                       (g_eyeDone[0].pose.position.z + g_eyeDone[1].pose.position.z) * 0.5f };
     bool haveHud = fs.shouldRender && g_cfg.vrHud && BuildHud(head, hud);
-    XrCompositionLayerQuad scope, wheel;
+    XrCompositionLayerQuad scope, wheel, pullMark;
     bool haveScope = fs.shouldRender && BuildScope(fs.predictedDisplayTime, scope);
+    bool havePullMark = fs.shouldRender && BuildPullMark(head, pullMark);
     static bool scopeWas;
     if (haveScope != scopeWas) { Log("vr: scope %s", haveScope ? "shown" : "hidden"); scopeWas = haveScope; }
     bool haveWheel = fs.shouldRender && BuildWheel(wheel);
@@ -3147,6 +3221,7 @@ static void PresentStereo(ID3D11Texture2D* bb, const EyeFrame& f)
     bool haveRay = havePanel && BuildRay(head, ray);
     EndFrame(fs, fs.shouldRender ? (XrCompositionLayerBaseHeader*)&proj : nullptr,
              { haveHud ? (XrCompositionLayerBaseHeader*)&hud : nullptr,
+               havePullMark ? (XrCompositionLayerBaseHeader*)&pullMark : nullptr,
                haveScope ? (XrCompositionLayerBaseHeader*)&scope : nullptr,
                haveReticle && !haveWheel ? (XrCompositionLayerBaseHeader*)&reticle : nullptr,
                haveWheel ? (XrCompositionLayerBaseHeader*)&wheel : nullptr,

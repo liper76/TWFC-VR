@@ -150,12 +150,14 @@ static void LoadConfig()
                   "; A throw with the free left hand (forward, where you look) throws a grenade (speed in m/s)\n"
                   "ThrowGesture=1\n"
                   "ThrowSpeed=2.5\n"
-                  "; Point a free hand at a pickup (a tick) and squeeze the grip: it flies smoothly into the hand (like Boneworks)\n"
-                  "; (range in metres, cone in degrees around the hand's ray; PullSpeed > 0: a jerk back in m/s pulls too)\n"
+                  "; Point a free hand at a pickup (a tick and a blue ring around it) and squeeze the grip: it flies smoothly\n"
+                  "; into the hand (like Boneworks) (range in metres, cone in degrees around the hand's ray; PullSpeed > 0: a jerk\n"
+                  "; back in m/s pulls too; PullMark=0: no ring)\n"
                   "Pull=1\n"
                   "PullRange=12\n"
                   "PullCone=15\n"
                   "PullSpeed=0\n"
+                  "PullMark=1\n"
                   "; 1 = a free hand's grip squeezed away from the body is the game's use button (X): take a weapon, pull a lever,\n"
                   ";     press a button, get in (held for as long as the grip is)\n"
                   "GripUse=1\n"
@@ -244,6 +246,7 @@ static void LoadConfig()
     g_cfg.pullSpeed = IniFloat(ini, L"Input", L"PullSpeed", g_cfg.pullSpeed);
     g_cfg.pullAutoTake = (int)IniFloat(ini, L"Input", L"PullAutoTake", (float)g_cfg.pullAutoTake);
     g_cfg.pullTrace = (int)IniFloat(ini, L"Input", L"PullTrace", (float)g_cfg.pullTrace);
+    g_cfg.pullMark = (int)IniFloat(ini, L"Input", L"PullMark", (float)g_cfg.pullMark);
     g_cfg.gripUse = (int)IniFloat(ini, L"Input", L"GripUse", (float)g_cfg.gripUse);
     g_cfg.twoHanded = (int)IniFloat(ini, L"Input", L"TwoHanded", (float)g_cfg.twoHanded);
     g_cfg.twoHandReach = IniFloat(ini, L"Input", L"TwoHandReach", g_cfg.twoHandReach);

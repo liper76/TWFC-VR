@@ -329,6 +329,19 @@ void CameraOnUpdate(TPOV* pov, void* viewTarget, void* pc, float dt)
         IKSetHand(h, a.valid, pos, axes);
     }
 
+    // ---- the pickup a squeeze would pull (pull.cpp): where it is in the room, for the ring drawn there (vr.cpp) ----
+    float pickup[3], pickupR;
+    if (g_cfg.cameraMode == 1 && PullMarkWorld(pickup, pickupR)) {
+        Vec3 d = { pickup[0] - g_latchBase.x, pickup[1] - g_latchBase.y, pickup[2] - g_latchBase.z };
+        Vec3 b = { body.m[0][0] * d.x + body.m[1][0] * d.y + body.m[2][0] * d.z,   // body^T: world -> body frame
+                   body.m[0][1] * d.x + body.m[1][1] * d.y + body.m[2][1] * d.z,
+                   body.m[0][2] * d.x + body.m[1][2] * d.y + body.m[2][2] * d.z };
+        float local[3] = { b.y / s, b.z / s, -b.x / s };   // (XrToUE inverted)
+        VRSetPullMark(true, local, pickupR / s);
+    } else {
+        VRSetPullMark(false, nullptr, 0.0f);
+    }
+
     int headYaw = pov->yaw, headPitch = pov->pitch;
 
     // debug: look at the body from elsewhere without moving the hands ("viewoffset <fwd> <right> <up> <yawDeg>")
