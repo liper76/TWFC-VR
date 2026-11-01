@@ -282,6 +282,11 @@ static void RunLine(const char* line)
     } else if (!strncmp(line, "turretdbg", 9)) {   // turretdbg 1|2|0: on a turret, log its aim once a second (2: its traces)
         extern int g_debugTurret;
         g_debugTurret = atoi(line + 9);
+    } else if (!strncmp(line, "gfxget ", 7) || !strncmp(line, "gfxset ", 7) || !strncmp(line, "gfxcall ", 8)) {   // HUD movie variables and methods
+        GfxQueue(line);
+    } else if (!strncmp(line, "gfxprobe", 8)) {   // which GFxMovieView methods the game calls (2 s)
+        void GfxProbe();
+        GfxProbe();
     } else if (!strncmp(line, "turretfx", 8)) {
         void WeaponsDebugTurretFx();
         WeaponsDebugTurretFx();
