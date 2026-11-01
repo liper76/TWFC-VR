@@ -952,6 +952,13 @@ void SolveArm(int side, Pose* pose, Vec3 wrist, const Vec3 ctrl[3], const Vec3 h
 
     StretchThin(sh, Sub(E, S), stretch1, g_cfg.limbThickness);
     StretchThin(el, Sub(H, E), stretch2, 1.0f);   // (the forearm is in view: always at its full thickness)
+    if (holdAx) {
+        // the gun replaces the forearm and the hand (in the game nothing of them is left past the elbow): shrunk to
+        // a point at the elbow and inside the gun, not to stick out of it
+        const float kGone = 0.01f;
+        for (auto& ax : el.ax) ax = Scale(ax, kGone);
+        handSize = kGone;
+    }
     pose[a.shoulder] = sh;
     pose[a.elbow] = el;
     pose[a.hand].pos = H;
