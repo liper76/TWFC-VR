@@ -1,0 +1,34 @@
+# go_vent.txt for a save with both campaigns done: its Solo menu has Resume Decepticon / Resume Autobot above Chapter Select
+press A 150
+wait 2500
+press A 150
+wait 2500
+press A 150
+wait 2500
+press DOWN 120
+wait 600
+press DOWN 120
+wait 600
+press A 150
+wait 3000
+press A 150
+wait 2500
+press RIGHT 120
+wait 500
+press RIGHT 120
+wait 500
+press RIGHT 120
+wait 500
+press RIGHT 120
+wait 500
+press RIGHT 120
+wait 500
+press RIGHT 120
+wait 500
+wait 800
+press A 150
+wait 6000
+press UP 150
+wait 1000
+press A 150
+wait 2000

@@ -35,17 +35,16 @@ CONTROLS (main mode; the buttons work like an Xbox gamepad)
   Right trigger ................... fire (with a melee weapon in the right hand: swing it)
   Left trigger .................... as in the game: precise aim / the weapon's second action (detonating grenades);
                                     in vehicle form - boost
-  (the left thumb stays on the movement stick, so both abilities are under the right thumb)
-  B ............................... main ability (RB), at once, held while you hold B
+  Y ............................... main ability (RB), at once, held while you hold Y
   Right stick UP (hold) ........... second ability (LB), held while you hold the stick up (the right stick click
                                     does the same). Turning is sideways only: up/down do not turn.
-  Right stick DOWN: hold 0.3 s .... the right hand's WEAPON WHEEL (like Half-Life: Alyx): point the hand at an item
-                                    and let the stick go. Items: your weapons / "Empty hand". (The grips do not open
-                                    the wheel - they only grab.)
-  Right stick DOWN: short flick ... next weapon; with an empty right hand - the gun back into it.
-                                    In a vehicle - the vehicle's next weapon.
-  Y ............................... the game's B: throws a grenade (and whatever else the game has on B);
+  B: short press .................. the game's B: throws a grenade (and whatever else the game has on B);
                                     grenades also from the belt with the grip
+  B: hold 0.35 s .................. the right hand's WEAPON WHEEL (like Half-Life: Alyx): point the hand at an item
+                                    and release B. Items: your weapons / "Empty hand". (The grips do not open the
+                                    wheel - they only grab.) In a vehicle, holding B switches the vehicle's weapon.
+  Right stick DOWN (flick) ........ next weapon; with an empty right hand - the gun back into it.
+                                    In a vehicle - the vehicle's next weapon.
   Left stick click ................ transform.
                                     Empty right hand: the gun is put away and does not fire, the hand is free
                                     (grenades from the belt, pulling, fingers); its position on the controller
@@ -58,7 +57,7 @@ CONTROLS (main mode; the buttons work like an Xbox gamepad)
   Grip (free hand, not at the belt) . use: pick up, levers, buttons (GripUse=1 in [Input])
   "Empty hand" in the wheel on a turret: get off the turret. On a turret: aim with both hands
                                     (between them), the eyes are raised by TurretEyeUp=0.35 m ([VR])
-  (in a vehicle: B - the vehicle's special move)
+  (in a vehicle: Y - the vehicle's special move)
   The old layout (grips = abilities, Y = next weapon): GripAbilities=1 in [Input].
   (in the old layout the stick clicks are LS / RS)
   Menu button (left): short press .. Start (pause)
@@ -118,7 +117,9 @@ HANDS (new, early version)
   Your own robot's head is hidden so it does not block the view.
   Robots near you no longer vanish (NoNearFade=600 - the radius; 0 = as in the game).
   ShowBody=1 - arms and legs visible, the bulky torso hidden (0 = arms only, 2 = the whole body).
-  LimbThickness=0.5 - thinner upper arms (shoulder to elbow; the forearms always keep the game's size),
+  ArmSize=0.8 - thickness of the whole arms: forearms, armour, the arm on the empty hand (1 = as in the game).
+    In game: VR settings menu -> "Arm size".
+  LimbThickness=0.5 - the upper arms (shoulder to elbow) thinner still, on top of ArmSize,
     LegThickness=0.75 - thinner legs (1 = as in the game).
   HandScale=1.0 / WeaponScale=1.0 - size of the robot's hands and of the weapon in hand (1 = as in the game).
   HandOffsetForward / HandOffsetRight / HandOffsetUp - shift the robot's hands relative to yours, in cm
@@ -195,8 +196,10 @@ PHYSICAL CONTROLS (new)
     ([HUD] MarkersInEyes); translucent ability effects and text (hints, "reloading") are not - the text stays
     on the panel. The panel with health, abilities and weapon is as before.
   The aim ring shows the game's own crosshair (changes per weapon, turns red on an enemy): [VR] ReticleStyle=1
-    (0 - a plain ring). Size and offset - in setup mode.
-  Ability animations no longer take over the arms (AbilityAnimation=0). The arms stretch only at the shoulder.
+    (0 - a plain ring). Size and offset - in setup mode. Spread wide (jumping and firing) it stays whole on the
+    ring and does not get into the picture.
+  Ability animations no longer take over the arms (AbilityAnimation=0). The hand and the gun are always where
+    the controller is: the arm stretches at the shoulder, and when it cannot reach - at the forearm too.
   A grenade in the hand does not spin and stays silent until armed; a grenade is visible on the belt while you
     have any (GrenadeBelt); the size of the grenade on the belt and in the hand - GrenadeScale (0.5).
   Sharpness: 16x anisotropic filtering is enabled in BinariesVR\dgVoodoo.conf.

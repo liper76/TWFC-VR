@@ -88,7 +88,8 @@ struct Config {
     float noNearFade = 600.0f;      // first person: robots closer than this (Unreal units) are not faded out (0 = game fades)
     float nearClip = 10.0f;         // near clipping plane (Unreal units; game uses 100 = 0.5 m at VR scale)
     int   showBody = 1;             // first person: 0 = arms only, 1 = arms + legs (torso hidden), 2 = whole body
-    float limbThickness = 0.5f;     // first person: upper arms drawn thinner (1 = original; the forearms always are)
+    float limbThickness = 0.5f;     // first person: upper arms drawn thinner (1 = original), on top of armSize
+    float armSize = 0.8f;           // first person: thickness of the whole arms - forearms, armour, arm shell (1 = original)
     float legThickness = 0.75f;     // first person: legs drawn thinner (1 = original)
     float handScale = 1.0f;         // first person: size of the robot's hands
     float weaponScale = 1.0f;       // first person: size of the held weapon

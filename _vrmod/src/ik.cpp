@@ -833,10 +833,13 @@ float TwistAbout(Vec3 d, const Vec3 a[3], const Vec3 b[3])
 }
 
 // An arm, rigid, from the bind pose (both arms are mirror images there, so they look the same): the clavicle
-// shrugs a little when the hand is raised, the wrist goes to `wrist` (out of reach: the arm points at it,
-// straight), the elbow bends down, out and back from the hand, the forearm takes half of the wrist's roll and the
-// hand gets `handAx` at `handSize`. The upper arm is slimmed by LimbThickness; the forearm and the armour are not.
-// With `holdAx` the forearm is part of the gun instead (see SolveGunArm).
+// shrugs a little when the hand is raised, the wrist goes to `wrist` - always, out of reach too (the hand and the
+// gun stay on the controller: the arm points at it straight, stretches a little and then its forearm up to
+// kMaxReach; past that the hand leaves the arm behind, not the controller), the elbow bends down, out and back from
+// the hand, the forearm takes half of the wrist's roll and the hand gets `handAx` at `handSize`. Both bones and the
+// armour on them are ArmSize thick (the upper arm also LimbThickness). With `holdAx` the forearm is part of the gun
+// instead (see SolveGunArm).
+const float kMaxReach = 1.4f;
 void SolveArm(int side, Pose* pose, Vec3 wrist, const Vec3 ctrl[3], const Vec3 handAx[3], float handSize,
               const Vec3* holdAx = nullptr)
 {
@@ -901,28 +904,29 @@ void SolveArm(int side, Pose* pose, Vec3 wrist, const Vec3 ctrl[3], const Vec3 h
     float cosA = fminf(fmaxf((l1 * l1 + dist * dist - l2 * l2) / (2.0f * l1 * dist), -1.0f), 1.0f);
     float sinA = sqrtf(1.0f - cosA * cosA);
     Vec3 E = Add(S, Scale(Add(Scale(dir, cosA), Scale(perp, sinA)), l1));
-    Vec3 H = Add(S, Scale(dir, dist));
+    Vec3 H = wrist;   // (within reach S + dir * dist; out of reach the forearm takes the rest, below)
     Vec3 hinge = Norm(Cross(perp, dir));
     Vec3 up1[3], fore1[3];
     BendFrame(Sub(E, S), hinge, up1);
     BendFrame(Sub(H, E), hinge, fore1);
 
     Pose sh = rs, el = re;
-    float stretch1 = stretch, stretch2 = stretch;
+    float L1 = l1 / stretch, L2 = l2 / stretch;   // (the bind pose's lengths)
+    float stretch1 = stretch, stretch2 = fminf(fmaxf(Len(Sub(H, E)) / fmaxf(L2, 1e-3f), 0.6f), kMaxReach);
+    Vec3 foreDir = Sub(H, E);
     if (holdAx) {
         // the gun arm: the forearm turns into the gun from the elbow (the game hangs the gun on it, its back end
         // over the forearm) - fixed to it as the game has it, the wrist straight, the wrist at `wrist`. The elbow
-        // goes where that puts it; the upper arm gives (0.6..1.15 of its length) and beyond that the gun with the
-        // forearm moves along it, still pointing where the controller does.
-        float L1 = l1 / stretch, L2 = l2 / stretch;
+        // goes where that puts it; the upper arm gives (0.6..kMaxReach of its length) and beyond that it falls
+        // short of the gun, which stays on the controller.
         Vec3 rhAx[3];
         UnitAxes(rh, rhAx);
         Vec3 d = Norm(FromFrame(InFrame(Norm(Sub(rh.pos, re.pos)), rhAx), holdAx));   // the forearm, turned with the gun
         Vec3 v = Sub(Sub(wrist, Scale(d, L2)), S);
         float len = Len(v);
-        float k = fminf(fmaxf(len, 0.6f * L1), 1.15f * L1);
+        float k = fminf(fmaxf(len, 0.6f * L1), kMaxReach * L1);
         E = Add(S, Scale(len > 1e-3f ? Scale(v, 1.0f / len) : perp, k));
-        H = Add(E, Scale(d, L2));
+        foreDir = d;
         Vec3 dirN = Norm(Sub(H, S)), eN = Sub(E, S);
         Vec3 perpN = Sub(eN, Scale(dirN, Dot(eN, dirN)));
         BendFrame(eN, Len(perpN) > 1e-3f ? Norm(Cross(perpN, dirN)) : hinge, up1);
@@ -953,12 +957,16 @@ void SolveArm(int side, Pose* pose, Vec3 wrist, const Vec3 ctrl[3], const Vec3 h
     } else {
         pad = sh;
     }
+    // (the armour and the arm model on the empty hand at ArmSize across the bone, at their full length)
+    float thick = fminf(fmaxf(g_cfg.armSize, 0.1f), 2.0f);
     g_padFrame[side][0] = pad;
     g_padFrame[side][1] = el;
+    StretchThin(g_padFrame[side][0], Sub(E, S), 1.0f, thick);
+    StretchThin(g_padFrame[side][1], foreDir, 1.0f, thick);
     g_padValid[side] = true;
 
-    StretchThin(sh, Sub(E, S), stretch1, g_cfg.limbThickness);
-    StretchThin(el, Sub(H, E), stretch2, 1.0f);   // (the forearm is in view: always at its full thickness)
+    StretchThin(sh, Sub(E, S), stretch1, g_cfg.limbThickness * thick);
+    StretchThin(el, foreDir, stretch2, thick);
     if (holdAx) {
         // the gun replaces the forearm and the hand (in the game nothing of them is left past the elbow): shrunk to
         // a point at the elbow and inside the gun, not to stick out of it

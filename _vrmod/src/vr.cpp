@@ -38,6 +38,30 @@ void VS(uint id : SV_VertexID, out float4 pos : SV_Position, out float2 uv : TEX
     uv = float2((id << 1) & 2, id & 2);
     pos = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
 }
+// the game's crosshair: white/grey marks around the centre, fading to red over an enemy (white..pink..red = red
+// channel highest, green and blue equal)
+bool CrossColour(float3 c) { float hi = max(c.r, max(c.g, c.b)); return c.r > 0.05 && c.r >= hi - 0.01 && abs(c.g - c.b) < 0.2 * c.r + 0.03; }
+float Sat(float3 c) { float hi = max(c.r, max(c.g, c.b)); return (hi - min(c.r, min(c.g, c.b))) / max(hi, 0.001); }
+// Spread wide (jumping, firing) its marks leave the centre, but they repeat around it - two or four of them turned
+// by 180 degrees, three by 120 - and an enemy's marker or a name does not: a pixel with a mark of its colour near
+// where it lands turned about the centre by 180 or by 120 degrees either way is the crosshair.
+bool Repeated(float2 uv, float3 c)
+{
+    float w, h;
+    src.GetDimensions(w, h);
+    float2 p = (uv - 0.5) * float2(w, h);   // (in pixels: turned as drawn)
+    float2 turned[3] = { -p, float2(-0.5 * p.x - 0.8660254 * p.y, 0.8660254 * p.x - 0.5 * p.y),
+                         float2(-0.5 * p.x + 0.8660254 * p.y, -0.8660254 * p.x - 0.5 * p.y) };
+    float2 nb[5] = { float2(0, 0), float2(2, 0), float2(-2, 0), float2(0, 2), float2(0, -2) };
+    float sat = Sat(c);
+    bool found = false;
+    [unroll] for (int i = 0; i < 3; i++)
+        [unroll] for (int j = 0; j < 5; j++) {
+            float3 m = src.SampleLevel(smp, (turned[i] + nb[j]) / float2(w, h) + 0.5, 0).rgb;
+            found = found || (CrossColour(m) && abs(Sat(m) - sat) < 0.35);
+        }
+    return found;
+}
 float4 PS(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     if (scope > 1.5) {   // a part of the HUD: the game's crosshair for the VR reticle (round: no names around it)
         if (length(uv - 0.5) > 0.49) return float4(0, 0, 0, 0);
@@ -66,6 +90,12 @@ float4 PS(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     bool greyPx = cmax - lo0 < 0.3 * cmax + 0.02;
     bool redPx = c.r >= cmax - 0.01 && abs(c.g - c.b) < 0.2 * c.r + 0.03;
     if (scope > 1.5 && (blueMark || (!greyPx && !redPx))) return float4(0, 0, 0, 0);
+    // (past the middle - spread wide - only the marks that repeat around the centre: no texts, no enemy markers)
+    if (scope > 1.5) {
+        float tw, th;
+        src.GetDimensions(tw, th);
+        [branch] if (length((uv - 0.5) * float2(1, th / tw)) > 0.098 && !Repeated(uv, c)) return float4(0, 0, 0, 0);
+    }
     // the panel shows only health and ammo: markers and names that pass over its corners go (their colours, also
     // dim, except in the health bar - it is cyan too)
     bool hpBar = uv.x < 0.4 && uv.y > 0.07 && uv.y < 0.16;
@@ -94,14 +124,13 @@ float4 PS(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         // = red channel highest, green and blue equal); other coloured messages there stay visible
         float hi = max(c.r, max(c.g, c.b)), lo = min(c.r, min(c.g, c.b));
         bool grey = hi - lo < 0.3 * hi + 0.02;
-        bool red = c.r > 0.05 && c.r >= hi - 0.01 && abs(c.g - c.b) < 0.2 * c.r + 0.03;
+        bool red = CrossColour(c);
         float r = length(uv - 0.5);
-        // spread wide (jumping, firing) the red crosshair's marks leave that circle: they are point-symmetric
-        // about the centre, an enemy's marker is not - a red pixel with red opposite it is the crosshair
-        float3 m = src.Sample(smp, 1.0 - uv).rgb;
-        float mhi = max(m.r, max(m.g, m.b));
-        bool mirrored = red && r < 0.35 && m.r > 0.05 && m.r >= mhi - 0.01 && abs(m.g - m.b) < 0.2 * m.r + 0.03;
-        if (scope < 1.5 && ((grey && r < maskRadius) || (red && (r < 0.065 || mirrored)))) { c = 0; a = 0; }
+        // spread wide (jumping, firing) the red crosshair's marks leave that circle (Repeated: also the three-mark
+        // crosshairs - they went into the eyes and onto the panel)
+        bool spread = false;
+        [branch] if (scope < 1.5 && red && r >= 0.065 && r < 0.35) spread = Repeated(uv, c);
+        if (scope < 1.5 && ((grey && r < maskRadius) || (red && (r < 0.065 || spread)))) { c = 0; a = 0; }
         // full-screen tints (damage / ability flashes) are drawn with the HUD: on the floating panel they become a
         // coloured rectangle. They are flat and translucent - text and icons have edges - so a pixel whose
         // neighbours a few pixels away have the same translucent alpha is dropped.
@@ -239,8 +268,9 @@ struct XR {
     WORD prevButtons = 0;
     DWORD gripAt[2] = {};     // grip squeezed since
     int stickDir = 0;         // the right stick held up (1) or down (-1) - not sideways (VR layout: StickVertical)
-    DWORD stickAt = 0;        // ... since
-    bool stickHeld = false;   // ... down long enough: the weapon wheel (no flick)
+    DWORD bAt = 0;            // B held since (VR layout: the weapon wheel)
+    bool bHeld = false;       // ... long enough: the wheel (no tap)
+    int bPulse = 0;           // a tap of B: the game's B for a few updates
     int exitPulse = 0;        // the game's use button (X) for a few updates: off a mounted turret
     DWORD throwAt = 0;        // grenade throw gesture
     int throwPulse = 0;
@@ -946,18 +976,18 @@ static void UpdateInput()
         if (GetBool(xr.btn[kRClick])) p.wButtons |= XINPUT_GAMEPAD_RIGHT_THUMB;
     } else {
         // VR layout: the grips hold things (the weapon's front, grenades, pickups); the left trigger stays the game's
-        // (fine aim / the weapon's second action, e.g. detonating grenades; vehicle boost). The left thumb moves, so
-        // both abilities are on the right one, at once and for as long as they are held: B = main ability (RB), the
-        // right stick held up = second ability (LB; the stick's vertical axis is not the game's - turning is only
-        // sideways); the right stick down = the weapon wheel (UpdateWeaponWheel). Left: Y = the game's B (grenade
-        // throw - grenades also from the belt with a grip), X = the game's X, the click = transform (LS, one press).
-        // The right click is the second ability too. Melee: a punch forward with a hand.
-        UpdateWeaponWheel(p, grip, now);   // (takes up the right stick's direction)
+        // (fine aim / the weapon's second action, e.g. detonating grenades; vehicle boost). Y = main ability (RB) at
+        // once, for as long as it is down; the right stick held up = second ability (LB, also the right click; the
+        // stick's vertical axis is not the game's - turning is only sideways). B tapped = the game's B (the grenade
+        // throw, and whatever else the game has on it), held = the weapon wheel; the right stick flicked down = next
+        // weapon (UpdateWeaponWheel). X = the game's X, the left click = transform (LS, one press). Grenades also
+        // from the belt with a grip. Melee: a punch forward with a hand.
+        UpdateWeaponWheel(p, grip, now);   // (takes up B and the right stick's direction)
         if (xr.stickDir) p.sThumbRX = 0;   // (held up or down: no turning meanwhile)
         p.sThumbRY = 0;
-        if (GetBool(xr.btn[kB])) p.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+        if (GetBool(xr.btn[kY])) p.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
         if (xr.stickDir == 1 || GetBool(xr.btn[kRClick])) p.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
-        if (GetBool(xr.btn[kY])) p.wButtons |= XINPUT_GAMEPAD_B;
+        if (xr.bPulse > 0) { p.wButtons |= XINPUT_GAMEPAD_B; xr.bPulse--; }
         if (GetBool(xr.btn[kLClick])) p.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
         if (xr.exitPulse > 0) { p.wButtons |= XINPUT_GAMEPAD_X; xr.exitPulse--; }
     }
@@ -1375,6 +1405,8 @@ static void UpdateWeaponWheel(XINPUT_GAMEPAD& p, const float grip[2], DWORD now)
         w.open = false;
         xr.gripAt[0] = xr.gripAt[1] = 0;
         xr.stickDir = 0;
+        xr.bAt = 0;   // (B sets the gun's rotation there)
+        xr.bHeld = false;
         return;
     }
     bool debug = g_dbgWheelHand != -2;
@@ -1386,27 +1418,38 @@ static void UpdateWeaponWheel(XINPUT_GAMEPAD& p, const float grip[2], DWORD now)
         w.open = false;
         g_dbgWheelHand = -2;
     }
-    // The wheel is on the right stick held down (not the grips: grabbing things kept opening it; not a button: B is
-    // the main ability, held up the second - UpdateInput): held 0.3 s it opens the right hand's wheel, let go to
-    // choose; flicked down = WheelQuickSwitch. In vehicle form down switches the vehicle's weapon at once (the game's
-    // "next weapon").
+    // The wheel is on B held (not the grips: grabbing things kept opening it; not the stick clicks: they wear the
+    // sticks; the right stick held down was tried - in the headset it never stayed down long enough): B held 0.35 s
+    // opens the right hand's wheel, let go to take the slot under the hand; a short B is the game's B (grenade), sent
+    // when it is let go. In vehicle form B held switches the vehicle's weapon (the game's "next weapon"). The right
+    // stick flicked down = WheelQuickSwitch at once (in vehicle form the vehicle's next weapon); held up = the second
+    // ability (UpdateInput).
     bool vehicle = IKPawnIsVehicle();
     if (!debug) {
+        if (GetBool(xr.btn[kB])) {
+            if (!xr.bAt) xr.bAt = now;
+            if (now - xr.bAt > 350 && !xr.bHeld) {
+                xr.bHeld = true;
+                if (vehicle) w.presses = 1;
+                else if (!w.open && t) WheelOpen(t, 1);
+                if (g_cfg.logFps) Log("vr: B held -> %s", vehicle ? "next vehicle weapon" : "weapon wheel");
+            }
+        } else if (xr.bAt) {
+            if (w.open && w.hand == 1) WheelChoose();
+            else if (!xr.bHeld) xr.bPulse = 8;   // a tap
+            if (w.open && w.hand == 1) w.open = false;
+            xr.bAt = 0;
+            xr.bHeld = false;
+        }
         int was = xr.stickDir, dir = StickVertical(GetStick(xr.stick[1]), was);
         if (dir != was) {
-            if (was == -1) {   // let go of down
-                if (w.open && w.hand == 1) { WheelChoose(); w.open = false; }
-                else if (!xr.stickHeld && !vehicle) WheelQuickSwitch();
-            }
             xr.stickDir = dir;
-            xr.stickAt = now;
-            xr.stickHeld = false;
-            if (dir == -1 && vehicle) { w.presses = 1; xr.stickHeld = true; }
             if (dir) VRHaptic(1, 0.15f, 0.02f);   // (a stick has no click to feel)
             if (dir && g_cfg.logFps) Log("vr: right stick %s", dir > 0 ? "up (second ability)" : "down");
-        } else if (dir == -1 && !xr.stickHeld && now - xr.stickAt > 300) {
-            xr.stickHeld = true;
-            if (!w.open && t) WheelOpen(t, 1);
+            if (dir == -1) {
+                if (vehicle) w.presses = 1;
+                else WheelQuickSwitch();
+            }
         }
     }
     (void)grip;
@@ -1813,6 +1856,7 @@ static const SettingItem kSettings[] = {
     { L"VR", L"FirstPersonEyeHeight", L"\x0412\x044B\x0441\x043E\x0442\x0430 \x0433\x043B\x0430\x0437", L"Eye height", 150, 5, 50, 300 },
     { L"VR", L"SyncEyeTime", L"\x041E\x0431\x0430 \x0433\x043B\x0430\x0437\x0430 \x2014 \x043E\x0434\x0438\x043D \x043C\x043E\x043C\x0435\x043D\x0442 \x0438\x0433\x0440\x044B", L"Both eyes \x2014 same game moment", 1, 1, 0, 1 },
     { L"VR", L"HandScale", L"\x0420\x0430\x0437\x043C\x0435\x0440 \x043A\x0438\x0441\x0442\x0435\x0439", L"Hand size", 1.0f, 0.05f, 0.2f, 1.5f },
+    { L"VR", L"ArmSize", L"\x0420\x0430\x0437\x043C\x0435\x0440 \x0440\x0443\x043A", L"Arm size", 0.8f, 0.05f, 0.3f, 1.2f },
     { L"VR", L"WeaponScale", L"\x0420\x0430\x0437\x043C\x0435\x0440 \x043E\x0440\x0443\x0436\x0438\x044F", L"Weapon size", 1.0f, 0.05f, 0.2f, 1.5f },
     { L"VR", L"LimbThickness", L"\x0422\x043E\x043B\x0449\x0438\x043D\x0430 \x043F\x043B\x0435\x0447", L"Upper arm thickness", 0.5f, 0.05f, 0.2f, 1 },
     { L"VR", L"LegThickness", L"\x0422\x043E\x043B\x0449\x0438\x043D\x0430 \x043D\x043E\x0433", L"Leg thickness", 0.75f, 0.05f, 0.2f, 1 },
@@ -2913,12 +2957,14 @@ static bool CreateReticle()
 static Chain g_reticleGame;
 static DWORD g_reticleGameAt;
 
-static const float kReticleCut = 0.2f;   // the game's crosshair: this part of the HUD's width around the centre
+static const float kReticleCut = 0.6f;   // the game's crosshair: this part of the HUD's width around the centre (its
+                                          // marks spread wide too - jumping and firing up to ~0.33 of it; past the
+                                          // middle 0.2 only those - Repeated)
 
 static void UpdateGameReticle(ID3D11ShaderResourceView* hud)
 {
     if (!hud || g_cfg.reticleStyle != 1) return;
-    const UINT S = 256;
+    const UINT S = 768;   // (~0.7 of the HUD's pixels: its thin lines stay)
     if (!g_reticleGame.sc && !CreateChain(g_reticleGame, S, S)) return;
     ID3D11Resource* r = nullptr;
     hud->GetResource(&r);
@@ -2996,7 +3042,7 @@ static bool BuildReticle(XrTime t, XrCompositionLayerQuad& q)
     q.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
     bool game = g_cfg.reticleStyle == 1 && g_reticleGame.sc && GetTickCount() - g_reticleGameAt < 300;
     const Chain& rc = game ? g_reticleGame : g_reticle;
-    // the game's crosshair at its own angular size: the cut is 0.12 of the view's width
+    // the game's crosshair at its own angular size: the cut is kReticleCut of the view's width
     q.subImage.swapchain = rc.sc;
     q.subImage.imageRect = { { 0, 0 }, { (int32_t)rc.width, (int32_t)rc.height } };
     q.pose.orientation = o;   // quad front (+Z) faces back along the ray, towards the player
