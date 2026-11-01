@@ -285,6 +285,9 @@ static void RunLine(const char* line)
     } else if (!strncmp(line, "armdump", 7)) {   // the right arm's bones as the game animates them (once)
         void IKArmDump();
         IKArmDump();
+    } else if (!strncmp(line, "armbind", 7)) {   // armbind 1|0: the empty hand's arm model in the bind pose or as the game poses it
+        void IKArmBindPose(bool on);
+        IKArmBindPose(atoi(line + 7) != 0);
     } else if (!strncmp(line, "putaway", 7)) {   // putaway 1|0: the right hand empty (the gun put away) or back
         void VRDebugPutAway(int on);
         VRDebugPutAway(atoi(line + 7));

@@ -207,6 +207,18 @@ struct Skeleton {
 
 bool Starts(const wchar_t* s, const wchar_t* p) { return !wcsncmp(s, p, wcslen(p)); }
 
+// A RefSkeleton bone's bind pose relative to its parent.
+Pose RefLocal(const uint8_t* b)
+{
+    const float* q = (const float*)(b + 8);
+    const float* t = (const float*)(b + 0x18);
+    float x = q[0], y = q[1], z = q[2], w = q[3];
+    return { { { 1 - 2 * (y * y + z * z), 2 * (x * y + w * z), 2 * (x * z - w * y) },
+               { 2 * (x * y - w * z), 1 - 2 * (x * x + z * z), 2 * (y * z + w * x) },
+               { 2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y) } },
+             { t[0], t[1], t[2] } };
+}
+
 bool ResolveSkeleton(uint8_t* mesh)
 {
     Skeleton& k = g_sk;
@@ -229,13 +241,7 @@ bool ResolveSkeleton(uint8_t* mesh)
         const uint8_t* b = bones + i * kMeshBoneSize;
         k.parent[i] = *(const int*)(b + 0x34);
         if (k.parent[i] < 0 || k.parent[i] >= i) k.parent[i] = -1;
-        const float* q = (const float*)(b + 8);
-        const float* t = (const float*)(b + 0x18);
-        float x = q[0], y = q[1], z = q[2], w = q[3];
-        k.ref[i] = { { { 1 - 2 * (y * y + z * z), 2 * (x * y + w * z), 2 * (x * z - w * y) },
-                       { 2 * (x * y - w * z), 1 - 2 * (x * x + z * z), 2 * (y * z + w * x) },
-                       { 2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y) } },
-                     { t[0], t[1], t[2] } };
+        k.ref[i] = RefLocal(b);
         k.group[i] = 0;
         k.bindPose[i] = false;
         const wchar_t* nm = NameOf(*(const unsigned*)b);
@@ -350,6 +356,7 @@ unsigned g_armGameBone;              // where the game attaches it (for attachin
 float g_armGameLoc[3], g_armGameScale[3];
 int g_armGameRot[3];
 bool g_armGameSaved;
+bool g_armBindOff;                   // debug: armbind 0 - the plates as the game poses them
 
 bool MatchesScopeList(const std::wstring& names)
 {
@@ -1074,7 +1081,9 @@ Pose GunInComponent()
 
 // The arm model on the empty right hand: where the game attaches it on the forearm, relative to the forearm as
 // posed at its full thickness (the elbow plates' frame; the bone itself is slimmed), written onto the hand bone
-// (not sheared).
+// (not sheared). The plates in the bind pose (the mod's empty hand) run along the model's +x from its root, and the
+// game attaches the root to the elbow bone, whose +x points back at the shoulder: the shell turned half about z lies
+// on the forearm, its striped face up like the left forearm's.
 bool PlaceArmModel(const Pose* pose)
 {
     Att* r = FindAtt(g_armComp);
@@ -1084,6 +1093,10 @@ bool PlaceArmModel(const Pose* pose)
     Pose rel = RotatorPose(r->rot);
     for (int k = 0; k < 3; k++) rel.ax[k] = Scale(rel.ax[k], r->scale[k]);
     rel.pos = { r->loc[0], r->loc[1], r->loc[2] };
+    if (g_armOurs && !g_armBindOff) {
+        Pose t = { { { -1, 0, 0 }, { 0, -1, 0 }, { 0, 0, 1 } }, { 0, 0, 0 } };
+        rel = Compose(t, rel);
+    }
     WriteEntry(r, g_armEntry, Compose(rel, g_padFrame[1][1]), hb, pose);
     return true;
 }
@@ -1620,17 +1633,25 @@ void OnSkelPose(uint8_t* comp)
                 uint8_t* abones = as ? *(uint8_t**)(as + kMeshRefSkeleton) : nullptr;
                 int aref = as ? *(int*)(as + kMeshRefSkeleton + 4) : 0;
                 Pose aw = Load(m);
+                Vec3 aRefPos[40] = {};
                 for (int i = 0; ab && i < nb && i < 40; i++) {
                     const float* q = ab + i * 16;
                     Vec3 w = PointTo(aw, { q[12], q[13], q[14] });
                     unsigned fn = abones && i < aref ? *(unsigned*)(abones + i * kMeshBoneSize) : 0;
                     int par = abones && i < aref ? *(const int*)(abones + i * kMeshBoneSize + 0x34) : -1;
+                    const float* rq = abones && i < aref ? (const float*)(abones + i * kMeshBoneSize + 8) : nullptr;
+                    if (abones && i < aref) {   // the bind pose's position (component space; rotations ignored past the parent's)
+                        const float* t = (const float*)(abones + i * kMeshBoneSize + 0x18);
+                        aRefPos[i] = { t[0], t[1], t[2] };
+                        if (par >= 0 && par < i) aRefPos[i] = Add(aRefPos[i], aRefPos[par]);
+                    }
                     const wchar_t* bn = fn ? NameOf(fn) : nullptr;
                     int pb = fn ? BoneIndex(fn) : -1;
                     Vec3 pw = pb >= 0 ? PointTo(compToWorld, pose[pb].pos) : Vec3{};
-                    Log("armdump arm model %d %ls p%d: %.0f %.0f %.0f (in it %.1f %.1f %.1f, scale %.2f) | body bone %d: %.0f %.0f %.0f",
+                    Log("armdump arm model %d %ls p%d: %.0f %.0f %.0f (in it %.1f %.1f %.1f, scale %.2f, x %.2f %.2f %.2f) | ref ~%.1f %.1f %.1f q %.2f %.2f %.2f %.2f | body bone %d: %.0f %.0f %.0f",
                         i, bn ? bn : L"?", par, w.x, w.y, w.z, q[12], q[13], q[14], sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]),
-                        pb, pw.x, pw.y, pw.z);
+                        q[0], q[1], q[2], aRefPos[i].x, aRefPos[i].y, aRefPos[i].z, rq ? rq[0] : 0.f, rq ? rq[1] : 0.f,
+                        rq ? rq[2] : 0.f, rq ? rq[3] : 0.f, pb, pw.x, pw.y, pw.z);
                 }
                 Log("armdump arm model axes %.2f %.2f %.2f / %.2f %.2f %.2f / %.2f %.2f %.2f",
                     m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]);
@@ -1672,10 +1693,32 @@ void OnSkelPose(uint8_t* comp)
 typedef int(__fastcall* SkelUpdateFn)(void* self, void* edx, uint8_t* comp, void* arg);
 SkelUpdateFn g_origSkelUpdate;
 
+// The arm model the mod holds on the empty right hand: its plates in the bind pose - the assembled shell, as the game
+// shows it on its own empty-handed level (TnWeaponEmpty, Kaon Prison Break); elsewhere its animation folds them into
+// a thin sleeve (the throw's animation assembles them only for a moment).
+void ArmModelBindPose(uint8_t* comp)
+{
+    __try {
+        float* bases = *(float**)(comp + kCompSpaceBases);
+        int n = *(int*)(comp + kCompSpaceBases + 4);
+        uint8_t* skel = *(uint8_t**)(comp + kCompSkelMesh);
+        uint8_t* bones = skel ? *(uint8_t**)(skel + kMeshRefSkeleton) : nullptr;
+        if (!bases || !bones || n <= 0 || n > kMaxBones || n != *(int*)(skel + kMeshRefSkeleton + 4)) return;
+        static Pose bind[kMaxBones];
+        for (int i = 0; i < n; i++) {
+            const uint8_t* b = bones + i * kMeshBoneSize;
+            int p = *(const int*)(b + 0x34);
+            bind[i] = p >= 0 && p < i ? Compose(RefLocal(b), bind[p]) : RefLocal(b);
+            Store(bind[i], bases + i * 16);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
 int __fastcall HookSkelUpdate(void* self, void* edx, uint8_t* comp, void* arg)
 {
     int r = g_origSkelUpdate(self, edx, comp, arg);
     OnSkelPose(comp);
+    if (comp && comp == g_armComp && g_armOurs && !g_armBindOff) ArmModelBindPose(comp);
     return r;
 }
 
@@ -1843,6 +1886,9 @@ bool IKOnDetach(void* mesh, void* comp)
 
 // The game attaching the arm model the mod already holds attached (a grenade throw): skipped (weapons.cpp).
 bool IKArmModelHeld(void* mesh, void* comp) { return comp && comp == g_armComp && mesh == g_armMesh && g_armOurs; }
+
+// debug: the empty hand's arm model in the bind pose (default) or as the game poses it
+void IKArmBindPose(bool on) { g_armBindOff = !on; Log("debug: arm model bind pose %s", on ? "on" : "off"); }
 
 // The arm model on the empty right hand (weapons.cpp, each frame, game thread): the robot's own arm shell (the
 // model the game shows on a grenade throw), attached where the game attaches it while the hand is empty and
