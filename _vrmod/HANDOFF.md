@@ -260,7 +260,12 @@ GFxValue: тип +0 (2 bool, 3 number, 4 string, 6 object, 7 array, 8 display ob
 (клип «crosshair»N«_mc» через attachMovie), менеджер меток `_root.instance24` (в кампании пуст: имена над
 напарниками и синие метки рисует не он) (markerArray, клипы «marker»N«_mc»,
 screenCenterX/Y = 900, Stage 1800 = картинка 1800², _x/_y метки — пиксели экрана). Debug-команды: `gfxget`,
-`gfxset`, `gfxcall [movie:]метод арг…`, `gfxprobe` (src\gfx.cpp).
+`gfxset`, `gfxcall [movie:]метод арг…`, `gfxkids <клип> [n]` (дети клипа по глубинам), `gfxprobe` (src\gfx.cpp).
+Группа прицела `instance17` сама добавляет клипы на глубины от 0 (`causeDamageN_mc` — хитмаркер,
+`turretReticuleN_mc`, `rangeFinderN_mc`): gfx.cpp прячет их с панели. AS мувиков читается
+`_vrmod_toolss2dis.py movie.gfx [слова]` (дизассемблер AS2 с псевдокодом).
+LevelView и HUD глаз: хук Canvas Project (0x115D54E0, game.cpp) раздвигает точки меток в VRHudProjectScale() раз,
+vr.cpp накладывает слой HUD глаз уменьшенным в столько же раз (размер меток не зависит от крена).
 Мувики HUD, снятые из памяти (*.gfx), и разбор их дерева клипов (hud_tree.txt, hud_strings.txt) лежат в
 `_vrmod_tools\gfxdump` (не в git: это ресурсы игры).
 Классы: TnPlayerPawn, TnAiPawn, TnAiController, TnPlayerControllerCampaign, TnAmmoCratePickupFactory,
