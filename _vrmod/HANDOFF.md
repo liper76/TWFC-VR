@@ -261,6 +261,8 @@ GFxValue: тип +0 (2 bool, 3 number, 4 string, 6 object, 7 array, 8 display ob
 напарниками и синие метки рисует не он) (markerArray, клипы «marker»N«_mc»,
 screenCenterX/Y = 900, Stage 1800 = картинка 1800², _x/_y метки — пиксели экрана). Debug-команды: `gfxget`,
 `gfxset`, `gfxcall [movie:]метод арг…`, `gfxprobe` (src\gfx.cpp).
+Мувики HUD, снятые из памяти (*.gfx), и разбор их дерева клипов (hud_tree.txt, hud_strings.txt) лежат в
+`_vrmod_tools\gfxdump` (не в git: это ресурсы игры).
 Классы: TnPlayerPawn, TnAiPawn, TnAiController, TnPlayerControllerCampaign, TnAmmoCratePickupFactory,
 TnHealthPickupFactory, TnWeaponPickupFactory, TnDroppedPickup*, TnProjectileGrenade*, TnWeaponFlakGrenades.
 
