@@ -17,6 +17,7 @@ static Vec3f g_latchPawn;        // pawn position when the eye pair was latched 
 static bool g_latchValid;
 static volatile float g_turnInput;   // right stick X (-1..1) seen by the XInput proxy
 float g_debugViewOffset[4];          // debug.cpp "viewoffset"
+int g_debugTurret;                   // debug.cpp "turretdbg <0|1|2>": log the turret aim once a second (2: its traces)
 static Vec3f g_latchHead;            // head position in the room (body frame; z: height vs the start) latched for the eye pair
 static float g_latchHeadYaw;         // head yaw relative to the body (radians) latched for the eye pair
 static float g_moveYawDelta;         // head yaw - aim yaw (radians), for the left stick
@@ -37,6 +38,8 @@ void CameraBaseOffset(float& forward, float& up)
 
 float CameraTurretLift() { return g_turretLift; }
 static void UpdateAimHit(void* pc, float ox, float oy, float oz);
+static volatile float g_aimHitMeters;   // UpdateAimHit
+static Vec3 g_aimHitWorld;
 static volatile DWORD g_vehicleAimTick;   // last camera update in vehicle form with gaze aiming
 
 bool CameraInGameplay()
@@ -391,6 +394,21 @@ void CameraOnUpdate(TPOV* pov, void* viewTarget, void* pc, float dt)
             Mat3 m = Mul(body, XrRotToUE(QuatToMat(a.qx, a.qy, a.qz, a.qw)));
             MatToRotator(m, ap, ay, ar);
             turretDir = m.col(0);
+            // the gun turns only so far: the aim stops where it does, so the shots go where the barrel points
+            float lim[4];
+            int bp, by;
+            if (WeaponsTurretLimits(lim, bp, by)) {
+                const float u = 65536.0f / 360.0f;
+                int ry = (short)(uint16_t)((ay - by) & 0xFFFF), rp = (short)(uint16_t)((ap - bp) & 0xFFFF);
+                int cy = ry < (int)(lim[0] * u) ? (int)(lim[0] * u) : ry > (int)(lim[1] * u) ? (int)(lim[1] * u) : ry;
+                int cp = rp < (int)(lim[2] * u) ? (int)(lim[2] * u) : rp > (int)(lim[3] * u) ? (int)(lim[3] * u) : rp;
+                if (cy != ry || cp != rp) {
+                    ay = (by + cy) & 0xFFFF;
+                    ap = (bp + cp) & 0xFFFF;
+                    float yr = ay * kUURotToRad, pr = (short)(uint16_t)ap * kUURotToRad;
+                    turretDir = { cosf(pr) * cosf(yr), cosf(pr) * sinf(yr), sinf(pr) };
+                }
+            }
         } else {
             MatToRotator(Mul(body, XrRotToUE(HandAimXR(eye, gh))), ap, ay, ar);
         }
@@ -408,20 +426,32 @@ void CameraOnUpdate(TPOV* pov, void* viewTarget, void* pc, float dt)
         Vec3 h = XrToUE({ a.px, a.py, a.pz });
         Vec3 hw = Mul(body, Vec3{ h.x * s, h.y * s, h.z * s });
         Vec3 o = { g_latchBase.x + hw.x, g_latchBase.y + hw.y, g_latchBase.z + hw.z };
-        // on a turret the aim starts at its muzzle (the shots leave its end, along the aim it is turned to), or
-        // else past the turret's own gun (the ring still measured from the hands)
+        // on a turret the aim trace and the shots (instant hits; the game traces them from the eyes, weapons.cpp moves
+        // them here) start past the turret - its gun, base, shield and barrels - or they hit it and burst in its
+        // muzzle (the ring still measured from the hands)
         Vec3 start = o;
         if (turret) {
-            float of[3] = { o.x, o.y, o.z }, df[3] = { turretDir.x, turretDir.y, turretDir.z }, mz[3];
-            if (WeaponsTurretMuzzle(of, mz)) {
-                start = { mz[0] + turretDir.x * 10.0f, mz[1] + turretDir.y * 10.0f, mz[2] + turretDir.z * 10.0f };
-            } else {
-                float clear = WeaponsTurretClearance(of, df);
-                start = { o.x + turretDir.x * clear, o.y + turretDir.y * clear, o.z + turretDir.z * clear };
-            }
+            float of[3] = { o.x, o.y, o.z }, df[3] = { turretDir.x, turretDir.y, turretDir.z };
+            float clear = WeaponsTurretClearance(of, df);
+            start = { o.x + turretDir.x * clear, o.y + turretDir.y * clear, o.z + turretDir.z * clear };
+            float sf[3] = { start.x, start.y, start.z };
+            WeaponsTurretShotStart(sf, df);
         }
         GameSetAim(true, ap, ay, start.x, start.y, start.z);
         UpdateAimHit(pc, o.x, o.y, o.z);
+        if (turret && g_debugTurret) {
+            static DWORD at;
+            if (GetTickCount() - at > 1000) {
+                at = GetTickCount();
+                float of[3] = { o.x, o.y, o.z }, df[3] = { turretDir.x, turretDir.y, turretDir.z };
+                Vec3 sv = { start.x - o.x, start.y - o.y, start.z - o.z };
+                Log("turretdbg: hands %.0f %.0f %.0f dir %.2f %.2f %.2f start along %.0f, hit at %.0f (%.0f %.0f %.0f)",
+                    o.x, o.y, o.z, df[0], df[1], df[2], sv.x * df[0] + sv.y * df[1] + sv.z * df[2],
+                    g_aimHitMeters * g_cfg.worldScale, g_aimHitWorld.x, g_aimHitWorld.y, g_aimHitWorld.z);
+                void WeaponsDebugTurretAim(const float o[3], const float dir[3]);
+                WeaponsDebugTurretAim(of, df);
+            }
+        }
         // the game moves the pawn relative to the aim: turn the stick by (head - aim) so "forward" is where you look
         int d = (short)(uint16_t)((headYaw - ay) & 0xFFFF);
         g_moveYawDelta = g_cfg.moveByHead ? d * kUURotToRad : 0.0f;
@@ -431,10 +461,7 @@ void CameraOnUpdate(TPOV* pov, void* viewTarget, void* pc, float dt)
 
 // Where the game's aim trace hits (TnPlayerTargeting = PlayerController+0x568, hit location at +0x28), as a distance
 // from the aim origin in metres: the VR ring is drawn there, so it sits exactly where shots land.
-static volatile float g_aimHitMeters;
 static volatile DWORD g_aimHitTick;
-
-static Vec3 g_aimHitWorld;
 
 static void UpdateAimHit(void* pc, float ox, float oy, float oz)
 {

@@ -212,8 +212,9 @@ bool WeaponsIsAttached(void* mesh, void* comp);
 void WeaponsAttachOriginal(void* mesh, void* comp, unsigned bone, const float* loc, const int* rot, const float* scale);
 void WeaponsDetachOriginal(void* mesh, void* comp);
 bool WeaponsOnTurret();                     // the player is on a mounted turret (its gun in hand)
-float WeaponsTurretClearance(const float o[3], const float dir[3]);   // the aim ray's run through the turret gun
-bool WeaponsTurretMuzzle(const float o[3], float out[3]);            // on a turret: its muzzle (world), near o
+float WeaponsTurretClearance(const float o[3], const float dir[3]);   // the aim ray's run through the turret
+void WeaponsTurretShotStart(const float start[3], const float dir[3]);   // the turret's shots start there (past it)
+bool WeaponsTurretLimits(float lim[4], int& basePitch, int& baseYaw);   // how far the turret's gun turns (degrees)
 float CameraTurretLift();                   // on a turret: how far the eyes are raised (Unreal units, gliding)
 
 // ---- pull.cpp: pickups pulled from a distance with the left hand ----

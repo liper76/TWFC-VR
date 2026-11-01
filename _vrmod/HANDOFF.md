@@ -128,7 +128,7 @@ D3D11/DXGI; мод хукает DXGI Present и отдаёт кадры в OpenX
 | camera.cpp | CameraOnUpdate (из хука UpdateViewTarget): поза головы/глаза → камера, прицел контроллером (GameSetAim), режимы машины, меню/катсцены |
 | vr.cpp | OpenXR: сессия, действия, позы, ввод → геймпад, жесты, колесо оружия, меню настроек (панель + луч), стерео-вывод, HUD-слои, прицел, шейдер блиттера, MockXR-совместимость |
 | ik.cpp | IK рук по контроллерам на скелете пешки, пальцы, тело, оружие на руке, замер робота |
-| weapons.cpp | список оружия, выбор, ближнее оружие (меш на кости руки), удержание пешки после удара |
+| weapons.cpp | список оружия, выбор, ближнее оружие (меш на кости руки), удержание пешки после удара; турели: пределы поворота, вынос начала прицела за турель, перенос трасс выстрелов (хук LineCheck) |
 | grenades.cpp | гранаты как в Alyx: взять с пояса, взвести курком, бросок инерцией руки, своя баллистика |
 | pull.cpp | притягивание пикапов (как Boneworks) через FarMoveActor |
 | melee.cpp | удар по касанию (выключен по умолчанию), список пешек |
@@ -225,7 +225,10 @@ POV; камера = POV−0x324, CameraCache +0x300, PCOwner cam+0x1C8), frame w
 `0x1184FA20` (вызывается 2 раза за тик, рисует вызов из 0x1145B64A), FPerspectiveMatrix `0x10DD5530` (+ операнды
 ближней плоскости `0x11451929`, `0x1145194C`), проверка рендер-потока `0x11002B60` (хвост 0x11002BB2),
 FarMoveActor `0x11689630` (thiscall world, actor, &dest, bTest, bNoCheck, bAttachedMove; снять bStatic actor+0x78
-бит0 и поставить 0x2000 в +0x7C на время), LineCheck `0x1167C9B0` (флаги мира 0x2286, |1 = пешки), AttachComponent
+бит0 и поставить 0x2000 в +0x7C на время), LineCheck `0x1167C9B0` (thiscall world, FCheckResult* hit (actor +4, location +8), source, -, &end, &start,
+flags, &extent, -, -; флаги мира 0x2286, |1 = пешки; выстрелы игрока мгновенного оружия — флаги 0x20bf/0x228bf от
+глаз пешки длиной 30000, трасса прицела 0x28bf; зовёт execTrace `0x114BE9D0` → `0x114BE8E0`; execTraceActors
+`0x114B6620`, execFastTrace `0x114B6C10`), AttachComponent
 `0x1163EF00`, DetachComponent `0x1163B730`, Scaleform CreateStringNode `0x110B9520`, execSetLocation `0x10D339E0`.
 UFunction vtable `0x12904110`, Func +0x68 (скриптовый TakeDamage — пустая заглушка `ret 8`, урон своей системой;
 ProcessEvent не найден). Bink: `_BinkDoFrame@4` в binkw32.dll (детект роликов → виртуальный экран).
@@ -234,10 +237,15 @@ Actor: Location +0xD8, Rotation +0xE4 (int pitch,yaw,roll), Velocity +0xF0, Acce
 WorldInfo +0x98, Instigator +0x94, Components +0x50/+0x54, Touching +0xB4, флаги +0x78/+0x7C, RotationRate +0x168.
 WorldInfo: TimeSeconds +0x338, MaxPhysicsDeltaTime +0x4BC, PhysX scene +0x4C0 (fixed step 1/60, 5 substeps).
 World: Levels +0x34 (TArray), Level Actors +0x28. Pawn: Controller +0x1D4, InvManager +0x424 (инвентарь +0x1C8,
-next +0x1C8), Weapon +0x428, **Health float +0x35C**. PlayerController: Pawn +0x1C8, PlayerInput +0x428.
+next +0x1C8), Weapon +0x428, **Health float +0x35C**, FlashLocation +0x42C (точка последнего попадания). PlayerController: Pawn +0x1C8, PlayerInput +0x428.
 Weapon: обойма +0x2A0, запас +0x2A4, меш +0x208/+0x20C. PrimitiveComponent: Owner +0x34, SceneInfo +0x40,
 LocalToWorld +0x50, флаги +0xF0 (HiddenGame 0x4), Translation +0x160, Scale +0x178. Attachments меша: записи по
 0x30 байт (компонент, FName кости +4, loc +8, rot +0x14). UProperty: offset = (+0x30)>>20, size = ((+0x30>>12)&0xFF)*4.
+Турель (TnMountable*): пределы поворота +0x2B0 (рыскание −90..90 от базы, тангаж −30..25), меш пушки — оружие
++0x20C/+0x208; SkeletalMeshComponent SpaceBases +0x1EC (матрицы 64 байта, перенос +48), Bounds +0xBC.
+Scaleform: GGFxEngine `[0x12B000B4]`, +0x40 TArray FGFxMovie*; FGFxMovie +0x34 GFxMovieView, +0x40 видим, +0x50
+UGFxMovie («Hud_GFX»). Vtable вида: +0x2C SetVariable(path, GFxValue&, 1), +0x38 GetVariable(GFxValue* out, path);
+GFxValue: тип +0 (2 bool, 3 number, 4 string, 6 object, 7 array, 8 display object), значение +8. Только из игрового потока.
 Классы: TnPlayerPawn, TnAiPawn, TnAiController, TnPlayerControllerCampaign, TnAmmoCratePickupFactory,
 TnHealthPickupFactory, TnWeaponPickupFactory, TnDroppedPickup*, TnProjectileGrenade*, TnWeaponFlakGrenades.
 
