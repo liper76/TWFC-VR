@@ -388,6 +388,8 @@ void UpdateSwitch(uint8_t* pawn, DWORD now)
 // for a shot comes at full size). Never made bigger (a hidden gun's flashes stay hidden).
 const uintptr_t kGWorld = 0x12B10A9C;
 const int kWorldLevels = 0x34, kLevelActors = 0x28, kActorLocation = 0xD8, kActorComponents = 0x50, kActorInstigator = 0x94;
+const int kActorRotation = 0xE4;
+const int kMountableLimits = 0x2B0;   // TnMountable: yaw min, max (from its own), pitch min, max - degrees
 const int kWeaponMesh = 0x20C, kWeaponMesh2 = 0x208;
 const float kTurretRange = 800.0f;
 uint8_t* g_turrets[8];
@@ -550,6 +552,8 @@ void WeaponsInstall()
         Log("weapons: attach/detach hooks installed");
     else
         Log("weapons: attach/detach hooks FAILED");
+    bool InstallShotHook();
+    Log(InstallShotHook() ? "weapons: turret shot hook installed" : "weapons: turret shot hook FAILED");
 }
 
 void WeaponsUpdate(void* pawnPtr)
@@ -599,6 +603,137 @@ void WeaponsDebugTurretFx()
     }
 }
 
+// debug "turretdbg 1": on a turret, once a second, what lies along the aim ray (o, unit dir): the gun's meshes and
+// particle systems, the mountable turret's components (along: distance down the ray, off: distance from it).
+static void LogAlong(const char* what, const wchar_t* name, const float* p, const float* ext, const float o[3], const float dir[3])
+{
+    float v[3] = { p[0] - o[0], p[1] - o[1], p[2] - o[2] };
+    float along = v[0] * dir[0] + v[1] * dir[1] + v[2] * dir[2];
+    float off2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2] - along * along;
+    if (ext) Log("turretdbg:   %s %ls along %.0f off %.0f extent %.0f %.0f %.0f", what, name, along, sqrtf(fmaxf(off2, 0.0f)), ext[0], ext[1], ext[2]);
+    else Log("turretdbg:   %s %ls along %.0f off %.0f", what, name, along, sqrtf(fmaxf(off2, 0.0f)));
+}
+
+static float GunTipAlong(uint8_t* w, const float o[3], const float dir[3], int* boneOut = nullptr);
+
+void WeaponsDebugTurretAim(const float o[3], const float dir[3])
+{
+    __try {
+        uint8_t* w = g_pawn ? *(uint8_t**)((uint8_t*)g_pawn + kPawnWeapon) : nullptr;
+        if (!w) return;
+        Log("turretdbg: weapon %ls, on %d", NameOf(*(unsigned*)(w + 4)), (int)g_onTurret);
+        int tipBone = -1;
+        float tip = GunTipAlong(w, o, dir, &tipBone);
+        Log("turretdbg:   barrels' end (bone %d) along %.0f", tipBone, tip);
+        uint8_t* meshes[2] = { *(uint8_t**)(w + kWeaponMesh), *(uint8_t**)(w + kWeaponMesh2) };
+        for (int m = 0; m < 2; m++) {
+            if (!meshes[m] || (m == 1 && meshes[1] == meshes[0])) continue;
+            const float* b = (const float*)(meshes[m] + 0xBC);
+            LogAlong("mesh", NameOf(*(unsigned*)(meshes[m] + 4)), b, b + 3, o, dir);
+            uint8_t* att = *(uint8_t**)(meshes[m] + kMeshAttachments);
+            int count = *(int*)(meshes[m] + kMeshAttachments + 4);
+            for (int i = 0; att && i < count && i < 32; i++) {
+                uint8_t* c = *(uint8_t**)(att + i * 0x30);
+                const wchar_t* nm = c ? NameOf(*(unsigned*)(c + 4)) : nullptr;
+                if (!nm) continue;
+                const wchar_t* bone = NameOf(*(unsigned*)(att + i * 0x30 + 4));
+                Log("turretdbg:   attachment %ls at bone %ls", nm, bone ? bone : L"-");
+                LogAlong("  at", nm, (const float*)(c + 0x50 + 0x30), nullptr, o, dir);
+            }
+        }
+        for (int i = 0; i < g_turretCount; i++) {
+            uint8_t* a = g_turrets[i];
+            const wchar_t* tn = NameOf(*(unsigned*)(a + 4));
+            LogAlong("actor", tn ? tn : L"?", (const float*)(a + kActorLocation), nullptr, o, dir);
+            uint8_t** comps = *(uint8_t***)(a + kActorComponents);
+            int cn = *(int*)(a + kActorComponents + 4);
+            for (int k = 0; comps && k < cn && k < 32; k++) {
+                const wchar_t* cnm = comps[k] ? NameOf(*(unsigned*)(comps[k] + 4)) : nullptr;
+                if (cnm) LogAlong("  comp", cnm, (const float*)(comps[k] + 0xBC), (const float*)(comps[k] + 0xBC + 12), o, dir);
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("turretdbg: failed");
+    }
+}
+
+// The turret's shots: the game traces them by the pawn from its eyes along the aim - behind the turret, so tilted, they
+// hit its own gun a step away (and burst in its muzzle). The aim's start past the turret (camera.cpp: past its bounds
+// and barrels) takes their place in the world's line check (0x1167C9B0, what Actor.Trace calls): the player's long
+// traces from near the pawn along the aim start there instead. The aim ring's trace already starts there.
+typedef int(__fastcall* PFN_WorldLineCheck)(void* world, void* edx, uint8_t* hit, uint8_t* source, void* unused,
+                                             const float* end, const float* start, unsigned flags, const float* extent,
+                                             void* a, void* b);
+static PFN_WorldLineCheck g_origWorldLineCheck;
+static float g_shotStart[3], g_shotDir[3];
+static volatile DWORD g_shotTick;
+
+void WeaponsTurretShotStart(const float start[3], const float dir[3])
+{
+    memcpy(g_shotStart, start, sizeof g_shotStart);
+    memcpy(g_shotDir, dir, sizeof g_shotDir);
+    g_shotTick = GetTickCount();
+}
+
+static int __fastcall HookWorldLineCheck(void* world, void* edx, uint8_t* hit, uint8_t* source, void* unused,
+                                         const float* end, const float* start, unsigned flags, const float* extent,
+                                         void* a, void* b)
+{
+    if (!g_onTurret || !g_pawn || source != (uint8_t*)g_pawn || GetCurrentThreadId() != GameThreadId())
+        return g_origWorldLineCheck(world, edx, hit, source, unused, end, start, flags, extent, a, b);
+    float s2[3], e2[3];
+    bool moved = false;
+    __try {
+        const float* p = (const float*)((uint8_t*)g_pawn + kActorLocation);
+        float d[3] = { start[0] - p[0], start[1] - p[1], start[2] - p[2] };
+        float l[3] = { end[0] - start[0], end[1] - start[1], end[2] - start[2] };
+        float len = sqrtf(l[0] * l[0] + l[1] * l[1] + l[2] * l[2]);
+        float along = len > 0.0f ? (l[0] * g_shotDir[0] + l[1] * g_shotDir[1] + l[2] * g_shotDir[2]) / len : 0.0f;
+        float o[3] = { start[0] - g_shotStart[0], start[1] - g_shotStart[1], start[2] - g_shotStart[2] };
+        if (GetTickCount() - g_shotTick < 250 && len > 5000.0f && along > 0.995f &&
+            d[0] * d[0] + d[1] * d[1] + d[2] * d[2] < 400.0f * 400.0f && o[0] * o[0] + o[1] * o[1] + o[2] * o[2] > 1.0f) {
+            for (int k = 0; k < 3; k++) { s2[k] = g_shotStart[k]; e2[k] = g_shotStart[k] + l[k]; }
+            moved = true;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { moved = false; }
+    if (moved) { start = s2; end = e2; }
+    int r = g_origWorldLineCheck(world, edx, hit, source, unused, end, start, flags, extent, a, b);
+    // debug "turretdbg 2": the player's long traces (where its shots go and what they hit; FCheckResult: actor +4,
+    // location +8)
+    extern int g_debugTurret;
+    if (g_debugTurret != 2) return r;
+    __try {
+        float l[3] = { end[0] - start[0], end[1] - start[1], end[2] - start[2] };
+        float len = sqrtf(l[0] * l[0] + l[1] * l[1] + l[2] * l[2]);
+        if (len < 1000.0f) return r;
+        static DWORD at;
+        static int n;
+        DWORD now = GetTickCount();
+        if (now - at > 1000) { at = now; n = 0; }
+        if (++n > 12) return r;
+        if (!r && hit) {
+            uint8_t* ha = *(uint8_t**)(hit + 4);
+            const float* hl = (const float*)(hit + 8);
+            const wchar_t* hn = ha ? NameOf(*(unsigned*)(ha + 4)) : nullptr;
+            float hd[3] = { hl[0] - start[0], hl[1] - start[1], hl[2] - start[2] };
+            Log("turretdbg: trace flags %x%s from %.0f %.0f %.0f dir %.2f %.2f %.2f: hit %ls at %.0f (%.0f %.0f %.0f)",
+                flags, moved ? " (moved)" : "", start[0], start[1], start[2], l[0] / len, l[1] / len, l[2] / len,
+                hn ? hn : L"-", sqrtf(hd[0] * hd[0] + hd[1] * hd[1] + hd[2] * hd[2]), hl[0], hl[1], hl[2]);
+        } else {
+            Log("turretdbg: trace flags %x%s from %.0f %.0f %.0f dir %.2f %.2f %.2f: %s", flags, moved ? " (moved)" : "",
+                start[0], start[1], start[2], l[0] / len, l[1] / len, l[2] / len, r ? "clear" : "hit");
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return r;
+}
+
+bool InstallShotHook()
+{
+    const uintptr_t kWorldLineCheck = 0x1167C9B0;
+    return MH_CreateHook((void*)kWorldLineCheck, (void*)HookWorldLineCheck, (void**)&g_origWorldLineCheck) == MH_OK &&
+           MH_EnableHook((void*)kWorldLineCheck) == MH_OK;
+}
+
 void WeaponsGetList(WeaponList& out)
 {
     std::lock_guard<std::mutex> lock(g_listMutex);
@@ -625,9 +760,55 @@ int WeaponsMeleeHeld() { return g_meleeHeld; }
 
 bool WeaponsOnTurret() { return g_onTurret; }
 
-// On a mounted turret: how far the ray from o along unit dir runs inside the turret gun's bounds (world units; 0:
-// not on one, or the ray misses it). The aim starts past it: from the handles, raised high, the trace hit the
-// turret's own barrel - shots burst in it and the ring sat on it.
+// The mountable turret the player is on: the nearest TnMountable (null: none)
+static uint8_t* MountedTurret()
+{
+    const float* p = (const float*)((uint8_t*)g_pawn + kActorLocation);
+    uint8_t* best = nullptr;
+    float bd = 400.0f * 400.0f;
+    for (int i = 0; i < g_turretCount; i++) {
+        const wchar_t* tn = NameOf(*(unsigned*)(g_turrets[i] + 4));
+        if (!tn || wcsncmp(tn, L"TnMountable", 11)) continue;
+        const float* q = (const float*)(g_turrets[i] + kActorLocation);
+        float dx = q[0] - p[0], dy = q[1] - p[1];
+        if (dx * dx + dy * dy < bd) { bd = dx * dx + dy * dy; best = g_turrets[i]; }
+    }
+    return best;
+}
+
+// The turret gun's farthest bone down the ray from o along unit dir - its barrels' ends, as the gun is turned now - in
+// world units (0: none). Bones off the ray by more than the gun's size are not its barrels.
+const int kCompSpaceBases = 0x1EC;   // SkeletalMeshComponent: TArray<FMatrix> component-space bone transforms
+static float GunTipAlong(uint8_t* w, const float o[3], const float dir[3], int* boneOut)
+{
+    float best = 0.0f;
+    uint8_t* meshes[2] = { *(uint8_t**)(w + kWeaponMesh), *(uint8_t**)(w + kWeaponMesh2) };
+    for (int m = 0; m < 2; m++) {
+        if (!meshes[m] || (m == 1 && meshes[1] == meshes[0])) continue;
+        const float* l2w = (const float*)(meshes[m] + 0x50);   // LocalToWorld: rows X, Y, Z, translation
+        const float* bases = *(const float**)(meshes[m] + kCompSpaceBases);
+        int n = *(int*)(meshes[m] + kCompSpaceBases + 4);
+        for (int b = 0; bases && b < n && b < 256; b++) {
+            const float* t = bases + b * 16 + 12;
+            float v[3];
+            for (int k = 0; k < 3; k++) v[k] = t[0] * l2w[k] + t[1] * l2w[4 + k] + t[2] * l2w[8 + k] + l2w[12 + k] - o[k];
+            float along = v[0] * dir[0] + v[1] * dir[1] + v[2] * dir[2];
+            float off2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2] - along * along;
+            if (off2 < 400.0f * 400.0f && along < 2000.0f && along > best) {
+                best = along;
+                if (boneOut) *boneOut = b;
+            }
+        }
+    }
+    return best;
+}
+
+// On a mounted turret: how far down the ray from o along unit dir the shots must start to clear the turret - past its
+// bounds (its gun's meshes and the mountable's own: base, shield, barrels; not its touch cylinder) and past its
+// barrels' ends - in world units (0: not on one). The shots are traced from the aim's start, and from the handles (or
+// from the muzzle - its flash's place lags the gun as it turns; or past the bounds alone - tilted, the barrels reach
+// past them) the trace hit the turret itself: the shots burst in its barrel and the ring sat on it.
+const float kTurretTipMargin = 60.0f;
 float WeaponsTurretClearance(const float o[3], const float dir[3])
 {
     if (!g_onTurret || !g_pawn) return 0.0f;
@@ -635,8 +816,18 @@ float WeaponsTurretClearance(const float o[3], const float dir[3])
     __try {
         uint8_t* w = *(uint8_t**)((uint8_t*)g_pawn + kPawnWeapon);
         if (!w) return 0.0f;
-        uint8_t* meshes[2] = { *(uint8_t**)(w + kWeaponMesh), *(uint8_t**)(w + kWeaponMesh2) };
-        for (uint8_t* m : meshes) {
+        uint8_t* meshes[2 + 32] = { *(uint8_t**)(w + kWeaponMesh), *(uint8_t**)(w + kWeaponMesh2) };
+        int count = 2;
+        if (uint8_t* t = MountedTurret()) {
+            uint8_t** comps = *(uint8_t***)(t + kActorComponents);
+            int cn = *(int*)(t + kActorComponents + 4);
+            for (int k = 0; comps && k < cn && k < 32; k++) {
+                const wchar_t* cnm = comps[k] ? NameOf(*(unsigned*)(comps[k] + 4)) : nullptr;
+                if (cnm && wcsstr(cnm, L"MeshComponent")) meshes[count++] = comps[k];
+            }
+        }
+        for (int i = 0; i < count; i++) {
+            uint8_t* m = meshes[i];
             if (!m) continue;
             const float* b = (const float*)(m + 0xBC);   // world bounds: origin, box extent
             float tNear = -1e9f, tFar = 1e9f;
@@ -649,44 +840,31 @@ float WeaponsTurretClearance(const float o[3], const float dir[3])
             }
             if (tFar >= fmaxf(tNear, 0.0f) && tFar < 1000.0f) best = fmaxf(best, tFar + 5.0f);
         }
+        float tip = GunTipAlong(w, o, dir);
+        if (tip > 0.0f) best = fmaxf(best, tip + kTurretTipMargin);
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0.0f; }
     return best;
 }
 
-// On a mounted turret: its muzzle (world) - the middle of the particle systems (muzzle flashes) attached to the
-// turret gun's meshes, which sit at its barrels' ends. The shots start there, so they leave the turret's end
-// along where it points.
-bool WeaponsTurretMuzzle(const float o[3], float out[3])
+// On a mounted turret: how far its gun turns - yaw from the turret's own and pitch, min and max, in degrees - and the
+// turret's own rotation (pitch, yaw; Unreal units). The gun stops at them (the ion turret: yaw -90..90, pitch
+// -30..25); an aim past them traced away from the gun and the shots burst in its muzzle.
+bool WeaponsTurretLimits(float lim[4], int& basePitch, int& baseYaw)
 {
     if (!g_onTurret || !g_pawn) return false;
     __try {
-        uint8_t* w = *(uint8_t**)((uint8_t*)g_pawn + kPawnWeapon);
-        if (!w) return false;
-        uint8_t* meshes[2] = { *(uint8_t**)(w + kWeaponMesh), *(uint8_t**)(w + kWeaponMesh2) };
-        float sum[3] = {};
-        int n = 0;
-        for (int m = 0; m < 2; m++) {
-            if (!meshes[m] || (m == 1 && meshes[1] == meshes[0])) continue;
-            uint8_t* att = *(uint8_t**)(meshes[m] + kMeshAttachments);
-            int count = *(int*)(meshes[m] + kMeshAttachments + 4);
-            for (int i = 0; att && i < count && i < 32; i++) {
-                uint8_t* c = *(uint8_t**)(att + i * 0x30);
-                const wchar_t* nm = c ? NameOf(*(unsigned*)(c + 4)) : nullptr;
-                if (!nm || !wcsstr(nm, L"ParticleSystemComponent")) continue;
-                const float* t = (const float*)(c + 0x50 + 0x30);   // LocalToWorld's translation
-                float dx = t[0] - o[0], dy = t[1] - o[1], dz = t[2] - o[2];
-                if (dx * dx + dy * dy + dz * dz > 800.0f * 800.0f) continue;   // (not placed yet)
-                for (int k = 0; k < 3; k++) sum[k] += t[k];
-                n++;
-            }
-        }
-        if (!n) return false;
-        for (int k = 0; k < 3; k++) out[k] = sum[k] / n;
+        uint8_t* t = MountedTurret();
+        if (!t) return false;
+        const float* l = (const float*)(t + kMountableLimits);
+        if (!(l[0] >= -180.0f && l[0] < l[1] && l[1] <= 180.0f && l[2] >= -90.0f && l[2] < l[3] && l[3] <= 90.0f))
+            return false;
+        for (int k = 0; k < 4; k++) lim[k] = l[k];
+        basePitch = *(int*)(t + kActorRotation);
+        baseYaw = *(int*)(t + kActorRotation + 4);
         static uint8_t* logged;
-        if (logged != w) {
-            logged = w;
-            Log("weapons: turret muzzle from %d particle systems, %.0f units from the hands", n,
-                sqrtf((out[0] - o[0]) * (out[0] - o[0]) + (out[1] - o[1]) * (out[1] - o[1]) + (out[2] - o[2]) * (out[2] - o[2])));
+        if (logged != t) {
+            logged = t;
+            Log("weapons: turret %ls turns yaw %.0f..%.0f, pitch %.0f..%.0f", NameOf(*(unsigned*)(t + 4)), l[0], l[1], l[2], l[3]);
         }
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
