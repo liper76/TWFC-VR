@@ -24,7 +24,7 @@ const int kActorFlags2 = 0x7C;                // bit 0x2000: movable (FarMoveAct
 
 typedef int(__thiscall* FarMoveFn)(void* world, void* actor, const Vec3f* dest, int test, int noCheck, int attached);
 
-struct Pickup { uint8_t* actor; Vec3f loc; bool factory, weapon; };
+struct Pickup { uint8_t* actor; Vec3f loc, aim; bool factory, weapon; };   // aim: the drawn item (a factory's floats above it)
 volatile long g_grabNow;    // vr.cpp: the pointing hand's grip was squeezed - pull now
 DWORD g_interactUntil;      // a pulled weapon arrived: the interact button is held until then (the game takes it so)
 Pickup g_list[64];
@@ -69,9 +69,11 @@ bool MoveActor(uint8_t* actor, const Vec3f& dest, bool noCheck)
 // A factory whose item was taken hides it: available only while one of its meshes or effects is drawn (not
 // HiddenGame - flags +0xF0 bit 2 - and in the scene, +0x40). The collision cylinder is always hidden.
 // Where the item is drawn, relative to the actor: a factory's mesh floats above its base (the actor's place), so
-// the actor goes to the hand minus this to put the item itself in the hand. Centre of the drawn meshes' bounds.
-Vec3f DrawnOffset(uint8_t* a)
+// the actor goes to the hand minus this to put the item itself in the hand. Centre of the drawn meshes' bounds
+// (radius: of those bounds, Unreal units).
+Vec3f DrawnOffset(uint8_t* a, float* radius = nullptr)
 {
+    if (radius) *radius = 30.0f;
     uint8_t** comps = *(uint8_t***)(a + 0x50);
     int n = *(int*)(a + 0x54);
     const Vec3f& loc = *(Vec3f*)(a + kActorLocation);
@@ -81,7 +83,10 @@ Vec3f DrawnOffset(uint8_t* a)
         if (!nm || !wcsstr(nm, L"MeshComponent") || (*(uint32_t*)(c + 0xF0) & 0x4) || !*(void**)(c + 0x40)) continue;
         const float* b = (const float*)(c + 0xBC);   // FBoxSphereBounds (world): origin, extent, radius
         Vec3f d = { b[0] - loc.x, b[1] - loc.y, b[2] - loc.z };
-        if (b[6] > 1.0f && d.x * d.x + d.y * d.y + d.z * d.z < 300.0f * 300.0f) return d;
+        if (b[6] > 1.0f && d.x * d.x + d.y * d.y + d.z * d.z < 300.0f * 300.0f) {
+            if (radius) *radius = fminf(b[6], 150.0f);
+            return d;
+        }
     }
     return { 0, 0, 0 };
 }
@@ -122,6 +127,8 @@ void Scan(bool log)
             Pickup& p = g_list[n++];
             p.actor = a;
             p.loc = *(Vec3f*)(a + kActorLocation);
+            Vec3f off = DrawnOffset(a);
+            p.aim = { p.loc.x + off.x, p.loc.y + off.y, p.loc.z + off.z };
             p.factory = wcsstr(name, L"Factory") != nullptr;
             p.weapon = wcsstr(name, L"Weapon") != nullptr;
             if (log) Log("pull: %ls %p at %.0f %.0f %.0f", name, a, p.loc.x, p.loc.y, p.loc.z);
@@ -282,8 +289,9 @@ void Aim(uint8_t* pawn, float dt, DWORD now)
     float range = g_cfg.pullRange * g_cfg.worldScale, cone = cosf(g_cfg.pullConeDeg * 0.0174533f);
     int best = -1;
     float bestCos = cone;
+    // (at the item as drawn: a factory's floats above its base - pointing at the base missed it)
     for (int i = 0; i < g_count; i++) {
-        Vec3f l = g_list[i].loc;
+        Vec3f l = g_list[i].aim;
         float d[3] = { l.x - pos[0], l.y - pos[1], l.z - pos[2] };
         float len = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
         if (len < 80.0f || len > range) continue;
@@ -292,7 +300,7 @@ void Aim(uint8_t* pawn, float dt, DWORD now)
     }
     // not through walls: the line from the hand to (just short of) the pickup must be free
     if (best >= 0) {
-        Vec3f l = g_list[best].loc;
+        Vec3f l = g_list[best].aim;
         Vec3f from = { pos[0], pos[1], pos[2] };
         float d[3] = { l.x - pos[0], l.y - pos[1], l.z - pos[2] };
         float len = fmaxf(sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]), 1.0f);
@@ -328,7 +336,7 @@ void Aim(uint8_t* pawn, float dt, DWORD now)
     // the flick (or a squeeze of the grip: PullGrab): the hand jerks back, away from the pickup
     for (int i = 0; i < g_count; i++) {
         if (g_list[i].actor != g_target) continue;
-        Vec3f l = g_list[i].loc;
+        Vec3f l = g_list[i].aim;
         float d[3] = { l.x - pos[0], l.y - pos[1], l.z - pos[2] };
         float len = fmaxf(sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]), 1.0f);
         float away = -(g_vel[0] * d[0] + g_vel[1] * d[1] + g_vel[2] * d[2]) / len / g_cfg.worldScale;
@@ -414,6 +422,21 @@ bool PullGrab(int h)
 }
 
 bool PullWantInteract() { return GetTickCount() < g_interactUntil; }
+
+// The pickup a squeeze of the pointing hand's grip would pull (game thread, after PullUpdate): the centre of what is
+// drawn and its radius, Unreal units - vr.cpp rings it (a tick alone was easy to miss: the hand grabbed at air).
+bool PullMarkWorld(float centre[3], float& radius)
+{
+    if (!g_cfg.pull || !g_cfg.pullMark || !g_target || g_fly.actor || g_hand < 0) return false;
+    __try {
+        const Vec3f& loc = *(Vec3f*)(g_target + kActorLocation);
+        Vec3f off = DrawnOffset(g_target, &radius);
+        centre[0] = loc.x + off.x; centre[1] = loc.y + off.y; centre[2] = loc.z + off.z;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
 
 // 1 = log the pickups, 2 = pull the nearest (3: and re-place the pawn), 4 = log where the left hand points,
 // 5 = a flick now (pulls what the hand points at)

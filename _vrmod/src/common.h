@@ -68,6 +68,7 @@ struct Config {
     float pullSpeed = 0.0f;         // m/s of a jerk back that also pulls (0 = off: point and squeeze the grip)
     int   pullAutoTake = 1;         // a pulled weapon is taken (the interact button held for it) when it arrives
     int   pullTrace = 1;            // only pickups in sight (not through walls)
+    int   pullMark = 1;             // a ring around the pickup a squeeze of the grip would pull
     int   twoHanded = 1;            // left grip near the weapon's front = hold it with both hands
     float twoHandReach = 0.25f;     // metres in front of the right controller where the left hand grabs
     float twoHandRadius = 0.15f;    // how close the left hand must be to that point
@@ -220,6 +221,8 @@ float CameraTurretLift();                   // on a turret: how far the eyes are
 // ---- pull.cpp: pickups pulled from a distance with the left hand ----
 void PullUpdate(void* pawn);                // game thread, once per frame (null = not in first person)
 void PullDebug(int what, void* actor = nullptr);   // 1 = log the pickups, 2 = pull the nearest one (or actor)
+bool PullMarkWorld(float centre[3], float& radius);   // the pickup a squeeze would pull: its drawn centre and radius (Unreal units)
+void VRSetPullMark(bool on, const float local[3], float radiusM);   // vr.cpp: ring around it (room/local space, metres)
 bool MoveActorTo(void* actor, const float pos[3], bool noCheck);   // UWorld::FarMoveActor (collision moves along)
 // the world's line check (FastTrace flags 0x2286 = world geometry; | 1 = pawns too); source actor is ignored
 bool WorldLineClear(void* source, const float from[3], const float to[3], unsigned flags);
