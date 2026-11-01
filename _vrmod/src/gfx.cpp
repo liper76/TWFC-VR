@@ -2,10 +2,13 @@
 // "_root.hud_mc.topLeft_mc._visible" in the HUD movie (Hud_GFX). The game advances its movies on the game thread, so
 // the requests are queued and run there each frame (GfxTick).
 #include "common.h"
+#include "MinHook.h"
 #include <string>
 #include <vector>
 #include <mutex>
 #include <stdlib.h>
+
+extern volatile long g_traceFrames;   // d3dtrace.cpp
 
 namespace {
 
@@ -61,6 +64,22 @@ void* FindView(const wchar_t* name)
         if (on && !_wcsicmp(on, name)) return *(void**)(movies[i] + kMovieView);
     }
     return nullptr;
+}
+
+// The name of the movie with this view (debug)
+const wchar_t* ViewName(void* view)
+{
+    uint8_t* eng = *(uint8_t**)kGFxEngine;
+    if (!eng) return L"?";
+    uint8_t** movies = *(uint8_t***)(eng + kEngineMovies);
+    int n = *(int*)(eng + kEngineMovies + 4);
+    for (int i = 0; movies && i < n && i < 64; i++) {
+        if (!movies[i] || *(void**)(movies[i] + kMovieView) != view) continue;
+        uint8_t* obj = *(uint8_t**)(movies[i] + kMovieObject);
+        const wchar_t* on = obj ? NameOf(*(unsigned*)(obj + 4)) : nullptr;
+        return on ? on : L"?";
+    }
+    return L"(not listed)";
 }
 
 bool CallGet(void* view, const char* path, GFxValue* out)
@@ -203,6 +222,154 @@ DWORD WINAPI ProbeThread(LPVOID)
     return 0;   // the thunks stay: a call may still be passing through one
 }
 
+// ---- the HUD movie drawn in layers ----
+// While the HUD is split off (d3dtrace.cpp) the HUD movie is drawn up to three times, each time with only the parts
+// of that layer visible (their _visible set before and given back after; nothing of the game runs in between):
+// - kHudEyes: the markers (waypoints, names, lock-on marks) - drawn by the game for each eye's view, so they sit at
+//   their place in depth in the eye images;
+// - kHudPanel: the rest but the crosshair - the floating panel; Minimal: only the top corners (health, abilities,
+//   weapon, ammo, grenades) and, with Prompts, the button hints below the crosshair;
+// - kHudReticle: the crosshair and its hit marks - the VR reticle (ReticleStyle=1).
+// The parts are found by name or, unnamed (instanceN is numbered at run time), by their depth in the timeline.
+// Other movies (the mouse cursor) go on the panel. Off the game thread (threaded rendering) the HUD movie goes on
+// the panel whole.
+const uintptr_t kDisplay = 0x110432C0;   // GFxMovieView::Display (vtable +0x94), shared by the movies' views
+typedef void(__fastcall* DisplayFn)(void* view, void* edx);
+DisplayFn g_origDisplay;
+
+enum {
+    cMarkers, cIncap, cHud,
+    cZoom, cTopLeft, cBottomLeft, cTopRight, cBottomRight, cMidCenter, cTopCenter, cMidLeft, cMidRight, cBottomCenter,
+    cCrossGroup, cMidCenter2, cMidCenter3,
+    cIncDamage, cHint1, cHint2, cHint3, cFeedback, cAmmoWarn, cLeftOfCross, cCross, cAboveCross,
+    kClips
+};
+const struct { int parent; const char* name; int depth; } kClipDef[kClips] = {
+    { -1, nullptr, 1 },                     // the marker manager
+    { -1, "incapacitated_mc", 0 },
+    { -1, "hud_mc", 0 },
+    { cHud, "zoomScopeAttachPoint_mc", 0 },  // the scope overlay of zoomed aiming
+    { cHud, "topLeft_mc", 0 },               // health, ability
+    { cHud, "bottomLeft_mc", 0 },
+    { cHud, "topRight_mc", 0 },              // weapon, ammo, ability, grenades
+    { cHud, "bottomRight_mc", 0 },
+    { cHud, "midCenter_mc", 0 },
+    { cHud, "topCenter_mc", 0 },             // objective time, announcements
+    { cHud, "midLeft_mc", 0 },
+    { cHud, "midRight_mc", 0 },
+    { cHud, "bottomCenter_mc", 0 },          // notifications
+    { cMidCenter, nullptr, 1 },              // the crosshair's group: the crosshair and the anchors around it
+    { cMidCenter, nullptr, 19 },
+    { cMidCenter, nullptr, 21 },
+    { cCrossGroup, "increaseDamageAnchor_mc", 0 },
+    { cCrossGroup, nullptr, 3 },             // anchors below the crosshair (y 140, 150, 100): button hints
+    { cCrossGroup, nullptr, 5 },
+    { cCrossGroup, nullptr, 7 },
+    { cCrossGroup, "weaponFeedback_mc", 0 }, // hit marks
+    { cCrossGroup, nullptr, 11 },            // right of the crosshair: "LOW AMMO", "X RELOAD"
+    { cCrossGroup, nullptr, 13 },            // left of it
+    { cCrossGroup, "crosshairAnchor_mc", 0 },
+    { cCrossGroup, nullptr, 17 },            // above it
+};
+std::string g_visPath[kClips];   // "<clip>._visible"
+void* g_clipsView;               // the HUD view they were found in
+DWORD g_clipsFailedAt;
+
+bool FindClips(void* view)
+{
+    if (view == g_clipsView) return true;
+    if (g_clipsFailedAt && GetTickCount() - g_clipsFailedAt < 2000) return false;
+    std::string path[kClips];
+    for (int i = 0; i < kClips; i++) {
+        const std::string parent = kClipDef[i].parent < 0 ? "_root" : path[kClipDef[i].parent];
+        if (kClipDef[i].name) {
+            path[i] = parent + "." + kClipDef[i].name;
+        } else {
+            GFxArg a = {};
+            a.type = 3;
+            a.n = kClipDef[i].depth - 16384;   // (AS2 depth of a timeline object)
+            GFxValue r = {};
+            if (CallInvoke(view, (parent + ".getInstanceAtDepth").c_str(), &r, &a, 1) && (r.type & 0xF) == 4 && r.s)
+                path[i] = r.s;
+            if (!strncmp(path[i].c_str(), "_level0.", 8)) path[i] = "_root." + path[i].substr(8);
+        }
+        GFxValue v = {};
+        if (path[i].empty() || !CallGet(view, (path[i] + "._visible").c_str(), &v) || (v.type & 0xF) != 2) {
+            if (!g_clipsFailedAt) Log("gfx: HUD part %d (%s) not found: no layers", i, path[i].c_str());
+            g_clipsFailedAt = GetTickCount() | 1;
+            return false;
+        }
+    }
+    for (int i = 0; i < kClips; i++) g_visPath[i] = path[i] + "._visible";
+    g_clipsView = view;
+    g_clipsFailedAt = 0;
+    Log("gfx: HUD layers: markers %s, crosshair %s", path[cMarkers].c_str(), path[cCross].c_str());
+    return true;
+}
+
+void __fastcall HookDisplay(void* view, void* edx)
+{
+    if (!HudSplitActive()) { g_origDisplay(view, edx); return; }
+    void* hud = FindView(L"Hud_GFX");
+    if (view != hud || GetCurrentThreadId() != GameThreadId() || !FindClips(view)) {
+        if (g_traceFrames > 0)
+            Log("trace: Display of %ls view %p (HUD %p), thread %lu", ViewName(view), view, hud, GetCurrentThreadId());
+        HudSetLayer(kHudPanel);
+        g_origDisplay(view, edx);
+        D3D9Flush();
+        HudSetLayer(kHudEyes);
+        return;
+    }
+    bool orig[kClips], cur[kClips];
+    for (int i = 0; i < kClips; i++) {
+        GFxValue v = {};
+        if (!CallGet(view, g_visPath[i].c_str(), &v) || (v.type & 0xF) != 2) {   // (the movie changed)
+            g_clipsView = nullptr;
+            HudSetLayer(kHudPanel);
+            g_origDisplay(view, edx);
+            D3D9Flush();
+            HudSetLayer(kHudEyes);
+            return;
+        }
+        orig[i] = cur[i] = v.b;
+    }
+    auto setVisible = [&](int i, bool on) {
+        if (cur[i] == on) return;
+        GFxValue v = {};
+        v.type = 2;
+        v.b = on;
+        CallSet(view, g_visPath[i].c_str(), &v);
+        cur[i] = on;
+    };
+    // draws the movie into a layer with these parts hidden (the others as the game has them)
+    auto pass = [&](int layer, const std::vector<int>& hidden) {
+        bool hide[kClips] = {};
+        for (int i : hidden) hide[i] = true;
+        for (int i = 0; i < kClips; i++) setVisible(i, orig[i] && !hide[i]);
+        HudSetLayer(layer);
+        g_origDisplay(view, edx);
+        D3D9Flush();   // (dgVoodoo holds the last draw back until the next one: let it land in this layer)
+    };
+    bool player = CameraPlayerView();
+    bool minimal = g_cfg.hudMinimal && player;
+    bool eyes = g_cfg.hudMarkersInEyes && player;
+    if (eyes) pass(kHudEyes, { cIncap, cHud });
+    std::vector<int> panelHidden = { cZoom, cIncDamage, cFeedback, cCross };
+    if (eyes || minimal) panelHidden.push_back(cMarkers);
+    if (minimal)
+        for (int i : { cIncap, cBottomLeft, cBottomRight, cTopCenter, cMidLeft, cMidRight, cBottomCenter, cMidCenter2, cMidCenter3,
+                       cAmmoWarn, cLeftOfCross, cAboveCross })
+            panelHidden.push_back(i);
+    if (minimal && !g_cfg.hudPrompts)
+        for (int i : { cHint1, cHint2, cHint3 }) panelHidden.push_back(i);
+    pass(kHudPanel, panelHidden);
+    if (g_cfg.reticleStyle == 1)
+        pass(kHudReticle, { cMarkers, cIncap, cZoom, cTopLeft, cBottomLeft, cTopRight, cBottomRight, cTopCenter, cMidLeft, cMidRight,
+                            cBottomCenter, cMidCenter2, cMidCenter3, cHint1, cHint2, cHint3, cAmmoWarn, cLeftOfCross, cAboveCross });
+    for (int i = 0; i < kClips; i++) setVisible(i, orig[i]);
+    HudSetLayer(kHudEyes);
+}
+
 }  // namespace
 
 void GfxProbe() { CloseHandle(CreateThread(nullptr, 0, ProbeThread, nullptr, 0, nullptr)); }
@@ -222,4 +389,11 @@ void GfxTick()
         q.swap(g_queue);
     }
     for (auto& l : q) Run(l);
+}
+
+void GfxInstall()
+{
+    bool ok = MH_CreateHook((void*)kDisplay, (void*)HookDisplay, (void**)&g_origDisplay) == MH_OK &&
+              MH_EnableHook((void*)kDisplay) == MH_OK;
+    Log("gfx: HUD movie layers %s", ok ? "installed" : "FAILED");
 }

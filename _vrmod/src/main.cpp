@@ -131,9 +131,7 @@ static void LoadConfig()
                   "Distance=1.6\n"
                   "Width=1.5\n"
                   "FollowSpeed=3\n"
-                  "; Hide the game's own crosshair in the centre of the HUD\n"
-                  "HideGameCrosshair=1\n"
-                  "; 1 = only health, abilities, weapon and ammo (no messages, objectives, markers, hints)\n"
+                  "; 1 = only health, abilities, grenades, weapon and ammo (no messages, objectives; markers go into the eyes)\n"
                   "Minimal=1\n"
                   "\n[Input]\n"
                   "; Feed VR controllers to the game as an Xbox gamepad\n"
@@ -205,9 +203,6 @@ static void LoadConfig()
     g_cfg.hudFollowSpeed = IniFloat(ini, L"HUD", L"FollowSpeed", g_cfg.hudFollowSpeed);
     g_cfg.hudMinimal = (int)IniFloat(ini, L"HUD", L"Minimal", (float)g_cfg.hudMinimal);
     g_cfg.hudPrompts = (int)IniFloat(ini, L"HUD", L"Prompts", (float)g_cfg.hudPrompts);
-    // 1 = default radius; values below 1 are a radius as a fraction of the HUD width (the crosshair spreads when airborne)
-    float mask = IniFloat(ini, L"HUD", L"HideGameCrosshair", 1.0f);
-    g_cfg.hudCrosshairMask = mask >= 1.0f ? 0.13f : mask;
     g_cfg.reticle = (int)IniFloat(ini, L"VR", L"Reticle", (float)g_cfg.reticle);
     g_cfg.reticleDistance = IniFloat(ini, L"VR", L"ReticleDistance", g_cfg.reticleDistance);
     g_cfg.syncEyeTime = (int)IniFloat(ini, L"VR", L"SyncEyeTime", (float)g_cfg.syncEyeTime);
@@ -360,6 +355,7 @@ static DWORD WINAPI InitThread(LPVOID)
         WeaponsInstall();
         InputBlockInstall();
         HintsInstall();
+        GfxInstall();
         GameInstallMovieHook();
     }
     FocusStart();

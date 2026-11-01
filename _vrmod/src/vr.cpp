@@ -33,37 +33,13 @@ void VRGetPad(VRPadState& out)
 static const char* kBlitHLSL = R"(
 Texture2D src : register(t0);
 SamplerState smp : register(s0);
-cbuffer C : register(b0) { float linearize; float hud; float maskRadius; float scope; float4 uvRect; };
+cbuffer C : register(b0) { float linearize; float hud; float pad; float scope; float4 uvRect; };
 void VS(uint id : SV_VertexID, out float4 pos : SV_Position, out float2 uv : TEXCOORD0) {
     uv = float2((id << 1) & 2, id & 2);
     pos = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
 }
-// the game's crosshair: white/grey marks around the centre, fading to red over an enemy (white..pink..red = red
-// channel highest, green and blue equal)
-bool CrossColour(float3 c) { float hi = max(c.r, max(c.g, c.b)); return c.r > 0.05 && c.r >= hi - 0.01 && abs(c.g - c.b) < 0.2 * c.r + 0.03; }
-float Sat(float3 c) { float hi = max(c.r, max(c.g, c.b)); return (hi - min(c.r, min(c.g, c.b))) / max(hi, 0.001); }
-// Spread wide (jumping, firing) its marks leave the centre, but they repeat around it - two or four of them turned
-// by 180 degrees, three by 120 - and an enemy's marker or a name does not: a pixel with a mark of its colour near
-// where it lands turned about the centre by 180 or by 120 degrees either way is the crosshair.
-bool Repeated(float2 uv, float3 c)
-{
-    float w, h;
-    src.GetDimensions(w, h);
-    float2 p = (uv - 0.5) * float2(w, h);   // (in pixels: turned as drawn)
-    float2 turned[3] = { -p, float2(-0.5 * p.x - 0.8660254 * p.y, 0.8660254 * p.x - 0.5 * p.y),
-                         float2(-0.5 * p.x + 0.8660254 * p.y, -0.8660254 * p.x - 0.5 * p.y) };
-    float2 nb[5] = { float2(0, 0), float2(2, 0), float2(-2, 0), float2(0, 2), float2(0, -2) };
-    float sat = Sat(c);
-    bool found = false;
-    [unroll] for (int i = 0; i < 3; i++)
-        [unroll] for (int j = 0; j < 5; j++) {
-            float3 m = src.SampleLevel(smp, (turned[i] + nb[j]) / float2(w, h) + 0.5, 0).rgb;
-            found = found || (CrossColour(m) && abs(Sat(m) - sat) < 0.35);
-        }
-    return found;
-}
 float4 PS(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
-    if (scope > 1.5) {   // a part of the HUD: the game's crosshair for the VR reticle (round: no names around it)
+    if (scope > 1.5) {   // a part of the HUD as it is (the crosshair layer's middle for the VR reticle: round)
         if (length(uv - 0.5) > 0.49) return float4(0, 0, 0, 0);
         uv = uvRect.xy + uv * uvRect.zw;
     }
@@ -80,89 +56,19 @@ float4 PS(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     float4 s = src.Sample(smp, uv);
     float3 c = s.rgb;
     float a = 1;
-    // markers' colours: blue/cyan (waypoints, teammates' names and distances) and red (enemies, lock-on)
-    float cmax = max(c.r, max(c.g, c.b));
-    bool blueMark = c.b > 0.2 && c.b >= 0.75 * cmax && c.b > 1.6 * c.r;
-    bool redMark = c.r > 0.2 && c.r > 1.8 * max(c.g, c.b);
-    // the crosshair cut: only the crosshair (white/grey, red over an enemy); markers and names - also their dim
-    // anti-aliased edges - go
-    float lo0 = min(c.r, min(c.g, c.b));
-    bool greyPx = cmax - lo0 < 0.3 * cmax + 0.02;
-    bool redPx = c.r >= cmax - 0.01 && abs(c.g - c.b) < 0.2 * c.r + 0.03;
-    if (scope > 1.5 && (blueMark || (!greyPx && !redPx))) return float4(0, 0, 0, 0);
-    // (past the middle - spread wide - only the marks that repeat around the centre: no texts, no enemy markers)
-    if (scope > 1.5) {
-        float tw, th;
-        src.GetDimensions(tw, th);
-        [branch] if (length((uv - 0.5) * float2(1, th / tw)) > 0.098 && !Repeated(uv, c)) return float4(0, 0, 0, 0);
-    }
-    // the panel shows only health and ammo: markers and names that pass over its corners go (their colours, also
-    // dim, except in the health bar - it is cyan too)
-    bool hpBar = uv.x < 0.4 && uv.y > 0.07 && uv.y < 0.16;
-    bool markTint = (c.b > 0.03 && c.b >= 0.75 * cmax && c.b > 1.3 * c.r) || (c.r > 0.03 && c.r > 1.8 * max(c.g, c.b));
-    if (hud > 1.5 && hud < 3.5 && markTint && !hpBar) return float4(0, 0, 0, 0);
-    // "LOW AMMO" (red) and "X RELOAD" below it, right of the crosshair: not shown at all in gameplay (only blue
-    // markers are kept there)
-    if (hud > 1.5 && (scope < 1.5 || length(uv - 0.5) > 0.06) && !blueMark && uv.x > 0.555 && uv.x < 0.73 && uv.y > 0.44 && uv.y < 0.535) return float4(0, 0, 0, 0);
-    if (hud > 3.5 && !blueMark && !redMark) return float4(0, 0, 0, 0);   // into the eyes: only the markers' colours
-    // the panel's parts: the top corners - health and ability (left), weapon, ammo and ability (right) - and
-    // (scope < 0: HudPrompts) the middle band of texts: button hints, "reload", "no ammo"
-    bool prompts = scope < -0.5 && uv.y > 0.55 && uv.y < 0.76 && uv.x > 0.2 && uv.x < 0.8;
-    bool panelPart = (uv.y < 0.26 && (uv.x < 0.4 || uv.x > 0.6)) || prompts;
-    // into the eye: the rest, but only what is drawn solid (markers, names, lock-on marks) - the see-through
-    // full-screen effects of abilities and aiming stay out
-    if (hud > 3.5 && (panelPart || max(sqrt(saturate(s.a)), max(s.r, max(s.g, s.b))) < 0.5)) return float4(0, 0, 0, 0);
-    // minimal HUD (panel): the top corners - health and ability (left), weapon, ammo, ability and grenades (right)
-    bool hpAmmo = uv.y < 0.26 && (uv.x < 0.4 || uv.x > 0.6);
-    if (hud > 1.5 && hud < 3.5 && !(hpAmmo || prompts)) return float4(0, 0, 0, 0);
-    if (hud > 2.5 && hud < 3.5 && s.a < 0.85) return float4(0, 0, 0, 0);   // zoomed: the scope overlay's tint goes
-    if (hud > 0.5) {
-        // HUD drawn onto transparent black with SRCALPHA/INVSRCALPHA: rgb is premultiplied and alpha ends up
-        // as a*a; additive elements may leave alpha at 0, so their brightness counts as coverage.
-        a = saturate(max(sqrt(saturate(s.a)), max(c.r, max(c.g, c.b))));
-        // the game's own crosshair: white/grey marks around the centre, fading to red over an enemy (white..pink..red
-        // = red channel highest, green and blue equal); other coloured messages there stay visible
-        float hi = max(c.r, max(c.g, c.b)), lo = min(c.r, min(c.g, c.b));
-        bool grey = hi - lo < 0.3 * hi + 0.02;
-        bool red = CrossColour(c);
-        float r = length(uv - 0.5);
-        // spread wide (jumping, firing) the red crosshair's marks leave that circle (Repeated: also the three-mark
-        // crosshairs - they went into the eyes and onto the panel)
-        bool spread = false;
-        [branch] if (scope < 1.5 && red && r >= 0.065 && r < 0.35) spread = Repeated(uv, c);
-        if (scope < 1.5 && ((grey && r < maskRadius) || (red && (r < 0.065 || spread)))) { c = 0; a = 0; }
-        // full-screen tints (damage / ability flashes) are drawn with the HUD: on the floating panel they become a
-        // coloured rectangle. They are flat and translucent - text and icons have edges - so a pixel whose
-        // neighbours a few pixels away have the same translucent alpha is dropped.
-        float w, h;
-        src.GetDimensions(w, h);
-        float2 o = float2(6.0 / w, 6.0 / h);
-        float a0 = s.a;
-        if (a0 > 0.01 && a0 < 0.75) {
-            float d = abs(src.Sample(smp, uv + float2(o.x, 0)).a - a0) + abs(src.Sample(smp, uv - float2(o.x, 0)).a - a0) +
-                      abs(src.Sample(smp, uv + float2(0, o.y)).a - a0) + abs(src.Sample(smp, uv - float2(0, o.y)).a - a0);
-            if (d < 0.04) { c = 0; a = 0; }
-        }
-    }
+    // a HUD layer: drawn onto transparent black with SRCALPHA/INVSRCALPHA, so rgb is premultiplied and alpha ends
+    // up as a*a; additive elements may leave alpha at 0, so their brightness counts as coverage
+    if (hud > 0.5) a = saturate(max(sqrt(saturate(s.a)), max(c.r, max(c.g, c.b))));
     if (linearize > 0.5) c = pow(abs(c), 2.2);
     return float4(c, a);
 }
 )";
 
-// HUD drawing mode for the shader: 1 = whole HUD, 2 = minimal (gameplay), 3 = minimal and zoomed (the game's scope
-// overlay - a translucent tint over the whole screen - is dropped: only solid HUD pixels stay)
-static float HudMode()
-{
-    if (!g_cfg.hudMinimal || !CameraPlayerView()) return 1.0f;
-    float fov;
-    return CameraGameZoom(fov) ? 3.0f : 2.0f;
-}
-
 struct Blitter {
     ID3D11VertexShader* vs = nullptr;
     ID3D11PixelShader* ps = nullptr;
     ID3D11SamplerState* smp = nullptr;
-    ID3D11Buffer* cb = nullptr;   // {linearize, hud, maskRadius, scope, uvRect}
+    ID3D11Buffer* cb = nullptr;   // {linearize, hud, pad, scope, uvRect}
     ID3D11BlendState* over = nullptr;   // premultiplied "over" (the HUD drawn onto an eye image)
 
     bool Init(ID3D11Device* dev)
@@ -196,20 +102,19 @@ struct Blitter {
 
     // Draws on a deferred context so the game's immediate-context state is untouched.
     void Draw(ID3D11Device* dev, ID3D11DeviceContext* imm, ID3D11ShaderResourceView* srv, ID3D11RenderTargetView* rtv,
-              UINT w, UINT h, bool linearize, bool hud = false, float maskRadius = 0.0f, const float* scopeRect = nullptr,
-              float hudMode = 0.0f,   // hudMode 4: the HUD over an eye image (blended), without the panel's parts
-              bool crop = false)      // scopeRect is a part of the HUD to show as it is (no lens)
+              UINT w, UINT h, bool linearize, bool hud = false, const float* scopeRect = nullptr,
+              bool blend = false,   // a HUD layer drawn over the image there (an eye's)
+              bool crop = false)    // scopeRect is a part of the HUD to show as it is (no lens)
     {
         ID3D11DeviceContext* dc = nullptr;
         if (FAILED(dev->CreateDeferredContext(0, &dc))) return;
-        float consts[8] = { linearize ? 1.0f : 0.0f, hudMode > 0.0f ? hudMode : hud ? HudMode() : 0.0f, maskRadius,
-                            crop ? 2.0f : scopeRect ? 1.0f : (hud && g_cfg.hudPrompts ? -1.0f : 0.0f), 0, 0, 1, 1 };
+        float consts[8] = { linearize ? 1.0f : 0.0f, hud ? 1.0f : 0.0f, 0, crop ? 2.0f : scopeRect ? 1.0f : 0.0f, 0, 0, 1, 1 };
         if (scopeRect) for (int i = 0; i < 4; i++) consts[4 + i] = scopeRect[i];
         dc->UpdateSubresource(cb, 0, nullptr, consts, 0, 0);
         D3D11_VIEWPORT vp = { 0, 0, (float)w, (float)h, 0, 1 };
         dc->RSSetViewports(1, &vp);
         dc->OMSetRenderTargets(1, &rtv, nullptr);
-        if (hudMode > 3.5f) dc->OMSetBlendState(over, nullptr, 0xFFFFFFFF);
+        if (blend) dc->OMSetBlendState(over, nullptr, 0xFFFFFFFF);
         dc->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         dc->VSSetShader(vs, nullptr, 0);
         dc->PSSetShader(ps, nullptr, 0);
@@ -1186,7 +1091,7 @@ static bool CreateChain(Chain& c, UINT w, UINT h)
 static void DrawSetupCubes(ID3D11DeviceContext* imm, ID3D11RenderTargetView* rtv, UINT w, UINT h, const XrPosef& eye, const XrFovf& fov);
 static const XrPosef* g_overlayPose;   // set while an eye image is copied: things drawn into it (setup cubes)
 static XrFovf g_overlayFov;
-static ID3D11ShaderResourceView* g_overlayHud;   // this frame's HUD (minimal HUD in gameplay): its markers go in too
+static ID3D11ShaderResourceView* g_overlayHud;   // this frame's HUD layer for the eyes (markers, names) or null
 
 // Copies the game's back buffer into the next image of a swapchain (or, with scopeRect, a part of it into a
 // size x size round scope image).
@@ -1233,11 +1138,11 @@ static bool CopyToChain(Chain& c, ID3D11Texture2D* bb, const float* scopeRect = 
             xr.device->CreateShaderResourceView(copy, nullptr, &srv);
         }
     }
-    if (srv) xr.blit.Draw(xr.device, imm, srv, c.rtvs[idx], c.width, c.height, xr.linearize, false, 0.0f, scopeRect);
+    if (srv) xr.blit.Draw(xr.device, imm, srv, c.rtvs[idx], c.width, c.height, xr.linearize, false, scopeRect);
     if (g_overlayPose && !scopeRect) {
         // the HUD's moving parts (waypoints, names over teammates, lock-on marks): drawn by the game for this eye's
         // view, so they sit at their place in depth - into the eye image, not onto the panel
-        if (g_overlayHud) xr.blit.Draw(xr.device, imm, g_overlayHud, c.rtvs[idx], c.width, c.height, xr.linearize, true, g_cfg.hudCrosshairMask, nullptr, 4.0f);
+        if (g_overlayHud) xr.blit.Draw(xr.device, imm, g_overlayHud, c.rtvs[idx], c.width, c.height, xr.linearize, true, nullptr, true);
         // (the setup's zone marks are compositor quads now - BuildZoneMark: drawing them into the eye image here
         // stopped the frames on the real runtime, black screen)
     }
@@ -2868,7 +2773,7 @@ void VRBeginTick()
 // ---------------------------------------------------------------------------------------------
 // Floating HUD: the game's HUD (split off by d3dtrace.cpp) on a panel in front of the player that follows
 // the head with some lag, like a helmet display that settles where you look.
-static ID3D11ShaderResourceView* g_frameHud;   // HUD texture of the frame being presented (or null)
+static ID3D11ShaderResourceView* g_frameHud[kHudLayers];   // HUD layers of the frame being presented (or null)
 static Chain g_hudChain;
 static bool g_hudHasImage;
 static float g_hudYaw, g_hudPitch;             // smoothed panel direction (radians, OpenXR LOCAL)
@@ -2900,7 +2805,7 @@ static bool CopyHud(ID3D11ShaderResourceView* srv)
     xrWaitSwapchainImage(g_hudChain.sc, &wi);
     ID3D11DeviceContext* imm = nullptr;
     xr.device->GetImmediateContext(&imm);
-    xr.blit.Draw(xr.device, imm, srv, g_hudChain.rtvs[idx], w, h, xr.linearize, true, g_cfg.hudCrosshairMask);
+    xr.blit.Draw(xr.device, imm, srv, g_hudChain.rtvs[idx], w, h, xr.linearize, true);
     imm->Release();
     XrSwapchainImageReleaseInfo ri = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
     xrReleaseSwapchainImage(g_hudChain.sc, &ri);
@@ -2986,14 +2891,13 @@ static bool CreateReticle()
     return true;
 }
 
-// The game's own crosshair (it differs per weapon and turns red over an enemy) cut from the centre of the frame's
-// HUD - drawn there for the view centre - and shown on the VR reticle instead of the ring (ReticleStyle=1).
+// The game's own crosshair (it differs per weapon and turns red over an enemy): the middle of the HUD's crosshair
+// layer - drawn there for the view centre - shown on the VR reticle instead of the ring (ReticleStyle=1).
 static Chain g_reticleGame;
 static DWORD g_reticleGameAt;
 
 static const float kReticleCut = 0.6f;   // the game's crosshair: this part of the HUD's width around the centre (its
-                                          // marks spread wide too - jumping and firing up to ~0.33 of it; past the
-                                          // middle 0.2 only those - Repeated)
+                                          // marks spread wide too - jumping and firing up to ~0.33 of it)
 
 static void UpdateGameReticle(ID3D11ShaderResourceView* hud)
 {
@@ -3016,7 +2920,7 @@ static void UpdateGameReticle(ID3D11ShaderResourceView* hud)
     xr.device->GetImmediateContext(&imm);
     float clear[4] = {};
     imm->ClearRenderTargetView(g_reticleGame.rtvs[idx], clear);
-    xr.blit.Draw(xr.device, imm, hud, g_reticleGame.rtvs[idx], S, S, xr.linearize, true, 0.0f, rect, 1.0f, true);
+    xr.blit.Draw(xr.device, imm, hud, g_reticleGame.rtvs[idx], S, S, xr.linearize, true, rect, false, true);
     imm->Release();
     XrSwapchainImageReleaseInfo ri = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
     xrReleaseSwapchainImage(g_reticleGame.sc, &ri);
@@ -3189,12 +3093,16 @@ static void PresentStereo(ID3D11Texture2D* bb, const EyeFrame& f)
 {
     g_overlayPose = &f.pose;
     g_overlayFov = f.fov;
-    g_overlayHud = g_frameHud && g_cfg.hudMinimal && g_cfg.hudMarkersInEyes && CameraPlayerView() ? g_frameHud : nullptr;
+    g_overlayHud = g_cfg.hudMarkersInEyes && CameraPlayerView() ? g_frameHud[kHudEyes] : nullptr;
     bool copied = CopyToChain(g_eyes[f.eye], bb);
     g_overlayPose = nullptr;
     if (!copied) return;
     if (f.eye == 1) UpdateScope(bb, f);
-    if (g_frameHud && f.eye == 1) { g_hudHasImage = CopyHud(g_frameHud); UpdateGameReticle(g_frameHud); }
+    bool split = g_frameHud[kHudEyes] || g_frameHud[kHudPanel] || g_frameHud[kHudReticle];
+    if (split && f.eye == 1) {
+        g_hudHasImage = g_frameHud[kHudPanel] && CopyHud(g_frameHud[kHudPanel]);
+        UpdateGameReticle(g_frameHud[kHudReticle]);
+    }
     else if (!g_cfg.vrHud) g_hudHasImage = false;
     g_eyeDone[f.eye] = f;
     g_eyeHave[f.eye] = true;
@@ -3350,7 +3258,7 @@ static PFN_Present1 g_origPresent1;
 static std::atomic<long> g_frames;
 
 void TraceInstall(ID3D11Device* dev);
-ID3D11ShaderResourceView* TraceEndFrame();
+void TraceEndFrame(ID3D11ShaderResourceView* layers[kHudLayers]);
 void HudSetWanted(bool on);
 
 static void OnPresent(IDXGISwapChain* sc, UINT flags)
@@ -3359,7 +3267,7 @@ static void OnPresent(IDXGISwapChain* sc, UINT flags)
     if (g_cfg.debugAutomation || g_cfg.vrHud) {
         ID3D11Device* dev = nullptr;
         if (SUCCEEDED(sc->GetDevice(__uuidof(ID3D11Device), (void**)&dev))) { TraceInstall(dev); dev->Release(); }
-        g_frameHud = TraceEndFrame();
+        TraceEndFrame(g_frameHud);
         // Split the HUD off the next frame while the 3D view is shown.
         HudSetWanted(g_cfg.vrHud && g_cfg.vrMode == 1 && xr.running && CameraInGameplay());
     }

@@ -284,6 +284,9 @@ static void RunLine(const char* line)
         g_debugTurret = atoi(line + 9);
     } else if (!strncmp(line, "gfxget ", 7) || !strncmp(line, "gfxset ", 7) || !strncmp(line, "gfxcall ", 8)) {   // HUD movie variables and methods
         GfxQueue(line);
+    } else if (!strncmp(line, "hudsave", 7)) {   // the HUD layers of the next frame as hud_*.bmp
+        extern volatile long g_hudSave;
+        g_hudSave = 1;
     } else if (!strncmp(line, "gfxprobe", 8)) {   // which GFxMovieView methods the game calls (2 s)
         void GfxProbe();
         GfxProbe();
@@ -329,6 +332,9 @@ static void RunLine(const char* line)
     } else if (sscanf_s(line, "d3dtrace %f", &v) == 1) {
         extern volatile long g_traceFrames;
         g_traceFrames = (long)v;
+    } else if (sscanf_s(line, "hudflush %f", &v) == 1) {
+        extern int g_hudFlush;
+        g_hudFlush = (int)v;
     } else if (sscanf_s(line, "fakehand %f", &v) == 1) {
         extern float g_fakeHandYaw, g_fakeHandPitch;
         g_fakeHandYaw = v;
