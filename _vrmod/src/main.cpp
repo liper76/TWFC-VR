@@ -194,6 +194,7 @@ static void LoadConfig()
     g_cfg.vrMode = (int)IniFloat(ini, L"VR", L"Mode", (float)g_cfg.vrMode);
     g_cfg.worldScale = IniFloat(ini, L"VR", L"WorldScale", g_cfg.worldScale);
     g_cfg.fovScale = IniFloat(ini, L"VR", L"FovScale", g_cfg.fovScale);
+    g_cfg.levelView = (int)IniFloat(ini, L"VR", L"LevelView", (float)g_cfg.levelView);
     g_cfg.renderWidth = (int)IniFloat(ini, L"VR", L"RenderWidth", (float)g_cfg.renderWidth);
     g_cfg.renderHeight = (int)IniFloat(ini, L"VR", L"RenderHeight", (float)g_cfg.renderHeight);
     g_cfg.cameraMode = (int)IniFloat(ini, L"VR", L"CameraMode", (float)g_cfg.cameraMode);

@@ -42,7 +42,7 @@ static int64_t g_frame;
 static XrSessionState g_state = XR_SESSION_STATE_UNKNOWN;
 
 // ---- scripted poses and inputs: mockxr_pose.txt next to the DLL (re-read when it changes) --------------------
-// Lines "<name> <values...>":  head x y z yaw pitch   |   <pose action> x y z yaw pitch roll   (degrees; yaw + =
+// Lines "<name> <values...>":  head x y z yaw pitch [roll]   |   <pose action> x y z yaw pitch roll   (degrees; yaw + =
 // left, pitch + = up; OpenXR local space: x right, y up, -z forward; metres)   |   <float/bool action> value   |
 // <vector action> x y   |   vel_left / vel_right x y z (m/s, hand velocity).  Pose actions not listed: the other
 // pose of the same hand (aim <-> grip); none at all: the old fixed pose. Without "head": the slow head sweep.
@@ -318,13 +318,16 @@ static XrResult XRAPI_CALL LocateViews(XrSession, const XrViewLocateInfo* li, Xr
     vs->viewStateFlags = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT | XR_VIEW_STATE_ORIENTATION_TRACKED_BIT | XR_VIEW_STATE_POSITION_TRACKED_BIT;
     // Slow head yaw sweep (+-25 deg, 8 s period) so dumps show head tracking.
     double t = (double)li->displayTime * 1e-9;
-    float yaw = (float)(sin(t * 6.2831853 / 8.0) * 25.0 * 3.14159265 / 180.0), pitch = 0, hx = 0, hy = 0, hz = 0;
+    float yaw = (float)(sin(t * 6.2831853 / 8.0) * 25.0 * 3.14159265 / 180.0), pitch = 0, roll = 0, hx = 0, hy = 0, hz = 0;
     PoseEntry h;
-    if (PoseValue("head", h)) { hx = h.v[0]; hy = h.v[1]; hz = h.v[2]; yaw = h.v[3] * 3.14159265f / 180.0f; pitch = h.v[4]; }
+    if (PoseValue("head", h)) { hx = h.v[0]; hy = h.v[1]; hz = h.v[2]; yaw = h.v[3] * 3.14159265f / 180.0f; pitch = h.v[4]; roll = h.n > 5 ? h.v[5] : 0; }
     for (int e = 0; e < 2; e++) {
-        views[e].pose.orientation = Euler(yaw * 180.0f / 3.14159265f, pitch, 0);
+        XrQuaternionf q = Euler(yaw * 180.0f / 3.14159265f, pitch, roll);
+        views[e].pose.orientation = q;
+        // eye offset along the head's right axis (turns and tilts with the head)
         float ex = e ? 0.032f : -0.032f;
-        views[e].pose.position = { hx + ex * cosf(yaw), hy, hz - ex * sinf(yaw) };   // eye offset turns with the head
+        float rx = 1 - 2 * (q.y * q.y + q.z * q.z), ry = 2 * (q.x * q.y + q.z * q.w), rz = 2 * (q.x * q.z - q.y * q.w);
+        views[e].pose.position = { hx + ex * rx, hy + ex * ry, hz + ex * rz };
         views[e].fov = { e ? -0.79f : -0.87f, e ? 0.87f : 0.79f, 0.84f, -0.91f };
     }
     return XR_SUCCESS;
@@ -400,7 +403,7 @@ static XrResult XRAPI_CALL LocateSpace(XrSpace space, XrSpace, XrTime, XrSpaceLo
     bool found = false;
     if (refType == XR_REFERENCE_SPACE_TYPE_VIEW) {
         found = PoseValue("head", e);
-        if (found) { e.v[5] = 0; e.n = 6; }
+        if (found && e.n < 6) { e.v[5] = 0; e.n = 6; }
     } else if (!action.empty()) {
         found = PoseValue(action, e);
         if (!found) {   // the hand's other pose
