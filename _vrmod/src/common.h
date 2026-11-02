@@ -188,6 +188,7 @@ void IKSetPawn(void* pawn, const float viewPos[3]);   // first-person player paw
 // eye of this frame; latched head offset (body frame, horizontal), body yaw (world) and head yaw (vs body), radians
 void IKSetFrame(int eye, const float headOffset[3], float bodyYaw, float headYaw);
 bool IKPawnIsVehicle();                     // the player's current skeleton has no arms (vehicle form)
+std::wstring IKCharacter();                // the player character (its robot model's name), "" until seen
 void IKSetBelt(void* comp, float size = 0); // a component attached to the hips, placed each frame on the belt (or null); its world size (0 = weapons')
 bool IKWeaponHasScope();                    // first person, holding a weapon from ScopeWeapons
 float CameraVehicleSteer();                 // vehicle form: right stick (-1..1) that turns it towards the aim
@@ -270,6 +271,7 @@ bool VRBeginStereoPair(VREyeView& left, VREyeView& right);   // game thread: bot
 void GameSetRightEyeView(const TPOV& pov);  // game.cpp: the view of the second drawing of this frame
 bool VRNextStereoEye(int& eye);             // eye of the next stereo frame; false when no stereo views lately
 bool VRTwoHanded();                         // the weapon is held with both hands
+bool VRForegripSetting(float out[3]);       // vr.cpp: the two-handed zone set in the headset (this weapon's or global); out may be null
 void VRFingerCurls(int hand, float out[4]); // empty hand: index, middle, ring, thumb bend (0..1) from the controller
 // a mounted turret's aim as its handrails set it (LOCAL: quaternion x,y,z,w, from between the grips); false until set
 bool VRTurretAim(float q[4], float p[3]);

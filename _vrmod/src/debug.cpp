@@ -299,6 +299,13 @@ static void RunLine(const char* line)
     } else if (!strncmp(line, "gfxprobe", 8)) {   // which GFxMovieView methods the game calls (2 s)
         void GfxProbe();
         GfxProbe();
+    } else if (sscanf_s(line, "god %f", &v) == 1) {   // god 1|0: the player's health kept up
+        extern bool g_debugGod;
+        g_debugGod = v != 0;
+        Log("debug: god %d", g_debugGod);
+    } else if (!strncmp(line, "turrets", 7)) {   // every mountable turret: distance and bearing
+        void WeaponsDebugTurrets();
+        WeaponsDebugTurrets();
     } else if (!strncmp(line, "turretfx", 8)) {
         void WeaponsDebugTurretFx();
         WeaponsDebugTurretFx();

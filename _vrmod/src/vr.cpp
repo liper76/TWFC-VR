@@ -473,13 +473,15 @@ static struct Calib {
 static XrQuaternionf QuatConj(const XrQuaternionf& q) { return { -q.x, -q.y, -q.z, q.w }; }
 
 // ---- Setup mode (hold the menu button 1.5 s in gameplay; again to save and leave). Per weapon (ini sections
-// [Weapon.<name>]): where the gun sits in the right hand (GunGrip - by default only its place, B turns the
+// [Weapon.<name>@<character>], each character its own; one not set yet takes [Weapon.<name>], the last setup of that
+// weapon on anyone): where the gun sits in the right hand (GunGrip - by default only its place, B turns the
 // rotation on too), the two-handed zone on its front (Foregrip) and the aiming lens above the barrel (Scope: metres
 // right, up, forward of the aim ray, and its size); for all: the grenade pouch. The zones are shown as green
 // squares; the left grip takes one and puts it elsewhere. (The game's crosshair on the VR reticle always follows the
 // barrel; only its size is a setting - ReticleSize on the settings page.)
 struct WeaponSetup {
-    std::wstring name;
+    std::wstring name, character;         // the weapon (its display name) and who holds it (IKCharacter)
+    bool own = false;                     // read from the character's own section ([Weapon.<name>@<character>])
     bool grip = false, fore = false, scopeSet = false, gripL = false;   // set for this weapon (else the global ones)
     float gunGrip[7] = { 0, 0, 0, 1, 0, 0, 0 }, foregrip[3] = {}, scope[4] = {};
     float gunGripL[7] = { 0, 0, 0, 1, 0, 0, 0 };   // the gun in the left hand (GunGripL)
@@ -535,14 +537,22 @@ static bool InPouch(const XrPosef& head, const Vec3f& hand)
     return below > 0.2f && below < head.position.y - b.y + 0.2f && fabsf(side) < 0.3f && ahead < 0.32f && ahead > -0.2f;
 }
 
-// How the gun sits in hand h: the right hand's GunGrip; the left hand's own per weapon (GunGripL, set in the setup),
-// or - not set yet - the right one mirrored.
+// How the gun sits in hand h: the right hand's GunGrip (this weapon's, else the global one); the left hand's own per
+// weapon (GunGripL, set in the setup), or - not set yet - the right one mirrored.
 static void GunGripFor(int h, float g[7])
 {
     if (h == 1 && VRGunHand() < 0) { memcpy(g, g_cfg.emptyGripR, 7 * sizeof(float)); return; }   // the empty right hand: its own
     if (h == 0 && g_ws.gripL) { memcpy(g, g_ws.gunGripL, 7 * sizeof(float)); return; }
-    memcpy(g, g_cfg.gunGrip, 7 * sizeof(float));
+    memcpy(g, g_ws.grip ? g_ws.gunGrip : g_cfg.gunGrip, 7 * sizeof(float));
     if (h == 0) { g[1] = -g[1]; g[2] = -g[2]; g[4] = -g[4]; }
+}
+
+// The two-handed zone set in the headset (for the right hand): this weapon's, else the global one; none - the model's grip.
+bool VRForegripSetting(float out[3])
+{
+    const float* f = g_ws.fore ? g_ws.foregrip : g_cfg.foregripSet ? g_cfg.foregrip : nullptr;
+    if (f && out) memcpy(out, f, 3 * sizeof(float));
+    return f != nullptr;
 }
 
 // The gun hand's aim pose (and grip position) with its grip placement applied - or the frozen one while adjusting.
@@ -620,8 +630,9 @@ void VRDebugCalib(int confirm, int left)
 
 // A mounted turret's handrails: two grips in front of the player, seated on the gun - they turn with it about the eyes,
 // as the gun does in view (CameraTurretSeat). A squeeze at one holds it until let go; the held grips turn the gun by
-// how far the hands went round the player since they took hold (both hands: the mean), and a holding hand's trigger
-// fires. Let go, the gun stays aimed where it was (relative to the body: turning turns it too). (Tried: the grips as a
+// how far the hands went round the player since they took hold (both hands: the mean). The triggers stay as with a
+// gun: the gun hand's fires, the other one is the game's aim (LT) - before, a holding hand's trigger fired, so both
+// hands on the grips left no aim button. Let go, the gun stays aimed where it was (relative to the body: turning turns it too). (Tried: the grips as a
 // lever pivoting ahead - raised, the gun down; the user asked for this way back.)
 static const XrVector3f kTurretGrip[2] = { { -0.18f, -0.30f, -0.40f }, { 0.18f, -0.30f, -0.40f } };   // LOCAL, gun ahead
 static const float kTurretGripHalf = 0.07f;   // half the grips' length
@@ -1028,13 +1039,8 @@ static void UpdateGestures(XINPUT_GAMEPAD& p, DWORD now)
     for (int h = 0; h < 2; h++) xr.gripHeld[h] = squeeze[h] > 0.6f || (xr.gripHeld[h] && squeeze[h] > 0.35f);   // grab only on a new squeeze
     xr.leftGripHeld = xr.gripHeld[0];
     if (VRGunHand() < 0) p.bRightTrigger = 0;   // the gun put away: nothing to fire
-    if (g_tg.held[0] >= 0 || g_tg.held[1] >= 0) {   // on a turret's grips: a holding hand's trigger fires
-        float fire = 0.0f;
-        for (int h = 0; h < 2; h++)
-            if (g_tg.held[h] >= 0) fire = fmaxf(fire, GetFloat(xr.trigger[h]));
-        p.bRightTrigger = (BYTE)(fire * 255.0f);
-        if (g_tg.held[G ^ 1] >= 0) p.bLeftTrigger = 0;   // (that hand's trigger is no fine aim then)
-    }
+    if (g_tg.held[0] >= 0 || g_tg.held[1] >= 0)   // on a turret's grips: the gun hand's trigger fires, the other aims (LT kept)
+        p.bRightTrigger = (BYTE)(GetFloat(xr.trigger[G]) * 255.0f);
     UpdateGunPose(t, G, S, fore, now);   // held with both hands: turned onto the front hand, the virtual stock; smoothed
     if (xr.twoHand && g_cfg.gripAbilities) p.wButtons &= ~(S == 0 ? XINPUT_GAMEPAD_LEFT_SHOULDER : XINPUT_GAMEPAD_RIGHT_SHOULDER);
 
@@ -2003,39 +2009,34 @@ static void IniWriteFloats(const wchar_t* sec, const wchar_t* key, const float* 
     WritePrivateProfileStringW(sec, key, s.c_str(), IniPath().c_str());
 }
 
-// The weapon in hand changed: its own settings (or none: the global ones stay).
+// The weapon in hand or the character changed: its own settings (or none: the global ones). They stay in g_ws only -
+// g_cfg keeps the global ones (an ini write reloads g_cfg; before, the weapon's values were copied into it, every
+// reload put the global ones back for a frame, and a weapon change put back ones captured at the first change).
 static void TrackWeaponSetup()
 {
     // the gun in hand, whether the wheel lists it or not (before: the listed one only - a gun the wheel left out kept
     // the last gun's grip, and a setup saved then went to that one)
     WeaponList wl;
     WeaponsGetList(wl);
-    if (!wl.held[0] || g_ws.name == wl.held) {
-        if (g_ws.grip) memcpy(g_cfg.gunGrip, g_ws.gunGrip, sizeof(g_ws.gunGrip));   // (an ini reload resets g_cfg)
-        if (g_ws.fore) { memcpy(g_cfg.foregrip, g_ws.foregrip, sizeof(g_ws.foregrip)); g_cfg.foregripSet = 1; }
-        return;
-    }
-    // back to the global ones, then this weapon's
-    static float globalGrip[7], globalFore[3];
-    static int globalForeSet = -1;
-    if (globalForeSet < 0) {
-        memcpy(globalGrip, g_cfg.gunGrip, sizeof(globalGrip));
-        memcpy(globalFore, g_cfg.foregrip, sizeof(globalFore));
-        globalForeSet = g_cfg.foregripSet;
-    }
-    if (g_ws.grip) memcpy(g_cfg.gunGrip, globalGrip, sizeof(globalGrip));
-    if (g_ws.fore) { memcpy(g_cfg.foregrip, globalFore, sizeof(globalFore)); g_cfg.foregripSet = globalForeSet; }
+    std::wstring who = IKCharacter();
+    if (!wl.held[0] || (g_ws.name == wl.held && g_ws.character == who)) return;
     g_ws = WeaponSetup();
     g_ws.name = wl.held;
-    std::wstring sec = L"Weapon." + g_ws.name;
-    g_ws.grip = IniFloats(sec.c_str(), L"GunGrip", g_ws.gunGrip, 7) == 7;
-    g_ws.fore = IniFloats(sec.c_str(), L"Foregrip", g_ws.foregrip, 3) == 3;
-    g_ws.scopeSet = IniFloats(sec.c_str(), L"Scope", g_ws.scope, 4) == 4;
-    g_ws.gripL = IniFloats(sec.c_str(), L"GunGripL", g_ws.gunGripL, 7) == 7;
+    g_ws.character = who;
+    std::wstring path = IniPath(), shared = L"Weapon." + g_ws.name, own = shared + L"@" + who;
+    g_ws.own = !who.empty() && GetPrivateProfileIntW(own.c_str(), L"Own", 0, path.c_str()) == 1;
+    const wchar_t* sec = g_ws.own ? own.c_str() : shared.c_str();
+    g_ws.grip = IniFloats(sec, L"GunGrip", g_ws.gunGrip, 7) == 7;
+    g_ws.fore = IniFloats(sec, L"Foregrip", g_ws.foregrip, 3) == 3;
+    g_ws.scopeSet = IniFloats(sec, L"Scope", g_ws.scope, 4) == 4;
+    g_ws.gripL = IniFloats(sec, L"GunGripL", g_ws.gunGripL, 7) == 7;
     float stock;
-    g_ws.stock = IniFloats(sec.c_str(), L"Stock", &stock, 1) == 1 ? stock > 0.5f : g_ws.name.find(L"Pistol") == std::wstring::npos;
+    if (IniFloats(sec, L"Stock", &stock, 1) == 1 || IniFloats(shared.c_str(), L"Stock", &stock, 1) == 1) g_ws.stock = stock > 0.5f;
+    else g_ws.stock = g_ws.name.find(L"Pistol") == std::wstring::npos;
     g_setup.dirty = true;
-    Log("vr: weapon setup for %ls: grip %d, front %d, lens %d", g_ws.name.c_str(), g_ws.grip, g_ws.fore, g_ws.scopeSet);
+    Log("vr: weapon setup for %ls (%ls, %ls): grip %d, front %d, lens %d, left grip %d", g_ws.name.c_str(),
+        who.empty() ? L"character unknown" : who.c_str(), g_ws.own ? L"its own" : L"shared", g_ws.grip, g_ws.fore,
+        g_ws.scopeSet, g_ws.gripL);
 }
 
 // The aiming lens: right, up, forward (metres from the aim ray's origin) and size - this weapon's or the global ones.
@@ -2045,18 +2046,31 @@ static void ScopePlace(float s[4])
     s[0] = 0; s[1] = g_cfg.scopeUp; s[2] = g_cfg.scopeForward; s[3] = g_cfg.scopeSize;
 }
 
+static void WriteWeaponSection(const std::wstring& sec)
+{
+    if (g_ws.grip) IniWriteFloats(sec.c_str(), L"GunGrip", g_ws.gunGrip, 7);
+    if (g_ws.fore) IniWriteFloats(sec.c_str(), L"Foregrip", g_ws.foregrip, 3);
+    if (g_ws.scopeSet) IniWriteFloats(sec.c_str(), L"Scope", g_ws.scope, 4);
+    if (g_ws.gripL) IniWriteFloats(sec.c_str(), L"GunGripL", g_ws.gunGripL, 7);
+    WritePrivateProfileStringW(sec.c_str(), L"Reticle", nullptr, IniPath().c_str());   // (the old reticle offset)
+}
+
+// Written at once after every change (before: only on leaving the setup - a weapon change meanwhile, a crash or
+// quitting lost it): to the character's own section and to the shared one (a character not set yet starts from it).
 static void SaveSetup()
 {
     if (!g_ws.name.empty()) {
-        std::wstring sec = L"Weapon." + g_ws.name;
-        if (g_ws.grip) IniWriteFloats(sec.c_str(), L"GunGrip", g_ws.gunGrip, 7);
-        if (g_ws.fore) IniWriteFloats(sec.c_str(), L"Foregrip", g_ws.foregrip, 3);
-        if (g_ws.scopeSet) IniWriteFloats(sec.c_str(), L"Scope", g_ws.scope, 4);
-        if (g_ws.gripL) IniWriteFloats(sec.c_str(), L"GunGripL", g_ws.gunGripL, 7);
-        WritePrivateProfileStringW(sec.c_str(), L"Reticle", nullptr, IniPath().c_str());   // (the old reticle offset)
+        std::wstring shared = L"Weapon." + g_ws.name;
+        if (!g_ws.character.empty()) {
+            std::wstring own = shared + L"@" + g_ws.character;
+            WritePrivateProfileStringW(own.c_str(), L"Own", L"1", IniPath().c_str());
+            WriteWeaponSection(own);
+            g_ws.own = true;
+        }
+        WriteWeaponSection(shared);
     }
     IniWriteFloats(L"Input", L"BeltOffset", g_cfg.beltOffset, 3);
-    Log("vr: setup saved (%ls)", g_ws.name.c_str());
+    Log("vr: setup saved (%ls, %ls)", g_ws.name.c_str(), g_ws.character.c_str());
 }
 
 static void SetupToggle()
@@ -2141,11 +2155,12 @@ static void UpdateSetup(XINPUT_GAMEPAD& p, const float grip[2], DWORD now)
             IniWriteFloats(L"VR", L"EmptyGripR", g, 7);
         } else if (G == 1) {
             memcpy(g_ws.gunGrip, g, sizeof(g));
-            memcpy(g_cfg.gunGrip, g, sizeof(g));
             g_ws.grip = true;
+            SaveSetup();
         } else {
             memcpy(g_ws.gunGripL, g, sizeof(g));
             g_ws.gripL = true;
+            SaveSetup();
         }
         g_calib.active = false;
         s.dirty = true;
@@ -2174,8 +2189,6 @@ static void UpdateSetup(XINPUT_GAMEPAD& p, const float grip[2], DWORD now)
                 XrVector3f f = Rotate(QuatConj(aim.orientation), { c.x - gp.x, c.y - gp.y, c.z - gp.z });
                 if (G == 0) f.x = -f.x;   // (kept as for the right hand: the left one mirrors it)
                 g_ws.foregrip[0] = f.x; g_ws.foregrip[1] = f.y; g_ws.foregrip[2] = f.z;
-                memcpy(g_cfg.foregrip, g_ws.foregrip, sizeof(g_ws.foregrip));
-                g_cfg.foregripSet = 1;
                 g_ws.fore = true;
             }
         } else {   // the pouch, from the eyes: right, up, forward
@@ -2187,6 +2200,7 @@ static void UpdateSetup(XINPUT_GAMEPAD& p, const float grip[2], DWORD now)
             g_cfg.beltOffset[1] = d.y;
             g_cfg.beltOffset[2] = d.x * fw.x + d.z * fw.z;
         }
+        SaveSetup();
         s.grab = -1;
         s.dirty = true;
         VRHaptic(0, 0.8f, 0.1f);
@@ -2197,12 +2211,15 @@ static void UpdateSetup(XINPUT_GAMEPAD& p, const float grip[2], DWORD now)
     bool b = GetBool(xr.btn[kB]), a = GetBool(xr.btn[kA]);
     if (b && !s.bWas) { s.rotate = !s.rotate; s.dirty = true; VRHaptic(1, 0.3f, 0.03f); }
     if (a && !s.aWas && !g_ws.name.empty()) {
+        // this character's: its own section emptied, Own=1 kept (the defaults, not the shared ones); no character
+        // known - the shared section
         std::wstring sec = L"Weapon." + g_ws.name;
+        if (!g_ws.character.empty()) sec += L"@" + g_ws.character;
         WritePrivateProfileStringW(sec.c_str(), nullptr, nullptr, IniPath().c_str());   // (the whole section)
-        std::wstring keep = g_ws.name;
-        g_ws.name.clear();   // reload: the global ones
+        if (!g_ws.character.empty()) WritePrivateProfileStringW(sec.c_str(), L"Own", L"1", IniPath().c_str());
+        g_ws.name.clear();   // reload
         TrackWeaponSetup();
-        Log("vr: setup of %ls reset", keep.c_str());
+        Log("vr: setup of %ls reset", sec.c_str());
         VRHaptic(1, 0.8f, 0.2f);
     }
     s.aWas = a; s.bWas = b;

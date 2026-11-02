@@ -56,7 +56,9 @@ CONTROLS (main mode; the buttons work like an Xbox gamepad)
   A - jump, X - reload / interact
   Grip (free hand, not at the belt) . use: pick up, levers, buttons (GripUse=1 in [Input])
   "Empty hand" in the wheel on a turret: get off the turret. On a turret: aim with both hands
-                                    (between them), the eyes are raised by TurretEyeUp=0.35 m ([VR])
+                                    (between them), the eyes are raised by TurretEyeUp=0.35 m ([VR]); the
+                                    triggers work as with a gun: right - fire, left - aim (also with both
+                                    hands on the grips). The shoulder pads are hidden on a turret (the view)
   (in a vehicle: Y - the vehicle's special move)
   The old layout (grips = abilities, Y = next weapon): GripAbilities=1 in [Input].
   (in the old layout the stick clicks are LS / RS)
@@ -80,9 +82,10 @@ CONTROLS (main mode; the buttons work like an Xbox gamepad)
       - the green squares are zones: at the front of the gun (two-handed grip) and on the belt (grenades).
         Grab a square with the other hand's grip and move it;
       - A - reset this weapon's settings;
-      - press the menu button again (or the "Save and exit" item) - save and leave (it also leaves by itself
-        after 3 minutes). The grip and foregrip are stored per weapon ([Weapon.<name>] sections in
-        twfcvr.ini). Aiming is only along the barrel (the extra scope lens is removed; Scope=1 in [Input]
+      - press the menu button again (or the "Save and exit" item) - leave (it also leaves by itself after
+        3 minutes). Every change is saved at once. The grip and foregrip are stored per weapon and per
+        character ([Weapon.<name>@<character>] sections in twfcvr.ini; a character not set up for a weapon
+        yet takes that weapon's last setup - [Weapon.<name>]). Aiming is only along the barrel (the extra scope lens is removed; Scope=1 in [Input]
         brings it back).
   The game's interface (health, ammo, objectives) hangs on a panel in front of you and smoothly
   follows your gaze. The game's own crosshair in the centre is removed - aim with the ring.
