@@ -1534,6 +1534,18 @@ static XrFovf g_overlayFov;
 static ID3D11ShaderResourceView* g_overlayHud;   // this frame's HUD layer for the eyes (markers, names) or null
 static float g_overlayHudShrink = 1.0f;           // ... drawn shrunk about the centre by this (EyeFrame::hudScale)
 
+// The format to read a texture through (dgVoodoo's D3D9 backbuffer texture is typeless).
+static DXGI_FORMAT ReadFormat(DXGI_FORMAT f)
+{
+    switch (f) {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS: return DXGI_FORMAT_R8G8B8A8_UNORM;
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS: return DXGI_FORMAT_B8G8R8A8_UNORM;
+    case DXGI_FORMAT_B8G8R8X8_TYPELESS: return DXGI_FORMAT_B8G8R8X8_UNORM;
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS: return DXGI_FORMAT_R10G10B10A2_UNORM;
+    default: return f;
+    }
+}
+
 // Copies the game's back buffer into the next image of a swapchain (or, with scopeRect, a part of it into a
 // size x size round scope image).
 static bool CopyToChain(Chain& c, ID3D11Texture2D* bb, const float* scopeRect = nullptr, UINT size = 0)
@@ -1561,13 +1573,17 @@ static bool CopyToChain(Chain& c, ID3D11Texture2D* bb, const float* scopeRect = 
         rd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
         rd.MiscFlags = 0;
         if (SUCCEEDED(xr.device->CreateTexture2D(&rd, nullptr, &resolved))) {
-            imm->ResolveSubresource(resolved, 0, bb, 0, bd.Format);
+            imm->ResolveSubresource(resolved, 0, bb, 0, ReadFormat(bd.Format));
             src = resolved;
         }
     }
     ID3D11ShaderResourceView* srv = nullptr;
     ID3D11Texture2D* copy = nullptr;
-    if (FAILED(xr.device->CreateShaderResourceView(src, nullptr, &srv))) {
+    D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
+    sd.Format = ReadFormat(bd.Format);
+    sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    sd.Texture2D.MipLevels = 1;
+    if (FAILED(xr.device->CreateShaderResourceView(src, &sd, &srv))) {
         // Back buffer not bindable as SRV: copy it into a sampleable texture first.
         D3D11_TEXTURE2D_DESC cd = bd;
         cd.SampleDesc = { 1, 0 };
@@ -1576,7 +1592,7 @@ static bool CopyToChain(Chain& c, ID3D11Texture2D* bb, const float* scopeRect = 
         cd.Usage = D3D11_USAGE_DEFAULT;
         if (SUCCEEDED(xr.device->CreateTexture2D(&cd, nullptr, &copy))) {
             imm->CopyResource(copy, src);
-            xr.device->CreateShaderResourceView(copy, nullptr, &srv);
+            xr.device->CreateShaderResourceView(copy, &sd, &srv);
         }
     }
     if (srv) xr.blit.Draw(xr.device, imm, srv, c.rtvs[idx], c.width, c.height, xr.linearize, false, scopeRect);
@@ -3797,8 +3813,9 @@ static void PresentStereo(ID3D11Texture2D* bb, const EyeFrame& f)
                haveRay ? (XrCompositionLayerBaseHeader*)&ray : nullptr });
 }
 
-// Called on the game's render/present thread for every presented frame.
-static void VRFrame(IDXGISwapChain* sc)
+// Called on the game's render/present thread for every presented frame (gameBB: the game's own picture of it,
+// dgVoodoo's D3D9 backbuffer texture, or null).
+static void VRFrame(IDXGISwapChain* sc, ID3D11Resource* gameBB)
 {
     if (xr.failed) return;
     if (!xr.session) {
@@ -3830,6 +3847,23 @@ static void VRFrame(IDXGISwapChain* sc)
     if (FAILED(sc->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb))) return;
     D3D11_TEXTURE2D_DESC bd;
     bb->GetDesc(&bd);
+    // The picture comes from the window's back buffer - unless the window is smaller than the game's picture: a render
+    // size taller than the desktop (2560 on a 2560-high desktop) and dgVoodoo fits the window into it, the swapchain
+    // with it (2560x2547), and copies only the top of the picture there. Then from the game's backbuffer texture, whole.
+    ID3D11Texture2D* gt = nullptr;
+    if (gameBB && SUCCEEDED(gameBB->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&gt))) {
+        D3D11_TEXTURE2D_DESC gd;
+        gt->GetDesc(&gd);
+        bool use = (gd.Width != bd.Width || gd.Height != bd.Height) && gd.SampleDesc.Count == 1;
+        static bool used;
+        if (use != used) {
+            used = use;
+            if (use) Log("vr: picture from the game's backbuffer %ux%u (the window's swapchain is %ux%u)", gd.Width, gd.Height, bd.Width, bd.Height);
+            else Log("vr: picture from the window's swapchain %ux%u", bd.Width, bd.Height);
+        }
+        if (use) { bb->Release(); bb = gt; bd = gd; gt = nullptr; }
+        SafeRelease(gt);
+    }
     g_aspect = (float)bd.Width / (float)bd.Height;
 
     EyeFrame f;
@@ -3899,16 +3933,17 @@ static PFN_Present1 g_origPresent1;
 static std::atomic<long> g_frames;
 
 void TraceInstall(ID3D11Device* dev);
-void TraceEndFrame(ID3D11ShaderResourceView* layers[kHudLayers]);
+void TraceEndFrame(ID3D11ShaderResourceView* layers[kHudLayers], ID3D11Resource** gameBB);
 void HudSetWanted(bool on);
 
 static void OnPresent(IDXGISwapChain* sc, UINT flags)
 {
     if (flags & DXGI_PRESENT_TEST) return;
+    ID3D11Resource* gameBB = nullptr;
     if (g_cfg.debugAutomation || g_cfg.vrHud) {
         ID3D11Device* dev = nullptr;
         if (SUCCEEDED(sc->GetDevice(__uuidof(ID3D11Device), (void**)&dev))) { TraceInstall(dev); dev->Release(); }
-        TraceEndFrame(g_frameHud);
+        TraceEndFrame(g_frameHud, &gameBB);
         // Split the HUD off the next frame while the 3D view is shown.
         HudSetWanted(g_cfg.vrHud && g_cfg.vrMode == 1 && xr.running && CameraInGameplay());
     }
@@ -3940,7 +3975,7 @@ static void OnPresent(IDXGISwapChain* sc, UINT flags)
     g_d3dOwnCalls = true;
     static void* s_faultAt;
     __try {
-        VRFrame(sc);
+        VRFrame(sc, gameBB);
     } __except (s_faultAt = (GetExceptionInformation())->ExceptionRecord->ExceptionAddress, EXCEPTION_EXECUTE_HANDLER) {
         HMODULE self = nullptr;
         GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)&OnPresent, &self);
