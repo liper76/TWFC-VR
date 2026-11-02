@@ -194,7 +194,7 @@ PHYSICAL CONTROLS (new)
   In vehicle form the camera is third person by default (VehicleCamera=1, ChaseDistance / ChaseHeight);
     VehicleCamera=0 - from the cockpit (VehicleEyeHeight / VehicleEyeForward).
   Video movies, in-engine cutscenes and menus are on the virtual screen ([VR] Cutscenes3D=1 - cutscenes in 3D
-    around you).
+    around you). So are scripted walks where the game's camera follows the characters (the start of Prison Break).
   Interface markers (where to go, names over allies, target lock) are drawn right in the 3D view
     ([HUD] MarkersInEyes); translucent ability effects and text (hints, "reloading") are not - the text stays
     on the panel. The panel with health, abilities and weapon is as before.
