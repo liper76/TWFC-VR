@@ -183,15 +183,12 @@ static void LogStats(TPOV* pov, void* viewTarget, float dt)
     }
 }
 
-// Orientation of a hand's aim in OpenXR space. Held with both hands, the weapon is turned about the right hand so
-// that its front grip lies in the left hand.
+// Orientation of a hand's aim in OpenXR space. (The gun hand's is already as the gun is held: turned onto the front
+// hand with both hands, a virtual stock, smoothed - vr.cpp's GunPose.)
 static Mat3 HandAimXR(const VREyeView& eye, int h)
 {
     const auto& a = eye.aim[h];
-    Mat3 m = QuatToMat(a.qx, a.qy, a.qz, a.qw);
-    float q[4];
-    if (h != VRGunHand() || !VRTwoHandTurn(q)) return m;   // (the hand holding the gun: right or left)
-    return Mul(QuatToMat(q[0], q[1], q[2], q[3]), m);
+    return QuatToMat(a.qx, a.qy, a.qz, a.qw);
 }
 
 // Cutscenes and other non-player views: like the classic mode (game camera yaw + head), no aim.

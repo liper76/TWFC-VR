@@ -438,7 +438,6 @@ DWORD VRAbilityPressedAt() { return g_abilityAt; }
 static bool WheelIsOpen();
 static XrVector3f Rotate(const XrQuaternionf& q, XrVector3f v);
 static Vec3f g_forePos;                     // the held weapon's front grip (LOCAL space)
-static XrQuaternionf g_twoHandTurn = { 0, 0, 0, 1 };   // held two-handed: turn of the right hand's aim (LOCAL space)
 
 static XrQuaternionf QuatMul(const XrQuaternionf& a, const XrQuaternionf& b)
 {
@@ -458,14 +457,6 @@ static XrQuaternionf QuatFromTo(Vec3f a, Vec3f b)
     XrQuaternionf q = { a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x, 1.0f + d };
     float l = sqrtf(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
     return { q.x / l, q.y / l, q.z / l, q.w / l };
-}
-
-// Held two-handed, the weapon turns about the right hand so that its front grip lies in the left hand.
-bool VRTwoHandTurn(float q[4])
-{
-    if (!xr.twoHand) return false;
-    q[0] = g_twoHandTurn.x; q[1] = g_twoHandTurn.y; q[2] = g_twoHandTurn.z; q[3] = g_twoHandTurn.w;
-    return true;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -492,6 +483,7 @@ struct WeaponSetup {
     bool grip = false, fore = false, scopeSet = false, gripL = false;   // set for this weapon (else the global ones)
     float gunGrip[7] = { 0, 0, 0, 1, 0, 0, 0 }, foregrip[3] = {}, scope[4] = {};
     float gunGripL[7] = { 0, 0, 0, 1, 0, 0, 0 };   // the gun in the left hand (GunGripL)
+    bool stock = true;                    // has a butt for the shoulder stock (Stock=0/1; by default not pistols)
 };
 static WeaponSetup g_ws;                  // the weapon in hand
 static struct Setup {
@@ -705,6 +697,221 @@ static bool UpdateTurretGrips(const float squeeze[2])
     return true;
 }
 
+// ---- How the gun is held (render thread, once per presented frame). With both hands it turns about the gun hand's
+// grip so that its front grip lies in the other hand, its up kept the gun hand's - or, with a virtual stock (Gunstock,
+// like Contractors): 1 = at the shoulder - brought near it looking along the barrel, the butt rests there (blended in
+// as it nears): the front hand aims it, the gun hand only holds it (not pistols: no butt); 2 = about the front hand -
+// the gun hand's sideways shake damped, both hands' jitter filtered, and brought up to the eye, the sights line up
+// with it (within 14 degrees). WeaponSmoothing (0..10) then filters its turn, also held with one hand (a fast flick
+// less). Kept as a change of the gun hand's pose (LOCAL space): its aim turned by rot about the grip, the grip moved
+// by move - applied to the hands the game gets (LocateEyes) and to the aim ray (AimRay).
+static struct GunPose {
+    std::mutex mx;
+    bool on = false;
+    XrQuaternionf rot = { 0, 0, 0, 1 };
+    XrVector3f move = {};
+    XrTime t = 0;
+    bool filtered = false, damped = false;
+    XrQuaternionf smooth = { 0, 0, 0, 1 };   // the smoothed turn
+    XrVector3f rear = {}, front = {};       // Gunstock 2: the hands, damped
+    DWORD logAt = 0;
+} g_gp;
+
+static XrVector3f VAdd(XrVector3f a, XrVector3f b) { return { a.x + b.x, a.y + b.y, a.z + b.z }; }
+static XrVector3f VSub(XrVector3f a, XrVector3f b) { return { a.x - b.x, a.y - b.y, a.z - b.z }; }
+static XrVector3f VMul(XrVector3f a, float k) { return { a.x * k, a.y * k, a.z * k }; }
+static float VDot(XrVector3f a, XrVector3f b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+static float VLen(XrVector3f a) { return sqrtf(VDot(a, a)); }
+static XrVector3f VNorm(XrVector3f a) { float l = VLen(a); return l > 1e-6f ? VMul(a, 1.0f / l) : a; }
+static XrVector3f VLerp(XrVector3f a, XrVector3f b, float k) { return VAdd(a, VMul(VSub(b, a), k)); }
+static float Clamp01(float v) { return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v; }
+static float Smooth01(float v) { v = Clamp01(v); return v * v * (3.0f - 2.0f * v); }
+
+static XrQuaternionf QuatSlerp(XrQuaternionf a, XrQuaternionf b, float k)
+{
+    float d = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+    if (d < 0.0f) { b = { -b.x, -b.y, -b.z, -b.w }; d = -d; }
+    float wa = 1.0f - k, wb = k;
+    if (d < 0.9995f) {
+        float th = acosf(d), s = sinf(th);
+        wa = sinf((1.0f - k) * th) / s;
+        wb = sinf(k * th) / s;
+    }
+    XrQuaternionf q = { a.x * wa + b.x * wb, a.y * wa + b.y * wb, a.z * wa + b.z * wb, a.w * wa + b.w * wb };
+    float l = sqrtf(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    return { q.x / l, q.y / l, q.z / l, q.w / l };
+}
+
+// The angle between two turns (degrees).
+static float QuatAngleDeg(const XrQuaternionf& a, const XrQuaternionf& b)
+{
+    float d = fabsf(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w);
+    return 2.0f * acosf(d > 1.0f ? 1.0f : d) * 57.29578f;
+}
+
+// The turn taking the local direction ld onto the world direction wd, the local up (0,1,0) as near the world's wu as
+// it goes (false: a direction is zero or along its up).
+static bool QuatAim(XrVector3f ld, XrVector3f wd, XrVector3f wu, XrQuaternionf& q)
+{
+    auto frame = [](XrVector3f d, XrVector3f u, XrVector3f f[3]) {
+        if (VLen(d) < 1e-4f) return false;
+        d = VNorm(d);
+        u = VSub(u, VMul(d, VDot(u, d)));
+        if (VLen(u) < 1e-3f) return false;
+        u = VNorm(u);
+        f[0] = d; f[1] = u; f[2] = { d.y * u.z - d.z * u.y, d.z * u.x - d.x * u.z, d.x * u.y - d.y * u.x };
+        return true;
+    };
+    XrVector3f a[3], b[3];
+    if (!frame(ld, { 0, 1, 0 }, a) || !frame(wd, wu, b)) return false;
+    auto c = [](const XrVector3f& v, int i) { return i == 0 ? v.x : i == 1 ? v.y : v.z; };
+    float m[3][3];   // b * a^T: each local axis a[k] onto the world's b[k]
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++) m[i][j] = c(b[0], i) * c(a[0], j) + c(b[1], i) * c(a[1], j) + c(b[2], i) * c(a[2], j);
+    float tr = m[0][0] + m[1][1] + m[2][2], s;
+    if (tr > 0.0f) {
+        s = sqrtf(tr + 1.0f) * 2.0f;
+        q = { (m[2][1] - m[1][2]) / s, (m[0][2] - m[2][0]) / s, (m[1][0] - m[0][1]) / s, 0.25f * s };
+    } else if (m[0][0] > m[1][1] && m[0][0] > m[2][2]) {
+        s = sqrtf(1.0f + m[0][0] - m[1][1] - m[2][2]) * 2.0f;
+        q = { 0.25f * s, (m[0][1] + m[1][0]) / s, (m[0][2] + m[2][0]) / s, (m[2][1] - m[1][2]) / s };
+    } else if (m[1][1] > m[2][2]) {
+        s = sqrtf(1.0f + m[1][1] - m[0][0] - m[2][2]) * 2.0f;
+        q = { (m[0][1] + m[1][0]) / s, 0.25f * s, (m[1][2] + m[2][1]) / s, (m[0][2] - m[2][0]) / s };
+    } else {
+        s = sqrtf(1.0f + m[2][2] - m[0][0] - m[1][1]) * 2.0f;
+        q = { (m[0][2] + m[2][0]) / s, (m[1][2] + m[2][1]) / s, 0.25f * s, (m[1][0] - m[0][1]) / s };
+    }
+    float l = sqrtf(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    q = { q.x / l, q.y / l, q.z / l, q.w / l };
+    return true;
+}
+
+static void GunPoseOff()
+{
+    std::lock_guard<std::mutex> lk(g_gp.mx);
+    g_gp.on = false;
+    g_gp.filtered = g_gp.damped = false;
+}
+
+// The gun hand's aim pose and grip (LOCAL space) as the gun is held: the gun pose's change applied.
+static void GunPoseApply(XrPosef& aim, XrVector3f& grip)
+{
+    XrQuaternionf r;
+    XrVector3f m;
+    {
+        std::lock_guard<std::mutex> lk(g_gp.mx);
+        if (!g_gp.on) return;
+        r = g_gp.rot;
+        m = g_gp.move;
+    }
+    XrVector3f d = Rotate(r, VSub(aim.position, grip));
+    grip = VAdd(grip, m);
+    aim.position = VAdd(grip, d);
+    aim.orientation = QuatMul(r, aim.orientation);
+}
+
+static void UpdateGunPose(XrTime t, int G, int S, const Vec3f& fore, DWORD now)
+{
+    XrPosef aim, head;
+    XrVector3f grip;
+    if (VRGunHand() < 0 || WeaponsMeleeHeld() == G || WeaponsOnTurret() || IKPawnIsVehicle() || g_setup.active ||
+        g_calib.active || !LocateRightAim(t, aim, &grip) || !xr.viewSpace || !LocateHand(xr.viewSpace, t, head)) {
+        GunPoseOff();
+        return;
+    }
+    float dt = g_gp.t && t > g_gp.t ? (float)((t - g_gp.t) * 1e-9) : 0.0f;
+    g_gp.t = t;
+    if (dt > 0.1f) dt = 0.1f;
+    const XrQuaternionf q0 = aim.orientation;   // the gun as the gun hand holds it
+    const XrVector3f up = { 0, 1, 0 }, ahead = { 0, 0, -1 };
+    XrVector3f up0 = Rotate(q0, up);
+    XrQuaternionf q = q0, plain = q0;
+    XrVector3f at = grip;   // where the grip goes
+    float wShoulder = 0.0f, wSight = 0.0f;
+    int stock = 0;
+    if (xr.twoHand) {
+        XrVector3f rear = grip, front = { g_gripPos[S].x, g_gripPos[S].y, g_gripPos[S].z };
+        XrVector3f lf = Rotate(QuatConj(q0), { fore.x - grip.x, fore.y - grip.y, fore.z - grip.z });   // the front grip (aim axes)
+        if (QuatAim(lf, VSub(front, rear), up0, plain)) q = plain;
+        // the shoulder and the eye on the gun hand's side (the head's heading: right = (-fz, 0, fx)); looking along it
+        float side = G ? 1.0f : -1.0f;
+        const XrQuaternionf& o = head.orientation;
+        float fx = -2 * (o.x * o.z + o.y * o.w), fz = -(1 - 2 * (o.x * o.x + o.y * o.y));
+        float fl = sqrtf(fx * fx + fz * fz);
+        if (fl < 1e-3f) { fx = 0; fz = -1; } else { fx /= fl; fz /= fl; }
+        const float* sh = g_cfg.stockShoulder;   // aside, up, back
+        XrVector3f shoulder = { head.position.x - side * sh[0] * fz - sh[2] * fx, head.position.y + sh[1],
+                                head.position.z + side * sh[0] * fx - sh[2] * fz };
+        XrVector3f eye = VAdd(head.position, Rotate(o, { side * 0.032f, 0, 0 }));
+        float look = Clamp01(VDot(Rotate(q, ahead), Rotate(o, ahead)));
+        XrVector3f lb = { g_cfg.stockButt[0], g_cfg.stockButt[1], g_cfg.stockButt[2] };
+        XrVector3f ls = { g_cfg.stockSight[0], g_cfg.stockSight[1], g_cfg.stockSight[2] };
+        if (g_cfg.gunstock == 1 && g_ws.stock) {
+            stock = 1;
+            wShoulder = Smooth01((1.0f - VLen(VSub(VAdd(rear, Rotate(q, lb)), shoulder)) / 0.28f) * look);
+            XrQuaternionf qa;
+            if (wShoulder > 0.0f && QuatAim(VSub(lf, lb), VSub(front, shoulder), VNorm(VLerp(up0, up, wShoulder * 0.45f)), qa)) {
+                // the butt at the shoulder, the front grip on the line from it to the front hand
+                q = QuatSlerp(q, qa, wShoulder);
+                at = VLerp(rear, VSub(shoulder, Rotate(qa, lb)), wShoulder);
+            }
+        } else if (g_cfg.gunstock == 2) {
+            stock = 2;
+            XrVector3f fwd = Rotate(q, ahead);
+            wSight = Smooth01((1.0f - VLen(VSub(VAdd(rear, Rotate(q, ls)), eye)) / 0.30f) * look * look);
+            if (!g_gp.damped) { g_gp.rear = rear; g_gp.front = front; g_gp.damped = true; }
+            // the gun hand: along the barrel as it goes, sideways damped (more as the sights near the eye)
+            XrVector3f d = VSub(rear, g_gp.rear);
+            float along = VDot(d, fwd);
+            float k = 1.0f - expf(-(45.0f + (8.0f - 45.0f) * wSight * 0.85f) * dt);
+            g_gp.rear = VAdd(g_gp.rear, VAdd(VMul(fwd, along), VMul(VSub(d, VMul(fwd, along)), k)));
+            g_gp.front = VLerp(g_gp.front, front, 1.0f - expf(-40.0f * dt));
+            XrVector3f wu = VNorm(VLerp(up0, up, wSight * 0.35f));
+            XrQuaternionf qd;
+            if (QuatAim(lf, VSub(g_gp.front, g_gp.rear), wu, qd)) q = qd;
+            at = g_gp.rear;
+            // at the eye: the barrel along the line from the eye through the sights' line over the front hand (the
+            // front grip may sit below and aside of it), the gun turned about the front hand
+            XrVector3f ideal = VNorm(VSub(VAdd(g_gp.front, Rotate(q, { ls.x - lf.x, ls.y - lf.y, 0.0f })), eye));
+            float c = VDot(Rotate(q, ahead), ideal);
+            float cone = Clamp01(1.0f - acosf(c > 1.0f ? 1.0f : c < -1.0f ? -1.0f : c) * 57.29578f / 14.0f);
+            float align = wSight * cone * 0.75f;
+            XrQuaternionf qi, qh = q;
+            if (align > 0.0f && QuatAim(ahead, ideal, wu, qi)) {
+                q = QuatSlerp(q, qi, align);
+                at = VAdd(g_gp.rear, VSub(Rotate(qh, lf), Rotate(q, lf)));   // (the front grip stays where it was)
+            }
+        }
+    }
+    if (stock != 2) g_gp.damped = false;
+    // the smoothing: a slow turn filtered hard, a fast flick hardly (the place is not filtered)
+    float level = g_cfg.weaponSmoothing;
+    if (level > 0.0f && g_gp.filtered) {
+        if (dt > 0.0f) {
+            float n = Clamp01(level / 10.0f);
+            float flick = Clamp01(QuatAngleDeg(g_gp.smooth, q) / dt / 120.0f);
+            float lo = 35.0f + (4.0f - 35.0f) * n, hi = 90.0f + (35.0f - 90.0f) * n;
+            g_gp.smooth = QuatSlerp(g_gp.smooth, q, 1.0f - expf(-(lo + (hi - lo) * flick) * dt));
+        }
+        q = g_gp.smooth;
+    } else g_gp.smooth = q;
+    g_gp.filtered = level > 0.0f;
+    XrVector3f move = VSub(at, grip);
+    {
+        std::lock_guard<std::mutex> lk(g_gp.mx);
+        g_gp.on = true;
+        g_gp.rot = QuatMul(q, QuatConj(q0));
+        g_gp.move = move;
+    }
+    if (g_cfg.logFps && xr.twoHand && now - g_gp.logAt > 1000) {
+        g_gp.logAt = now;
+        XrVector3f f = Rotate(q, ahead);
+        Log("vr: gun pose: stock %d shoulder %.2f sight %.2f, %.1f deg from the plain hold, grip moved %.3f m, aim (%.3f %.3f %.3f)",
+            stock, wShoulder, wSight, QuatAngleDeg(q, plain), VLen(move), f.x, f.y, f.z);
+    }
+}
+
 static void UpdateGestures(XINPUT_GAMEPAD& p, DWORD now)
 {
     XrTime t = g_lastDisplayTime.load();
@@ -748,7 +955,7 @@ static void UpdateGestures(XINPUT_GAMEPAD& p, DWORD now)
         fore = { g_gripPos[G].x + w.x, g_gripPos[G].y + w.y, g_gripPos[G].z + w.z };
     }
     g_forePos = fore;
-    if (g_setup.active) { xr.twoHand = false; return; }   // (the grips move the setup's cubes now)
+    if (g_setup.active) { xr.twoHand = false; GunPoseOff(); return; }   // (the grips move the setup's cubes now)
     bool turretGrips = UpdateTurretGrips(squeeze);
     if (turretGrips || !g_cfg.twoHanded || WeaponsMeleeHeld() >= 0 || VRGunHand() < 0) xr.twoHand = false;   // (both hands free for it)
     else if (xr.twoHand) xr.twoHand = squeeze[S] > 0.35f;
@@ -820,28 +1027,7 @@ static void UpdateGestures(XINPUT_GAMEPAD& p, DWORD now)
         p.bRightTrigger = (BYTE)(fire * 255.0f);
         if (g_tg.held[G ^ 1] >= 0) p.bLeftTrigger = 0;   // (that hand's trigger is no fine aim then)
     }
-    if (xr.twoHand) {   // the gun turns about the gun hand's grip so that its front grip lies in the other hand
-        Vec3f nominal = { fore.x - g_gripPos[G].x, fore.y - g_gripPos[G].y, fore.z - g_gripPos[G].z };
-        Vec3f actual = { g_gripPos[S].x - g_gripPos[G].x, g_gripPos[S].y - g_gripPos[G].y, g_gripPos[S].z - g_gripPos[G].z };
-        XrQuaternionf swing = QuatFromTo(nominal, actual);
-        // the gun's "down" stays the main (gun) hand's down: a twist about the line to the other hand brings the turned
-        // gun's up back to the gun controller's up (the other hand only points the barrel)
-        float al = sqrtf(actual.x * actual.x + actual.y * actual.y + actual.z * actual.z);
-        XrPosef ra;
-        if (al > 0.05f && LocateRightAim(t, ra, nullptr)) {
-            XrVector3f ax = { actual.x / al, actual.y / al, actual.z / al };
-            XrVector3f u0 = Rotate(ra.orientation, { 0, 1, 0 }), u1 = Rotate(QuatMul(swing, ra.orientation), { 0, 1, 0 });
-            auto flat = [&](XrVector3f u) { float k = u.x * ax.x + u.y * ax.y + u.z * ax.z; return XrVector3f{ u.x - ax.x * k, u.y - ax.y * k, u.z - ax.z * k }; };
-            XrVector3f p0 = flat(u0), p1 = flat(u1);
-            XrVector3f c = { p1.y * p0.z - p1.z * p0.y, p1.z * p0.x - p1.x * p0.z, p1.x * p0.y - p1.y * p0.x };   // p1 x p0
-            float sinA = c.x * ax.x + c.y * ax.y + c.z * ax.z, cosA = p1.x * p0.x + p1.y * p0.y + p1.z * p0.z;
-            if (sinA * sinA + cosA * cosA > 1e-6f) {
-                float h = atan2f(sinA, cosA) * 0.5f, s = sinf(h);
-                swing = QuatMul({ ax.x * s, ax.y * s, ax.z * s, cosf(h) }, swing);
-            }
-        }
-        g_twoHandTurn = swing;
-    }
+    UpdateGunPose(t, G, S, fore, now);   // held with both hands: turned onto the front hand, the virtual stock; smoothed
     if (xr.twoHand && g_cfg.gripAbilities) p.wButtons &= ~(S == 0 ? XINPUT_GAMEPAD_LEFT_SHOULDER : XINPUT_GAMEPAD_RIGHT_SHOULDER);
 
     // ability buttons (bumpers): pressed now
@@ -1020,6 +1206,7 @@ static void UpdateInput()
     }
 
     if (gameplay) UpdateGestures(p, now);
+    else GunPoseOff();
 
     std::lock_guard<std::mutex> lock(g_padMutex);
     g_pad.active = true;
@@ -1663,6 +1850,8 @@ static void TrackWeaponSetup()
     g_ws.fore = IniFloats(sec.c_str(), L"Foregrip", g_ws.foregrip, 3) == 3;
     g_ws.scopeSet = IniFloats(sec.c_str(), L"Scope", g_ws.scope, 4) == 4;
     g_ws.gripL = IniFloats(sec.c_str(), L"GunGripL", g_ws.gunGripL, 7) == 7;
+    float stock;
+    g_ws.stock = IniFloats(sec.c_str(), L"Stock", &stock, 1) == 1 ? stock > 0.5f : g_ws.name.find(L"Pistol") == std::wstring::npos;
     g_setup.dirty = true;
     Log("vr: weapon setup for %ls: grip %d, front %d, lens %d", g_ws.name.c_str(), g_ws.grip, g_ws.fore, g_ws.scopeSet);
 }
@@ -1866,6 +2055,8 @@ static const SettingItem kSettings[] = {
     { L"Input", L"MoveByHead", L"\x0418\x0434\x0442\x0438 \x043A\x0443\x0434\x0430 \x0441\x043C\x043E\x0442\x0440\x044E", L"Walk where I look", 1, 1, 0, 1 },
     { L"Input", L"GripUse", L"\x0413\x0440\x0438\x043F = \x0434\x0435\x0439\x0441\x0442\x0432\x0438\x0435 (\x0432\x0437\x044F\x0442\x044C, \x0440\x044B\x0447\x0430\x0433, \x0441\x0435\x0441\x0442\x044C)", L"Grip = use (take, lever, get in)", 1, 1, 0, 1 },
     { L"Input", L"TwoHanded", L"\x0414\x0432\x0443\x0440\x0443\x0447\x043D\x044B\x0439 \x0445\x0432\x0430\x0442", L"Two-handed grip", 1, 1, 0, 1 },
+    { L"Input", L"Gunstock", L"\x041F\x0440\x0438\x043A\x043B\x0430\x0434: 0 \x043D\x0435\x0442, 1 \x043A \x043F\x043B\x0435\x0447\x0443, 2 \x0443 \x0446\x0435\x0432\x044C\x044F", L"Virtual stock: 0 off, 1 shoulder, 2 front hand", 2, 1, 0, 2 },
+    { L"Input", L"WeaponSmoothing", L"\x0421\x0433\x043B\x0430\x0436\x0438\x0432\x0430\x043D\x0438\x0435 \x043E\x0440\x0443\x0436\x0438\x044F (0-10)", L"Weapon smoothing (0-10)", 3, 1, 0, 10 },
     { L"Input", L"GrenadeGrab", L"\x0413\x0440\x0430\x043D\x0430\x0442\x044B \x0440\x0443\x043A\x043E\x0439 \x0441 \x043F\x043E\x044F\x0441\x0430", L"Grenades by hand from the belt", 1, 1, 0, 1 },
     { L"Input", L"GrenadeThrowScale", L"\x0421\x0438\x043B\x0430 \x0431\x0440\x043E\x0441\x043A\x0430 \x0433\x0440\x0430\x043D\x0430\x0442\x044B", L"Grenade throw strength", 3, 0.25f, 0.5f, 8 },
     { L"Input", L"GrenadeGravity", L"\x0412\x0435\x0441 \x0433\x0440\x0430\x043D\x0430\x0442\x044B", L"Grenade weight", 1, 0.25f, 0, 3 },
@@ -2833,6 +3024,7 @@ static bool LocateEyes(const int* eyes, int count, VREyeView* out)
     XrVector3f rg;
     int gh = GunIdx();
     if (aim[gh].valid && LocateRightAim(li.displayTime, ra, &rg)) {
+        GunPoseApply(ra, rg);   // as the gun is held (with both hands, a virtual stock, smoothed)
         aim[gh] = { true, ra.position.x, ra.position.y, ra.position.z, ra.orientation.x, ra.orientation.y, ra.orientation.z, ra.orientation.w };
         grip[gh].px = rg.x; grip[gh].py = rg.y; grip[gh].pz = rg.z;
     }
@@ -3165,8 +3357,8 @@ bool VRTurretAim(float q[4], float p[3])
     return true;
 }
 
-// The ray shots travel along (LOCAL space, forward = -Z of the pose): the right controller, the line from the
-// right hand to the left one when held two-handed, a turret's aim, or the gaze in vehicles.
+// The ray shots travel along (LOCAL space, forward = -Z of the pose): the gun hand's aim as the gun is held (with
+// both hands: onto the front hand, a virtual stock; smoothed - GunPose), a turret's aim, or the gaze in vehicles.
 static bool AimRay(XrTime t, XrPosef& hand)
 {
     // a mounted turret: as its handrails aim it (as camera.cpp does)
@@ -3178,9 +3370,11 @@ static bool AimRay(XrTime t, XrPosef& hand)
     }
     // vehicles aim with the head (their gun is below the eyes; a gaze ray keeps the ring on the hit point)
     if (CameraVehicleAim() && xr.viewSpace) { if (!LocateHand(xr.viewSpace, t, hand)) return false; }
-    else if (!LocateRightAim(t, hand, nullptr)) return false;
-    // held with both hands: turned so the weapon's front grip lies in the left hand
-    if (xr.twoHand && !CameraVehicleAim()) hand.orientation = QuatMul(g_twoHandTurn, hand.orientation);
+    else {
+        XrVector3f grip;
+        if (!LocateRightAim(t, hand, &grip)) return false;
+        GunPoseApply(hand, grip);
+    }
     return true;
 }
 

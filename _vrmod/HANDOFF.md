@@ -185,7 +185,8 @@ D3D11/DXGI; мод хукает DXGI Present и отдаёт кадры в OpenX
   Направление стика — `StickVertical` (|y| > 0.7 и |y| > 1.5|x|, отпуск при |y| < 0.4), `xr.stickDir` в vr.cpp.
   Грипы колесо НЕ открывают (раньше мешало). LogFps=1 пишет в лог «vr: abilities LB/RB», «vr: right stick up/down»,
   «vr: B held -> weapon wheel».
-- Грипы: двуручный хват (левый у цевья), гранаты (грип у пояса + курок взвести, отпустить = бросок), притягивание
+- Грипы: двуручный хват (левый у цевья; виртуальный приклад `Gunstock` 0/1 к плечу/2 у цевья и сглаживание
+  `WeaponSmoothing` 0..10 — `GunPose` в vr.cpp, применяется к рукам и лучу выстрела), гранаты (грип у пояса + курок взвести, отпустить = бросок), притягивание
   (навести свободную руку + сжать грип), в меню — перенос зон.
 - Турель: при посадке перед игроком две ручки и перекладина (квады, vr.cpp `BuildTurretGrips`). Сжать грип у
   ручки — взять (одной или двумя руками), поворот рук вокруг головы поворачивает пушку (в пределах турели),
@@ -289,11 +290,12 @@ HeldFrameTime, SingleThreadRender, StereoPerFrame=0, HandIK, ShowBody, ArmSize=0
 WeaponScale, FingerPoses, NearClip=10, NoNearFade, MuzzleFlashScale, Reticle, ReticleSize, ReticleStyle,
 Cutscenes3D=0, GunGrip, Foregrip, EmptyGripR, AbilityAnimation=0, LevelView=1 (глаза рисуются без крена головы, рантайм
 доворачивает: имена и метки ровно по миру; фрустум растёт на крен).
-[Input]: AimMode=1, SnapTurnDegrees, SmoothTurnSpeed, MoveByHead, TwoHanded, TwoHandReach/Radius, GrenadeGrab,
+[Input]: AimMode=1, SnapTurnDegrees, SmoothTurnSpeed, MoveByHead, TwoHanded, TwoHandReach/Radius, Gunstock=2, WeaponSmoothing=3,
+(StockShoulder/StockButt/StockSight), GrenadeGrab,
 GrenadeThrowScale=3, GrenadeGravity, GrenadeBelt, GrenadeScale=0.5, BeltOffset, MeleeGesture, MeleeSpeed=3, MeleeContact=0,
 MeleeReach, MeleeHitRadius, Pull, PullRange=12, PullCone=15, PullSpeed=0, PullAutoTake=1, PullTrace, Scope=0,
 GripAbilities=0, PhysicalAim. [HUD]: Minimal=1, Prompts, MarkersInEyes, ButtonHints, Distance, Width, FollowSpeed.
-[Weapon.<имя>]: GunGrip, GunGripL, Foregrip, Scope. [Debug]: Automation, LogFps, FakeHmd.
+[Weapon.<имя>]: GunGrip, GunGripL, Foregrip, Scope, Stock (0 = без приклада; по умолчанию нет у «Pistol»). [Debug]: Automation, LogFps, FakeHmd.
 dgVoodoo.conf (BinariesVR): Filtering=16 (AF); Antialiasing только appdriven (MSAA ломает отделение HUD).
 
 ---
@@ -301,7 +303,7 @@ dgVoodoo.conf (BinariesVR): Filtering=16 (AF); Antialiasing только appdriv
 ## 8. Состояние функций
 
 Работает (проверено MockXR; в шлеме — по отзывам пользователя частично): 1-е лицо, IK рук, прицел контроллером,
-кольцо прицела по точке попадания, колесо оружия (удержание B), двуручный хват (низ по контроллеру основной руки),
+кольцо прицела по точке попадания, колесо оружия (удержание B), двуручный хват (низ по контроллеру основной руки; приклад и сглаживание — только MockXR),
 пустая правая рука, гранаты из пояса, притягивание грипом (полёт в руку, затем в пешку без выталкивания; невзятое
 возвращается), удар рукой вперёд, меню настроек с лучом, Т-поза и масштаб по росту, камера машины Space Mover,
 машина без вылетов, ролики Bink на виртуальном экране, катсцены плоско (Cutscenes3D=0), подсказки кнопок VR,

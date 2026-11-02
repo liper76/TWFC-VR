@@ -165,6 +165,12 @@ static void LoadConfig()
                   "TwoHanded=1\n"
                   "TwoHandReach=0.25\n"
                   "TwoHandRadius=0.15\n"
+                  "; Held with both hands, a virtual stock (like Contractors): 0 = none (the gun turns about the gun hand),\n"
+                  ";     1 = at the shoulder (bring the gun hand to it: the butt rests there, the front hand aims),\n"
+                  ";     2 = about the front hand (the gun hand's shake damped; brought to the eye, the sights line up)\n"
+                  "Gunstock=2\n"
+                  "; The gun's turn smoothed: 0 = off .. 10 = most (fast flicks are smoothed less)\n"
+                  "WeaponSmoothing=3\n"
                   "; 1 = weapon held with both hands and raised to your eyes also presses the left trigger (fine aim);\n"
                   "; off by default: on some weapons the left trigger is their second action (detonating grenades)\n"
                   "PhysicalAim=0\n"
@@ -251,6 +257,18 @@ static void LoadConfig()
     g_cfg.twoHanded = (int)IniFloat(ini, L"Input", L"TwoHanded", (float)g_cfg.twoHanded);
     g_cfg.twoHandReach = IniFloat(ini, L"Input", L"TwoHandReach", g_cfg.twoHandReach);
     g_cfg.twoHandRadius = IniFloat(ini, L"Input", L"TwoHandRadius", g_cfg.twoHandRadius);
+    g_cfg.gunstock = (int)IniFloat(ini, L"Input", L"Gunstock", (float)g_cfg.gunstock);
+    g_cfg.weaponSmoothing = IniFloat(ini, L"Input", L"WeaponSmoothing", g_cfg.weaponSmoothing);
+    {   // (optional: StockShoulder, StockButt, StockSight - x,y,z metres)
+        const wchar_t* keys[3] = { L"StockShoulder", L"StockButt", L"StockSight" };
+        float* dst[3] = { g_cfg.stockShoulder, g_cfg.stockButt, g_cfg.stockSight };
+        for (int k = 0; k < 3; k++) {
+            wchar_t b[96];
+            GetPrivateProfileStringW(L"Input", keys[k], L"", b, 96, ini.c_str());
+            float o[3];
+            if (swscanf_s(b, L"%f,%f,%f", &o[0], &o[1], &o[2]) == 3) memcpy(dst[k], o, sizeof(o));
+        }
+    }
     g_cfg.physicalAim = (int)IniFloat(ini, L"Input", L"PhysicalAim", (float)g_cfg.physicalAim);
     g_cfg.gripAbilities = (int)IniFloat(ini, L"Input", L"GripAbilities", (float)g_cfg.gripAbilities);
     g_cfg.wheelSize = IniFloat(ini, L"Input", L"WheelSize", g_cfg.wheelSize);
