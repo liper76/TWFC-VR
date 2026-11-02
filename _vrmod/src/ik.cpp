@@ -931,7 +931,12 @@ void SolveArm(int side, Pose* pose, Vec3 wrist, const Vec3 ctrl[3], const Vec3 h
         Vec3 rhAx[3];
         UnitAxes(rh, rhAx);
         Vec3 d = Norm(FromFrame(InFrame(Norm(Sub(rh.pos, re.pos)), rhAx), holdAx));   // the forearm, turned with the gun
-        Vec3 v = Sub(Sub(wrist, Scale(d, L2 * g_cfg.weaponScale)), S);
+        // (temporary, ElbowInGun*: the point the elbow goes for moved along the gun - forward, up, out - in drawn
+        // forearm lengths, to calibrate where it goes into the gun)
+        float fl = L2 * g_cfg.weaponScale;
+        const float* eg = g_cfg.elbowInGun;
+        Vec3 shift = Add(Add(Scale(ctrl[0], eg[0] * fl), Scale(ctrl[2], eg[1] * fl)), Scale(ctrl[1], (side ? 1.0f : -1.0f) * eg[2] * fl));
+        Vec3 v = Sub(Add(Sub(wrist, Scale(d, fl)), shift), S);
         float len = Len(v);
         float k = fminf(fmaxf(len, 0.6f * L1), kGunReach * L1);
         g_gunArmDbg[0] = L1; g_gunArmDbg[1] = L2; g_gunArmDbg[2] = len; g_gunArmDbg[3] = k; g_gunArmDbg[4] = stretch;

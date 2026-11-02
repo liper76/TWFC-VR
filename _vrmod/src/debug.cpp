@@ -285,7 +285,7 @@ static void RunLine(const char* line)
         WeaponList wl;
         WeaponsGetList(wl);
         for (int i = 0; i < wl.count; i++) Log("debug: weapon %d %ls%s", i, wl.name[i], i == wl.current ? " (in hand)" : "");
-        Log("debug: melee hand %d held %d", WeaponsMeleeHand(), WeaponsMeleeHeld());
+        Log("debug: in hand '%ls'; melee hand %d held %d", wl.held, WeaponsMeleeHand(), WeaponsMeleeHeld());
     } else if (!strncmp(line, "turretdbg", 9)) {   // turretdbg 1|2|0: on a turret, log its aim once a second (2: its traces)
         extern int g_debugTurret;
         g_debugTurret = atoi(line + 9);

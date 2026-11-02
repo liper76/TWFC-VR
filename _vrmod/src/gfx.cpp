@@ -364,7 +364,7 @@ void __fastcall HookDisplay(void* view, void* edx)
     if (view != hud || GetCurrentThreadId() != GameThreadId() || !FindClips(view)) {
         if (g_traceFrames > 0)
             Log("trace: Display of %ls view %p (HUD %p), thread %lu", ViewName(view), view, hud, GetCurrentThreadId());
-        HudSetLayer(kHudPanel);
+        HudSetLayer(kHudPanel, true);
         g_origDisplay(view, edx);
         D3D9Flush();
         HudSetLayer(kHudEyes);
@@ -375,7 +375,7 @@ void __fastcall HookDisplay(void* view, void* edx)
         GFxValue v = {};
         if (!CallGet(view, g_visPath[i].c_str(), &v) || (v.type & 0xF) != 2) {   // (the movie changed)
             g_clipsView = nullptr;
-            HudSetLayer(kHudPanel);
+            HudSetLayer(kHudPanel, true);
             g_origDisplay(view, edx);
             D3D9Flush();
             HudSetLayer(kHudEyes);
@@ -412,7 +412,7 @@ void __fastcall HookDisplay(void* view, void* edx)
         bool hide[kClips] = {};
         for (int i : hidden) hide[i] = true;
         for (int i = 0; i < kClips; i++) setVisible(i, orig[i] && !hide[i]);
-        HudSetLayer(layer);
+        HudSetLayer(layer, true);
         g_origDisplay(view, edx);
         D3D9Flush();   // (dgVoodoo holds the last draw back until the next one: let it land in this layer)
     };

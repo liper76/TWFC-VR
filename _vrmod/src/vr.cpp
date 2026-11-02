@@ -618,12 +618,18 @@ void VRDebugCalib(int confirm, int left)
     else GripCalibrationToggle();
 }
 
-// A mounted turret's handrails: two grips in front of the player, seated on the gun - they turn with it about the eyes,
-// as the gun does in view (CameraTurretSeat). A squeeze at one holds it until let go; the held grips turn the gun by
-// how far the hands went round the player since they took hold (both hands: the mean), and a holding hand's trigger
-// fires. Let go, the gun stays aimed where it was (relative to the body: turning turns it too).
+// A mounted turret's handrails: two grips in front of the player, seated on the gun - they turn with its yaw about the
+// eyes, as the gun does in view (CameraTurretSeat). A squeeze at one holds it until let go; a holding hand's trigger
+// fires. The held grips turn the gun by how far the hands went round the player since they took hold (both hands: the
+// mean), and they pitch it as the spade grips of a mounted gun that pivots ahead of them: raised - and tipped forward -
+// the gun dips, pressed down it rises (the grips' swing about that pivot and the hands' tilt, blended; the gun pitches
+// kTurretGain times as far, so its -30..25 degrees are a hand's span). Before, the hands' height round the eyes
+// pitched it the other way round, and the bottom wanted the hands down at the chest. Let go, the gun stays aimed where
+// it was (relative to the body: turning turns it too).
 static const XrVector3f kTurretGrip[2] = { { -0.18f, -0.30f, -0.40f }, { 0.18f, -0.30f, -0.40f } };   // LOCAL, gun ahead
 static const float kTurretGripHalf = 0.07f;   // half the grips' length
+static const float kTurretLever = 0.30f;      // the gun pivots this far ahead of the grips (m)
+static const float kTurretGain = 1.3f;        // ... and it pitches this many times as far as the grips swing about it
 static struct {
     bool on;                       // on a mounted turret: the grips are there
     bool aimed;                    // ... and the aim is set (the gun as it was when mounted)
@@ -631,13 +637,24 @@ static struct {
     int hover = -1;                // a free hand is at this grip
     float yaw, pitch;              // the aim relative to the room (LOCAL: yaw + = left, pitch + = up; radians)
     float baseYaw, basePitch;      // ... when the holding hands last changed
-    float handYaw[2], handPitch[2];   // ... and where those hands were then (round the player)
-    XrQuaternionf seat = { 0, 0, 0, 1 };   // the gun as it is, as far as the eyes are seated: the grips turned so
+    float handYaw[2], handY[2], handTilt[2];   // ... and those hands then: round the player, their height, the aim's pitch
+    XrQuaternionf seat = { 0, 0, 0, 1 };   // the gun's yaw as it is, as far as the eyes are seated: the grips turned so
+    float lever;                   // ... and its pitch from the turret's own over kTurretGain: the grips swung so
 } g_tg;
 
 static XrQuaternionf YawPitchQuat(float yaw, float pitch)
 {
     return QuatMul({ 0, sinf(yaw * 0.5f), 0, cosf(yaw * 0.5f) }, { sinf(pitch * 0.5f), 0, 0, cosf(pitch * 0.5f) });
+}
+
+// Grip g as it is drawn (LOCAL): its middle and the way up along it - swung about the pivot ahead with the gun's pitch
+// (the gun dipped: the grip higher, its top tipped forward), then turned with the gun's yaw.
+static void TurretGripAt(int g, XrVector3f& mid, XrVector3f& up)
+{
+    const XrVector3f& c = kTurretGrip[g];
+    float s = sinf(g_tg.lever), co = cosf(g_tg.lever);
+    mid = Rotate(g_tg.seat, { c.x, c.y - kTurretLever * s, c.z - kTurretLever + kTurretLever * co });
+    up = Rotate(g_tg.seat, { 0.0f, co, s });
 }
 
 // UpdateGestures: true while on a turret (its grips hold the hands that squeeze at them)
@@ -650,7 +667,11 @@ static bool UpdateTurretGrips(const float squeeze[2])
         return false;
     }
     if (!g_tg.aimed) { g_tg.yaw = sy; g_tg.pitch = sp; g_tg.aimed = true; }
-    g_tg.seat = YawPitchQuat(sy * seated, sp * seated);
+    g_tg.seat = YawPitchQuat(sy * seated, 0.0f);
+    float lim[4], rest = 0.0f;   // (the pitch the turret itself stands at)
+    int bp, by;
+    if (WeaponsTurretLimits(lim, bp, by)) rest = (short)(uint16_t)bp * (6.2831853f / 65536.0f);
+    g_tg.lever = fminf(fmaxf(remainderf(sp - rest, 6.2831853f) / kTurretGain, -1.0f), 1.0f) * seated;
     g_tg.on = true;
     bool changed = false;
     g_tg.hover = -1;
@@ -660,9 +681,12 @@ static bool UpdateTurretGrips(const float squeeze[2])
             continue;
         }
         for (int g = 0; g < 2; g++) {
-            XrVector3f c = Rotate(g_tg.seat, kTurretGrip[g]);
+            XrVector3f c, u;
+            TurretGripAt(g, c, u);
             float dx = g_gripPos[h].x - c.x, dy = g_gripPos[h].y - c.y, dz = g_gripPos[h].z - c.z;
-            if (g_tg.held[1 - h] == g || dx * dx + dz * dz > 0.1f * 0.1f || fabsf(dy) > kTurretGripHalf + 0.06f) continue;
+            float along = dx * u.x + dy * u.y + dz * u.z;   // (along the grip; then off it)
+            dx -= u.x * along; dy -= u.y * along; dz -= u.z * along;
+            if (g_tg.held[1 - h] == g || dx * dx + dy * dy + dz * dz > 0.1f * 0.1f || fabsf(along) > kTurretGripHalf + 0.06f) continue;
             if (squeeze[h] > 0.6f) {   // (a squeeze already on - the one that got in - takes it too)
                 g_tg.held[h] = g;
                 changed = true;
@@ -673,26 +697,28 @@ static bool UpdateTurretGrips(const float squeeze[2])
             break;
         }
     }
-    float hy[2], hp[2];
+    float hy[2], ht[2];
     for (int h = 0; h < 2; h++) {
         const Vec3f& p = g_gripPos[h];
         hy[h] = atan2f(-p.x, -p.z);
-        hp[h] = atan2f(p.y, sqrtf(p.x * p.x + p.z * p.z));
+        ht[h] = asinf(fminf(fmaxf(g_aimFwd[h].y, -1.0f), 1.0f));
     }
     if (changed) {   // the hands now holding take the gun as it is aimed
         g_tg.baseYaw = g_tg.yaw;
         g_tg.basePitch = g_tg.pitch;
-        for (int h = 0; h < 2; h++) { g_tg.handYaw[h] = hy[h]; g_tg.handPitch[h] = hp[h]; }
+        for (int h = 0; h < 2; h++) { g_tg.handYaw[h] = hy[h]; g_tg.handY[h] = g_gripPos[h].y; g_tg.handTilt[h] = ht[h]; }
     }
     int n = 0;
     float dy = 0.0f, dp = 0.0f;
     for (int h = 0; h < 2; h++)
         if (g_tg.held[h] >= 0) {
             dy += remainderf(hy[h] - g_tg.handYaw[h], 6.2831853f);
-            dp += hp[h] - g_tg.handPitch[h];
+            // the grip swung about the pivot ahead (raised: the gun down) and the hand tipped (forward: down)
+            float lift = fminf(fmaxf((g_gripPos[h].y - g_tg.handY[h]) / kTurretLever, -1.0f), 1.0f);
+            dp += -asinf(lift) * 0.7f + (ht[h] - g_tg.handTilt[h]) * 0.3f;
             n++;
         }
-    if (n) { g_tg.yaw = g_tg.baseYaw + dy / n; g_tg.pitch = g_tg.basePitch + dp / n; }
+    if (n) { g_tg.yaw = g_tg.baseYaw + dy / n; g_tg.pitch = g_tg.basePitch + kTurretGain * dp / n; }
     CameraTurretClamp(g_tg.yaw, g_tg.pitch);
     return true;
 }
@@ -1826,9 +1852,11 @@ static void IniWriteFloats(const wchar_t* sec, const wchar_t* key, const float* 
 // The weapon in hand changed: its own settings (or none: the global ones stay).
 static void TrackWeaponSetup()
 {
+    // the gun in hand, whether the wheel lists it or not (before: the listed one only - a gun the wheel left out kept
+    // the last gun's grip, and a setup saved then went to that one)
     WeaponList wl;
     WeaponsGetList(wl);
-    if (wl.current < 0 || wl.current >= wl.count || g_ws.name == wl.name[wl.current]) {
+    if (!wl.held[0] || g_ws.name == wl.held) {
         if (g_ws.grip) memcpy(g_cfg.gunGrip, g_ws.gunGrip, sizeof(g_ws.gunGrip));   // (an ini reload resets g_cfg)
         if (g_ws.fore) { memcpy(g_cfg.foregrip, g_ws.foregrip, sizeof(g_ws.foregrip)); g_cfg.foregripSet = 1; }
         return;
@@ -1844,7 +1872,7 @@ static void TrackWeaponSetup()
     if (g_ws.grip) memcpy(g_cfg.gunGrip, globalGrip, sizeof(globalGrip));
     if (g_ws.fore) { memcpy(g_cfg.foregrip, globalFore, sizeof(globalFore)); g_cfg.foregripSet = globalForeSet; }
     g_ws = WeaponSetup();
-    g_ws.name = wl.name[wl.current];
+    g_ws.name = wl.held;
     std::wstring sec = L"Weapon." + g_ws.name;
     g_ws.grip = IniFloats(sec.c_str(), L"GunGrip", g_ws.gunGrip, 7) == 7;
     g_ws.fore = IniFloats(sec.c_str(), L"Foregrip", g_ws.foregrip, 3) == 3;
@@ -2056,6 +2084,10 @@ static const SettingItem kSettings[] = {
     { L"Input", L"GripUse", L"\x0413\x0440\x0438\x043F = \x0434\x0435\x0439\x0441\x0442\x0432\x0438\x0435 (\x0432\x0437\x044F\x0442\x044C, \x0440\x044B\x0447\x0430\x0433, \x0441\x0435\x0441\x0442\x044C)", L"Grip = use (take, lever, get in)", 1, 1, 0, 1 },
     { L"Input", L"TwoHanded", L"\x0414\x0432\x0443\x0440\x0443\x0447\x043D\x044B\x0439 \x0445\x0432\x0430\x0442", L"Two-handed grip", 1, 1, 0, 1 },
     { L"Input", L"Gunstock", L"\x041F\x0440\x0438\x043A\x043B\x0430\x0434: 0 \x043D\x0435\x0442, 1 \x043A \x043F\x043B\x0435\x0447\x0443, 2 \x0443 \x0446\x0435\x0432\x044C\x044F", L"Virtual stock: 0 off, 1 shoulder, 2 front hand", 2, 1, 0, 2 },
+    // TEMPORARY (calibration, to be removed): where the gun arm's elbow goes into the gun
+    { L"Input", L"ElbowInGunForward", L"\x0412\x0420\x0415\x041C\x0415\x041D\x041D\x041E: \x043B\x043E\x043A\x043E\x0442\x044C \x0432 \x043E\x0440\x0443\x0436\x0438\x0438 \x2014 \x0432\x043F\x0435\x0440\x0451\x0434", L"TEMP: elbow in gun \x2014 forward", 0, 0.05f, -1.5f, 1.5f },
+    { L"Input", L"ElbowInGunUp", L"\x0412\x0420\x0415\x041C\x0415\x041D\x041D\x041E: \x043B\x043E\x043A\x043E\x0442\x044C \x0432 \x043E\x0440\x0443\x0436\x0438\x0438 \x2014 \x0432\x0432\x0435\x0440\x0445", L"TEMP: elbow in gun \x2014 up", 0, 0.05f, -1.5f, 1.5f },
+    { L"Input", L"ElbowInGunOut", L"\x0412\x0420\x0415\x041C\x0415\x041D\x041D\x041E: \x043B\x043E\x043A\x043E\x0442\x044C \x0432 \x043E\x0440\x0443\x0436\x0438\x0438 \x2014 \x043D\x0430\x0440\x0443\x0436\x0443", L"TEMP: elbow in gun \x2014 out", 0, 0.05f, -1.5f, 1.5f },
     { L"Input", L"WeaponSmoothing", L"\x0421\x0433\x043B\x0430\x0436\x0438\x0432\x0430\x043D\x0438\x0435 \x043E\x0440\x0443\x0436\x0438\x044F (0-10)", L"Weapon smoothing (0-10)", 3, 1, 0, 10 },
     { L"Input", L"GrenadeGrab", L"\x0413\x0440\x0430\x043D\x0430\x0442\x044B \x0440\x0443\x043A\x043E\x0439 \x0441 \x043F\x043E\x044F\x0441\x0430", L"Grenades by hand from the belt", 1, 1, 0, 1 },
     { L"Input", L"GrenadeThrowScale", L"\x0421\x0438\x043B\x0430 \x0431\x0440\x043E\x0441\x043A\x0430 \x0433\x0440\x0430\x043D\x0430\x0442\x044B", L"Grenade throw strength", 3, 0.25f, 0.5f, 8 },
@@ -2570,47 +2602,85 @@ static bool BuildRay(const XrPosef& head, XrCompositionLayerQuad& q)
 }
 
 // A mounted turret's handrails (UpdateTurretGrips): the two grips and the bar under them, turned with the gun as the
-// eyes are - grey, lit up when a free hand is at one, green while held.
-static Chain g_gripChain[3];
+// eyes are. Drawn like the game's machinery (before: plain grey rods, green while held): dark gunmetal shaded round,
+// steel collars at the ends, finger grooves on the grips, panel seams on the bar, and a lamp strip and rings on the
+// grips that tell them - dim blue, bright blue with a free hand at one, the game's orange while held.
+static Chain g_gripChain[4];   // the grips as looked (idle, a hand at it, held), the bar
+static const UINT kGripTexW = 32, kGripTexH = 128;
 
-static bool MakeBarChain(Chain& c, float r, float g, float b)
+static bool MakeGripChain(Chain& c, int look)   // look 3 = the bar
 {
-    const UINT S = 16;
-    if (!CreateChain(c, S, S)) return false;
-    std::vector<uint32_t> px(S * S);
+    const UINT W = kGripTexW, H = kGripTexH;
+    if (!CreateChain(c, W, H)) return false;
+    std::vector<uint32_t> px(W * H);
     bool rgba = xr.format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || xr.format == DXGI_FORMAT_R8G8B8A8_UNORM;
-    for (UINT y = 0; y < S; y++)
-        for (UINT x = 0; x < S; x++) {
-            // across the bar: shaded like a round rod lit from the upper left, a dark rim; premultiplied alpha
-            float u = (x + 0.5f) / S * 2.0f - 1.0f;
-            float l = x == 0 || x == S - 1 ? 0.2f : fminf(0.35f + 0.65f * sqrtf(fmaxf(0.0f, 1.0f - u * u)) - 0.2f * u, 1.0f);
-            float a = 0.9f;
-            uint32_t R = (uint32_t)(255 * r * l * a), G = (uint32_t)(255 * g * l * a), B = (uint32_t)(255 * b * l * a);
-            px[y * S + x] = (rgba ? (R | (G << 8) | (B << 16)) : (B | (G << 8) | (R << 16))) | ((uint32_t)(255 * a) << 24);
+    static const float kLamp[4][3] = { { 0.12f, 0.42f, 0.75f }, { 0.5f, 0.92f, 1.0f }, { 1.0f, 0.58f, 0.2f }, { 0.1f, 0.35f, 0.6f } };
+    const float* lamp = kLamp[look];
+    bool bar = look == 3;
+    float lit = look == 1 ? 1.2f : 1.0f;   // (a hand at it: the metal lit up a little too)
+    auto clamp01 = [](float v) { return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v; };
+    for (UINT y = 0; y < H; y++)
+        for (UINT x = 0; x < W; x++) {
+            // u across (-1..1), v along (0..1); its silhouette (half width hw), the metal and the lamp light by v
+            float u = (x + 0.5f) / W * 2.0f - 1.0f, v = (y + 0.5f) / H;
+            float end = fminf(v, 1.0f - v);
+            float hw, metal[3] = { 0.26f, 0.28f, 0.32f }, glow = 0.0f, shade = 1.0f;
+            if (end < 0.09f) {                      // a steel collar, its end chamfered
+                hw = 0.8f + 0.2f * clamp01(end / 0.025f);
+                metal[0] = 0.5f; metal[1] = 0.52f; metal[2] = 0.56f;
+                if (fabsf(end - 0.05f) < 0.008f) shade = 0.55f;   // (a groove round it)
+            } else if (end < 0.12f) {               // a dark seam with a lamp ring (the bar: a plain seam)
+                hw = 0.86f;
+                metal[0] = metal[1] = metal[2] = 0.07f;
+                glow = bar ? 0.0f : 0.9f;
+            } else if (!bar) {                      // the grip: four finger grooves between ridges
+                float ph = (v - 0.12f) / 0.76f * 4.0f, ridge = powf(fabsf(cosf(3.14159265f * ph)), 6.0f);
+                hw = 0.72f + 0.1f * ridge;
+                shade = 0.78f + 0.22f * ridge;
+            } else {                                // the bar: panels with seams and a rivet at each
+                float ph = (v - 0.12f) / 0.76f * 5.0f, f = ph - floorf(ph);
+                hw = 0.8f;
+                if (f < 0.04f || f > 0.96f) shade = 0.4f;
+                float rv = (fminf(f, 1.0f - f) - 0.12f) * 12.0f, rr = rv * rv + (u + 0.45f) * (u + 0.45f) * 40.0f;
+                if (rr < 1.0f) shade = 1.3f;
+            }
+            float a = clamp01((hw - fabsf(u)) * W * 0.5f);   // (soft edge, about a pixel)
+            float un = u / hw, n = sqrtf(fmaxf(0.0f, 1.0f - un * un));
+            // round, lit from the upper left: diffuse and a highlight; a dark rim
+            float diff = clamp01(0.25f + 0.75f * (0.8f * n - 0.35f * un)), spec = 0.5f * expf(-(un + 0.4f) * (un + 0.4f) / 0.02f);
+            if (fabsf(u) > hw - 4.0f / W) shade *= 0.55f;
+            float col[3];
+            for (int k = 0; k < 3; k++) col[k] = (metal[k] * diff * lit + spec * 0.9f) * shade + lamp[k] * glow * (0.6f + 0.4f * n);
+            // the lamp strip down the grip's side (dimmer in the grooves), a thin one along the bar's middle
+            float sw = bar ? 0.08f : 0.1f, sc = bar ? 0.0f : 0.35f;
+            if (end >= 0.12f && fabsf(un - sc) < sw) {
+                float s = clamp01((sw - fabsf(un - sc)) * W * 0.5f) * (bar ? 0.6f : 0.55f + 0.45f * shade);
+                for (int k = 0; k < 3; k++) col[k] = col[k] * (1.0f - s) + lamp[k] * s;
+            }
+            uint32_t R = (uint32_t)(255 * clamp01(col[0]) * a), G = (uint32_t)(255 * clamp01(col[1]) * a), B = (uint32_t)(255 * clamp01(col[2]) * a);
+            px[y * W + x] = (rgba ? (R | (G << 8) | (B << 16)) : (B | (G << 8) | (R << 16))) | ((uint32_t)(255 * a) << 24);
         }
-    return FillChain(c, px, S);
+    return FillChain(c, px, W);
 }
 
 // q[0], q[1] = the grips, q[2] = the bar under them; false when not on a turret
 static bool BuildTurretGrips(const XrPosef& head, XrCompositionLayerQuad q[3])
 {
     if (!g_tg.on || g_setup.active) return false;
-    static const float kColor[3][3] = { { 0.55f, 0.6f, 0.68f }, { 0.75f, 0.92f, 1.0f }, { 0.35f, 1.0f, 0.45f } };
-    for (int i = 0; i < 3; i++)
-        if (!g_gripChain[i].sc && !MakeBarChain(g_gripChain[i], kColor[i][0], kColor[i][1], kColor[i][2])) { g_tg.on = false; return false; }
-    XrQuaternionf seat = g_tg.seat;
-    const XrRect2Di all = { { 0, 0 }, { 16, 16 } };
+    for (int i = 0; i < 4; i++)
+        if (!g_gripChain[i].sc && !MakeGripChain(g_gripChain[i], i)) { g_tg.on = false; return false; }
+    const XrRect2Di all = { { 0, 0 }, { (int32_t)kGripTexW, (int32_t)kGripTexH } };
     bool ok = true;
+    XrVector3f low[2];
     for (int g = 0; g < 2; g++) {
-        const XrVector3f& c = kTurretGrip[g];
+        XrVector3f c, u;
+        TurretGripAt(g, c, u);
         int look = g_tg.held[0] == g || g_tg.held[1] == g ? 2 : g_tg.hover == g ? 1 : 0;
-        ok &= BarQuad(head, Rotate(seat, { c.x, c.y - kTurretGripHalf, c.z }), Rotate(seat, { c.x, c.y + kTurretGripHalf, c.z }),
-                      0.035f, g_gripChain[look], all, q[g]);
+        low[g] = { c.x - u.x * kTurretGripHalf, c.y - u.y * kTurretGripHalf, c.z - u.z * kTurretGripHalf };
+        ok &= BarQuad(head, low[g], { c.x + u.x * kTurretGripHalf, c.y + u.y * kTurretGripHalf, c.z + u.z * kTurretGripHalf },
+                      0.045f, g_gripChain[look], all, q[g]);
     }
-    const XrVector3f& l = kTurretGrip[0];
-    const XrVector3f& r = kTurretGrip[1];
-    ok &= BarQuad(head, Rotate(seat, { l.x, l.y - kTurretGripHalf, l.z }), Rotate(seat, { r.x, r.y - kTurretGripHalf, r.z }), 0.025f,
-                  g_gripChain[0], all, q[2]);
+    ok &= BarQuad(head, low[0], low[1], 0.034f, g_gripChain[3], all, q[2]);
     return ok;
 }
 
@@ -2640,8 +2710,9 @@ static bool BuildZoneMark(int i, XrTime t, const XrPosef& head, XrCompositionLay
     return true;
 }
 
-// The pickup a squeeze of the pointing hand's grip would pull (pull.cpp, placed by camera.cpp): a pulsing blue ring
-// around it, over the scene. Before, only a tick in the controller told it, and the hand often grabbed at air.
+// The pickup a squeeze of the pointing hand's grip would pull (pull.cpp, placed by camera.cpp): a small pulsing blue
+// dot at its middle, over the scene (as Boneworks marks it; a ring round the whole item was too loud). Before, only a
+// tick in the controller told it, and the hand often grabbed at air.
 static std::mutex g_pullMarkMutex;
 static struct { bool on; XrVector3f at; float radius; DWORD tick; } g_pullMark;
 static Chain g_pullRing;
@@ -2653,19 +2724,23 @@ void VRSetPullMark(bool on, const float local[3], float radiusM)
     if (on) { g_pullMark.at = { local[0], local[1], local[2] }; g_pullMark.radius = radiusM; g_pullMark.tick = GetTickCount(); }
 }
 
-static bool MakeRingChain(Chain& c, float r, float g, float b)
+static bool MakeDotChain(Chain& c, float r, float g, float b)
 {
     const UINT S = 64;
     if (!CreateChain(c, S, S)) return false;
     std::vector<uint32_t> px(S * S);
     bool rgba = xr.format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || xr.format == DXGI_FORMAT_R8G8B8A8_UNORM;
+    auto clamp01 = [](float v) { return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v; };
     for (UINT y = 0; y < S; y++)
         for (UINT x = 0; x < S; x++) {
             float dx = x + 0.5f - S / 2.0f, dy = y + 0.5f - S / 2.0f, d = sqrtf(dx * dx + dy * dy);
-            // coloured ring (radius 24.5..29.5 of 32) with a dark outline; premultiplied alpha
-            float ring = d > 24.5f && d < 29.5f ? 1.0f : 0.0f;
-            float a = ring ? 0.95f : d > 23.0f && d < 31.0f ? 0.6f : 0.0f;
-            uint32_t R = (uint32_t)(255 * r * ring * a), G = (uint32_t)(255 * g * ring * a), B = (uint32_t)(255 * b * ring * a);
+            // a coloured disc (radius 20 of 32), lighter in the middle, in a thin dark outline (to 25), soft edges;
+            // premultiplied alpha
+            float core = clamp01(20.5f - d), edge = clamp01(25.5f - d);
+            float hi = 0.45f * clamp01((9.0f - d) / 6.0f);
+            float a = core * 0.95f + (edge - core) * 0.55f;
+            float cr = (r + (1.0f - r) * hi) * core, cg = (g + (1.0f - g) * hi) * core, cb = (b + (1.0f - b) * hi) * core;
+            uint32_t R = (uint32_t)(255 * cr * 0.95f), G = (uint32_t)(255 * cg * 0.95f), B = (uint32_t)(255 * cb * 0.95f);
             px[y * S + x] = (rgba ? (R | (G << 8) | (B << 16)) : (B | (G << 8) | (R << 16))) | ((uint32_t)(255 * a) << 24);
         }
     return FillChain(c, px, S);
@@ -2674,21 +2749,19 @@ static bool MakeRingChain(Chain& c, float r, float g, float b)
 static bool BuildPullMark(const XrPosef& head, XrCompositionLayerQuad& q)
 {
     XrVector3f at;
-    float radius;
     {
         std::lock_guard<std::mutex> lock(g_pullMarkMutex);
         if (!g_pullMark.on || GetTickCount() - g_pullMark.tick > 300) return false;
         at = g_pullMark.at;
-        radius = g_pullMark.radius;
     }
     if (!g_cfg.pullMark || g_setup.active) return false;
-    if (!g_pullRing.sc && !MakeRingChain(g_pullRing, 0.3f, 0.8f, 1.0f)) { g_cfg.pullMark = 0; return false; }
+    if (!g_pullRing.sc && !MakeDotChain(g_pullRing, 0.3f, 0.8f, 1.0f)) { g_cfg.pullMark = 0; return false; }
     float dx = at.x - head.position.x, dy = at.y - head.position.y, dz = at.z - head.position.z;
     float dist = sqrtf(dx * dx + dy * dy + dz * dz);
     if (dist < 0.05f) return false;
-    // around the drawn item (its bounds), at least ~4 degrees wide for far pickups, gently pulsing
-    float size = std::max(radius * 2.2f, dist * 0.07f);
-    size = std::min(size, std::max(dist * 0.6f, 0.1f)) * (1.0f + 0.08f * sinf(GetTickCount() * 0.0094f));
+    // at the middle of the drawn item (its bounds), the same small size in view whatever the item (the dot ~1 degree,
+    // not under ~1 cm close up), gently pulsing
+    float size = std::max(dist * 0.028f, 0.014f) * (1.0f + 0.12f * sinf(GetTickCount() * 0.0094f));
     q = { XR_TYPE_COMPOSITION_LAYER_QUAD };
     q.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
     q.space = xr.localSpace;
