@@ -142,12 +142,17 @@ D3D11/DXGI; мод хукает DXGI Present и отдаёт кадры в OpenX
 ### Разрешение рендера (по шлему)
 - Игре размер отдают хуки: registry.cpp (ScreenResolution), d3d9modes.cpp (добавочный режим), focus.cpp (окно,
   «-windowed», DPI). Сам ключ ScreenResolution в реестре не трогать.
-- `[VR] RenderScale` > 0: DllMain → `VRRenderSizeStart` (vr.cpp) запускает поток `RenderSizeThread`: экземпляр
-  OpenXR, имя шлема, рекомендуемый размер глаза (в VD — его качество) + поле зрения из `BinariesVR\twfcvr_headset.txt`
-  → сторона квадрата в `g_cfg.renderWidth/Height`. Поле зрения пишет `SaveHeadsetFov` (раз за запуск, из
-  `WaitAndBegin`): новый шлем — первый запуск по оценке, точно со следующего.
-- В DllMain ждать нельзя (loader lock — поток не стартует): при установке хуков — `VRRenderSizeOn()` (без
-  ожидания), при использовании размера — `VRRenderSizeWait()` (до 15 с). Перезагрузка ini размер не меняет.
+- `[VR] RenderScale` > 0: DllMain → `VRRenderSizeStart` (vr.cpp) берёт первую строку `BinariesVR\twfcvr_headset.txt`.
+  Там последний шлем: имя, рекомендуемый размер глаза (в VD — его качество) и 8 тангенсов поля. `RenderSideFor`
+  считает сторону квадрата: плотность по площади × 2·max|tan| × RenderScale, не больше `MaxRenderSize` (2560). Результат
+  кладётся в `g_cfg.renderWidth/Height`. Строку пишет `SaveHeadsetFov` раз за запуск, из `WaitAndBegin`, во время
+  сессии. Новый шлем или новое качество VD применяются со следующего запуска. Перезагрузка ini размер не меняет.
+- **OpenXR при старте НЕ опрашивать.** Экземпляр создаёт только `InitXR` в потоке рендера. Когда опрос шёл из
+  DllMain в своём потоке, а размер был 3456x3456 (Quest 3, VD), игра молча закрывалась на первом 3D-кадре.
+  Причина не доказана. MockXR на 3456 работал.
+- Постоянный след крашей (debug.cpp `CrashTraceStart`): «exception: …» (векторный обработчик, до 12 мест),
+  «exit: … called from …» (хуки ExitProcess/TerminateProcess), «mem: …» (адресное пространство). UE3 ловит
+  исключения сам и выходит без WER — смотреть эти строки в twfcvr.log.
 
 ### Вывод изображения (текущий)
 - **Чередование глаз (AFR)**: один кадр игры = один глаз. Пара L+R отдаётся в OpenXR как projection layer.
@@ -301,6 +306,7 @@ TnHealthPickupFactory, TnWeaponPickupFactory, TnDroppedPickup*, TnProjectileGren
 ## 7. Настройки (twfcvr.ini, основное)
 
 [VR]: Mode, RenderScale=1.0 (>0: размер рендера по шлему × это, при старте игры; 0 = всегда RenderWidth/Height),
+MaxRenderSize=2560 (предел для RenderScale; 0 = без предела),
 RenderWidth/Height=1800 (квадрат, один глаз на кадр; пока ни один шлем не встречался), WorldScale (по умолчанию 200 ед/м; при AutoScale
 — авто), AutoScale, UserEyeHeight, UserArmSpan, FirstPersonEyeHeight=150 / EyeForward=30, VehicleCamera (0 кабина,
 1 сзади), ChaseDistance/Height, VehicleEyeHeight/Forward, VehicleHeadAim, SyncEyeTime, SyncEyeTimeVehicle,
@@ -331,8 +337,8 @@ HUD-панель + метки в глаза, HUD при малом HP (толь�
 Не проверено/сомнительно: гранаты и оружие с земли как цели притягивания (имена классов не подтверждены — список
 расширен на «…Pickup…»/«…Dropped…»), автоподбор оружия (X 1.2 с), урон по врагам ударом, снайперский зум; от
 02.11: позиция оружия при смене (по оружию в руке, `WeaponList::held`), ручки турели в стиле игры, точка подбора,
-временные ElbowInGun*, разрешение по шлему (RenderScale; с VD не проверено), кожух пустой руки после смены оружия —
-в шлеме не проверены.
+временные ElbowInGun*, разрешение по шлему (RenderScale; из файла шлема, до 2560 — в шлеме не проверено после
+краша на 3456), кожух пустой руки после смены оружия — в шлеме не проверены.
 
 ---
 
@@ -347,7 +353,8 @@ HUD-панель + метки в глаза, HUD при малом HP (толь�
 5. **ВРЕМЕННЫЕ настройки `[Input] ElbowInGunForward/Up/Out`** (меню: «ВРЕМЕННО: локоть в оружии — …», ik.cpp
    `SolveArm`, main.cpp, vr.cpp, `g_cfg.elbowInGun`) — пользователь калибрует, куда локоть входит в оружие. Когда
    выставит — перенести его значения из twfcvr.ini в код как константы и убрать пункты и ключи.
-6. Проверить в шлеме от 02.11: разрешение по шлему (лог «vr: render size …», после второго запуска с VD),
+6. Проверить в шлеме от 02.11: старт после краша на первом 3D-кадре (лог «vr: render size 2560x2560 for Meta Quest 3 …»;
+   при выходе — строки «exception:»/«exit:»/«mem:»; если снова закрывается — MaxRenderSize ниже или RenderScale=0),
    кожух пустой правой руки после смены оружия (Мегатрон и другие роботы), вид ручек турели, точку подбора,
    сохранение позиции оружия при смене.
 

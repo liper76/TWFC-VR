@@ -119,6 +119,9 @@ static void LoadConfig()
                   "; the quality setting - at the same sharpness, times RenderScale; set at game start) and these two\n"
                   "; are only used until a headset has been seen. RenderScale=0: always these two.\n"
                   "RenderScale=1.0\n"
+                  "; The largest size RenderScale may give (0 = no limit). At 3456x3456 the game ended at its first\n"
+                  "; 3D frame in Virtual Desktop.\n"
+                  "MaxRenderSize=2560\n"
                   "RenderWidth=1800\n"
                   "RenderHeight=1800\n"
                   "; Render a wider view than the headset needs (1.0 = exact)\n"
@@ -208,6 +211,7 @@ static void LoadConfig()
     g_cfg.renderWidth = (int)IniFloat(ini, L"VR", L"RenderWidth", (float)g_cfg.renderWidth);
     g_cfg.renderHeight = (int)IniFloat(ini, L"VR", L"RenderHeight", (float)g_cfg.renderHeight);
     g_cfg.renderScale = IniFloat(ini, L"VR", L"RenderScale", g_cfg.renderScale);
+    g_cfg.maxRenderSize = (int)IniFloat(ini, L"VR", L"MaxRenderSize", (float)g_cfg.maxRenderSize);
     g_cfg.cameraMode = (int)IniFloat(ini, L"VR", L"CameraMode", (float)g_cfg.cameraMode);
     g_cfg.aimMode = (int)IniFloat(ini, L"VR", L"AimMode", (float)g_cfg.aimMode);
     g_cfg.vrHud = (int)IniFloat(ini, L"HUD", L"FloatingHud", (float)g_cfg.vrHud);
@@ -402,9 +406,10 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID)
         g_log = _wfsopen((ModDir() + L"twfcvr.log").c_str(), L"w", _SH_DENYWR);
         if (!g_log) g_log = _wfsopen((ModDir() + L"twfcvr_2.log").c_str(), L"w", _SH_DENYWR);
         Log("TWFC VR mod loaded (build %s %s)", __DATE__, __TIME__);
+        CrashTraceStart();
         // The resolution override must be in place before the game reads its settings at startup.
         LoadConfig();
-        VRRenderSizeStart();  // (the headset's answer comes before the game reads the size)
+        VRRenderSizeStart();  // (before the game reads the size)
         GameEarlyPatches();   // (before the engine starts its render thread)
         RegistryInstallHooks();
         D3D9ModesInstall();

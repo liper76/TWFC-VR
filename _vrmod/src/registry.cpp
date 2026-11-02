@@ -15,7 +15,7 @@ static PFN_QueryA g_origQueryA;
 static PFN_SetW g_origSetW;
 static PFN_SetA g_origSetA;
 
-static bool Enabled() { VRRenderSizeWait(); return g_cfg.renderWidth > 0 && g_cfg.renderHeight > 0; }
+static bool Enabled() { return g_cfg.renderWidth > 0 && g_cfg.renderHeight > 0; }
 
 static LSTATUS Answer(LPDWORD type, LPBYTE data, LPDWORD cb, const void* str, DWORD bytes)
 {
@@ -67,7 +67,7 @@ static LSTATUS WINAPI HookSetA(HKEY k, LPCSTR name, DWORD r, DWORD type, const B
 // Called from DllMain: the game reads the value during startup, before our worker thread would run.
 void RegistryInstallHooks()
 {
-    if (!VRRenderSizeOn()) return;
+    if (!Enabled()) return;
     MH_Initialize();
     MH_CreateHookApi(L"advapi32", "RegQueryValueExW", (void*)HookQueryW, (void**)&g_origQueryW);
     MH_CreateHookApi(L"advapi32", "RegQueryValueExA", (void*)HookQueryA, (void**)&g_origQueryA);

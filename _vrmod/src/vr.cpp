@@ -1223,11 +1223,8 @@ static void UpdateInput()
 
 static bool g_retryLater;   // headset not available yet: try again in a few seconds
 
-// The OpenXR instance: made once, by whichever comes first - the render size query at startup or InitXR.
-static std::mutex g_xrInstanceMutex;
 static XrResult CreateXrInstance()
 {
-    std::lock_guard<std::mutex> lock(g_xrInstanceMutex);
     if (xr.instance) return XR_SUCCESS;
     const char* exts[] = { XR_KHR_D3D11_ENABLE_EXTENSION_NAME };
     XrInstanceCreateInfo ici = { XR_TYPE_INSTANCE_CREATE_INFO };
@@ -1252,12 +1249,12 @@ static XrResult CreateXrInstance()
 // Each frame the game draws one eye into its back buffer, which is the size the game is told the screen is
 // (registry.cpp, d3d9modes.cpp, focus.cpp) - fixed before the game reads it at startup. With RenderScale > 0 that
 // size follows the headset: the runtime's recommended eye size (Virtual Desktop: its quality setting), at the same
-// pixels per degree over the square frustum the game draws for both eyes (LocateEyes), times RenderScale. The eyes'
-// FOV needs a session, which comes only later, so it is kept in twfcvr_headset.txt per headset (the last one first):
-// the first start on a new headset guesses, the next is exact. Without a runtime or headset at startup: the last
-// headset's size; never seen one: RenderWidth/RenderHeight from the ini.
-static std::atomic<int> g_sizeState;   // 0 asking the runtime, 3 applying the answer, 1 settled, 2 given up (the ini's)
-static HANDLE g_sizeEvent;              // set when the answer is in (or none came)
+// pixels per tangent area over the square frustum the game draws for both eyes (LocateEyes), times RenderScale, at most
+// MaxRenderSize. The runtime is not asked at startup: the headset's name, recommended size and eyes' FOV are kept in
+// twfcvr_headset.txt from the last session (written once one runs), so a new headset or Virtual Desktop quality applies
+// from the next start; never seen one: RenderWidth/RenderHeight from the ini. (Asked at startup - an instance and its
+// system made from DllMain on a thread of their own - and at 3456x3456 for Quest 3, the game ended at its first 3D
+// frame in Virtual Desktop; MockXR ran at that size.)
 
 static void SafeHeadsetName(char* name)
 {
@@ -1266,24 +1263,17 @@ static void SafeHeadsetName(char* name)
     if (!*name) strcpy_s(name, XR_MAX_SYSTEM_NAME_SIZE, "headset");
 }
 
-// The headset as the runtime has it now, without a session: its name and the recommended eye size (the larger eye's).
-static bool QueryHeadset(char* name, int rec[2], bool quiet = false)
+// The session's headset: its name and the recommended eye size (the larger eye's).
+static bool QueryHeadset(char* name, int rec[2])
 {
-    XrResult r = CreateXrInstance();
-    if (XR_FAILED(r)) { if (!quiet) Log("vr: render size: no OpenXR runtime (%d)", (int)r); return false; }
-    XrSystemGetInfo sgi = { XR_TYPE_SYSTEM_GET_INFO };
-    sgi.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
-    XrSystemId sys = XR_NULL_SYSTEM_ID;
-    r = xrGetSystem(xr.instance, &sgi, &sys);
-    if (XR_FAILED(r)) { if (!quiet) Log("vr: render size: no headset yet (%d)", (int)r); return false; }
     XrSystemProperties sp = { XR_TYPE_SYSTEM_PROPERTIES };
     name[0] = 0;
-    if (XR_SUCCEEDED(xrGetSystemProperties(xr.instance, sys, &sp))) strcpy_s(name, XR_MAX_SYSTEM_NAME_SIZE, sp.systemName);
+    if (XR_SUCCEEDED(xrGetSystemProperties(xr.instance, xr.system, &sp))) strcpy_s(name, XR_MAX_SYSTEM_NAME_SIZE, sp.systemName);
     SafeHeadsetName(name);
     XrViewConfigurationView v[2] = { { XR_TYPE_VIEW_CONFIGURATION_VIEW }, { XR_TYPE_VIEW_CONFIGURATION_VIEW } };
     uint32_t n = 0;
-    r = xrEnumerateViewConfigurationViews(xr.instance, sys, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 2, &n, v);
-    if (XR_FAILED(r) || !n) { if (!quiet) Log("vr: render size: the runtime gave no eye size (%d)", (int)r); return false; }
+    XrResult r = xrEnumerateViewConfigurationViews(xr.instance, xr.system, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 2, &n, v);
+    if (XR_FAILED(r) || !n) return false;
     rec[0] = rec[1] = 0;
     for (uint32_t i = 0; i < n && i < 2; i++) {
         rec[0] = std::max(rec[0], (int)v[i].recommendedImageRectWidth);
@@ -1321,87 +1311,40 @@ static bool ParseHeadsetLine(const std::string& s, HeadsetLine& h)
                     &a[4], &a[5], &a[6], &a[7]) == 10 && h.rec[0] > 0 && h.rec[1] > 0;
 }
 
-// The square back buffer's side for a headset: its recommended pixels per tangent unit over the frustum LocateEyes
-// draws (both eyes' FOV, symmetric, square; FovScale), times RenderScale. Without its FOV: a guess.
+static int MaxRenderSide() { return g_cfg.maxRenderSize > 0 ? std::max(g_cfg.maxRenderSize, 640) : 8192; }
+
+// The square back buffer's side for a headset: its recommended pixels per tangent area over the frustum LocateEyes
+// draws (both eyes' FOV, symmetric, square; FovScale), times RenderScale, at most MaxRenderSize. (Per area: the
+// recommended size need not have its FOV's shape - Virtual Desktop's Quest 3: 1123 pixels per unit up and down, 810
+// across; the larger of the two gave 3456.)
 static int RenderSideFor(const int rec[2], const float* tan)
 {
-    float side;
-    if (tan) {
-        float density = 0.0f, ext = 0.0f;
-        for (int e = 0; e < 2; e++) {
-            const float* t = tan + 4 * e;   // left right up down
-            if (t[1] - t[0] > 0.01f) density = std::max(density, rec[0] / (t[1] - t[0]));
-            if (t[2] - t[3] > 0.01f) density = std::max(density, rec[1] / (t[2] - t[3]));
-            for (int i = 0; i < 4; i++) ext = std::max(ext, fabsf(t[i]));
-        }
-        ext = tanf(std::min(atanf(ext * g_cfg.fovScale), 1.39f));
-        side = 2.0f * ext * density;
-    } else {
-        side = std::max(rec[0], rec[1]) * 1.15f * g_cfg.fovScale;
+    float density = 0.0f, ext = 0.0f;
+    for (int e = 0; e < 2; e++) {
+        const float* t = tan + 4 * e;   // left right up down
+        float area = (t[1] - t[0]) * (t[2] - t[3]);
+        if (area > 1e-4f) density = std::max(density, sqrtf((float)rec[0] * (float)rec[1] / area));
+        for (int i = 0; i < 4; i++) ext = std::max(ext, fabsf(t[i]));
     }
-    int s = (int)(side * g_cfg.renderScale + 4.0f) / 8 * 8;
-    return std::min(std::max(s, 640), 8192);
+    ext = tanf(std::min(atanf(ext * g_cfg.fovScale), 1.39f));
+    int s = (int)(2.0f * ext * density * g_cfg.renderScale + 4.0f) / 8 * 8;
+    return std::min(std::max(s, 640), MaxRenderSide());
 }
 
-static DWORD WINAPI RenderSizeThread(LPVOID)
-{
-    char name[XR_MAX_SYSTEM_NAME_SIZE] = "";
-    int rec[2] = {};
-    bool live = QueryHeadset(name, rec);
-    HeadsetLine h;
-    bool known = false;   // its FOV is in the file
-    for (const std::string& l : ReadHeadsetFile())
-        if (ParseHeadsetLine(l, h) && (!live || h.name == name)) { known = true; break; }
-    if (!live && known) { strncpy_s(name, h.name.c_str(), _TRUNCATE); rec[0] = h.rec[0]; rec[1] = h.rec[1]; }
-    int side = live || known ? RenderSideFor(rec, known ? h.tan : nullptr) : 0;
-    int asking = 0;
-    if (side && g_sizeState.compare_exchange_strong(asking, 3)) {
-        g_cfg.renderWidth = g_cfg.renderHeight = side;
-        g_sizeState = 1;
-        Log("vr: render size %dx%d for %s%s (recommended %dx%d per eye, RenderScale %.2f%s)", side, side, name,
-            live ? "" : " (the last headset - not connected now)", rec[0], rec[1], g_cfg.renderScale,
-            known ? "" : "; its FOV not known yet: a guess, exact from the next start");
-    } else if (!side && g_sizeState.compare_exchange_strong(asking, 2)) {
-        Log("vr: render size: no headset known - %dx%d from the ini", g_cfg.renderWidth, g_cfg.renderHeight);
-    } else if (side) {
-        Log("vr: render size %dx%d for %s came too late - the game started at %dx%d", side, side, name, g_cfg.renderWidth,
-            g_cfg.renderHeight);
-    }
-    SetEvent(g_sizeEvent);
-    return 0;
-}
-
-// Called from DllMain (the thread runs once it returns), long before the game reads its resolution.
+// Called from DllMain, before the game reads its resolution: the last headset's size (the file's first line).
 void VRRenderSizeStart()
 {
-    if (!g_cfg.vrEnabled || g_cfg.fakeHmd || g_cfg.renderScale <= 0.0f) { g_sizeState = 2; return; }
-    g_sizeEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    HANDLE t = g_sizeEvent ? CreateThread(nullptr, 0, RenderSizeThread, nullptr, 0, nullptr) : nullptr;
-    if (t) CloseHandle(t);
-    else g_sizeState = 2;
-}
-
-// The render size about to be used: waits for the headset's answer (not under the loader lock: the query's thread
-// could not run). No answer in 15 s: the ini's size.
-void VRRenderSizeWait()
-{
-    int s = g_sizeState.load();
-    if (s == 1 || s == 2 || !g_sizeEvent) return;
-    DWORD t0 = GetTickCount();
-    if (WaitForSingleObject(g_sizeEvent, 15000) != WAIT_OBJECT_0) {
-        int asking = 0;
-        if (g_sizeState.compare_exchange_strong(asking, 2))
-            Log("vr: render size: the OpenXR runtime did not answer in 15 s - %dx%d from the ini", g_cfg.renderWidth, g_cfg.renderHeight);
-        else
-            WaitForSingleObject(g_sizeEvent, INFINITE);   // (the answer is being applied this moment)
-    }
-    if (GetTickCount() - t0 >= 50) Log("vr: render size: waited %lu ms for the headset", GetTickCount() - t0);
-}
-
-// Whether a render size will be forced (the hooks are put in place from DllMain, before the answer).
-bool VRRenderSizeOn()
-{
-    return g_sizeEvent || (g_cfg.renderWidth > 0 && g_cfg.renderHeight > 0);
+    if (!g_cfg.vrEnabled || g_cfg.fakeHmd || g_cfg.renderScale <= 0.0f) return;
+    HeadsetLine h;
+    for (const std::string& l : ReadHeadsetFile())
+        if (ParseHeadsetLine(l, h)) {
+            g_cfg.renderWidth = g_cfg.renderHeight = RenderSideFor(h.rec, h.tan);
+            Log("vr: render size %dx%d for %s, the last headset (recommended %dx%d per eye, RenderScale %.2f, at most %d)",
+                g_cfg.renderWidth, g_cfg.renderHeight, h.name.c_str(), h.rec[0], h.rec[1], g_cfg.renderScale, MaxRenderSide());
+            return;
+        }
+    Log("vr: render size: no headset seen yet - %dx%d from the ini, the headset's from the next start", g_cfg.renderWidth,
+        g_cfg.renderHeight);
 }
 
 // Once a session runs: the eyes' FOV (and the size now recommended) written to twfcvr_headset.txt for the next start.
@@ -1420,7 +1363,7 @@ static bool SaveHeadsetFov(XrTime time)
         if (!(v.fov.angleRight > v.fov.angleLeft && v.fov.angleUp > v.fov.angleDown)) return false;
     char name[XR_MAX_SYSTEM_NAME_SIZE];
     int rec[2];
-    if (!QueryHeadset(name, rec, true)) return true;
+    if (!QueryHeadset(name, rec)) return true;
     float tan[8];
     for (int e = 0; e < 2; e++) {
         tan[4 * e + 0] = tanf(views[e].fov.angleLeft);
@@ -3922,6 +3865,7 @@ static void VRFrame(IDXGISwapChain* sc)
     bool stereo = g_cfg.vrMode == 1 && CameraInGameplay();
     if (stereo != g_wasStereo) {
         Log("vr: %s", stereo ? "stereo gameplay view" : "theater screen");
+        if (stereo) LogMemory("3D view");
         g_wasStereo = stereo;
         if (!stereo) ResetStereo();   // (not when the 3D view starts: the frame in flight would be dropped and every
                                       // later frame would go to the wrong eye)
@@ -3978,6 +3922,7 @@ static void OnPresent(IDXGISwapChain* sc, UINT flags)
         GetClientRect(d.OutputWindow, &rc);
         Log("vr: first Present on swapchain %p: %ux%u windowed %d swapeffect %d window %p '%ls' client %ldx%ld", sc,
             d.BufferDesc.Width, d.BufferDesc.Height, d.Windowed, d.SwapEffect, d.OutputWindow, cls, rc.right, rc.bottom);
+        LogMemory("first frame");
     }
     if (g_cfg.logFps) {
         static DWORD t0 = GetTickCount();
@@ -3985,6 +3930,8 @@ static void OnPresent(IDXGISwapChain* sc, UINT flags)
         DWORD now = GetTickCount();
         if (now - t0 >= 5000) {
             Log("fps: %.1f", (n - n0) * 1000.0f / (now - t0));
+            static int k;
+            if (++k % 6 == 0) LogMemory("now");
             t0 = now;
             n0 = n;
         }

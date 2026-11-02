@@ -29,18 +29,18 @@ static IDirect3DDevice9* g_dev;
 static IDirect3DQuery9* g_flushQuery;
 int g_hudFlush = 1;   // debug "hudflush": 0 off, 1 an event query, 2 the query and a flush of the command buffer
 
-static bool Enabled() { VRRenderSizeWait(); return g_cfg.renderWidth > 0 && g_cfg.renderHeight > 0; }
+static bool Enabled() { return g_cfg.renderWidth > 0 && g_cfg.renderHeight > 0; }
 
 static UINT STDMETHODCALLTYPE HookModeCount(IDirect3D9* d, UINT adapter, D3DFORMAT fmt)
 {
     UINT n = g_origModeCount(d, adapter, fmt);
-    return n && Enabled() ? n + 1 : n;
+    return n ? n + 1 : n;
 }
 
 static HRESULT STDMETHODCALLTYPE HookEnumModes(IDirect3D9* d, UINT adapter, D3DFORMAT fmt, UINT mode, D3DDISPLAYMODE* out)
 {
     UINT n = g_origModeCount(d, adapter, fmt);
-    if (n && mode == n && out && Enabled()) {
+    if (n && mode == n && out) {
         D3DDISPLAYMODE last = {};
         g_origEnumModes(d, adapter, fmt, n - 1, &last);
         out->Width = g_cfg.renderWidth;
@@ -107,7 +107,7 @@ static IDirect3D9* WINAPI HookCreate9(UINT sdk)
     IDirect3D9* d = g_origCreate9(sdk);
     if (d && !g_origCreateDevice) {
         void** vt = *(void***)d;
-        if (VRRenderSizeOn()) {
+        if (Enabled()) {
             MH_CreateHook(vt[6], (void*)HookModeCount, (void**)&g_origModeCount);
             MH_CreateHook(vt[7], (void*)HookEnumModes, (void**)&g_origEnumModes);
             MH_EnableHook(vt[6]);
