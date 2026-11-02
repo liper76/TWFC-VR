@@ -207,6 +207,22 @@ static void ApplyHeadOnly(TPOV* pov, const VREyeView& eye)
 void CameraOnUpdate(TPOV* pov, void* viewTarget, void* pc, float dt)
 {
     bool player = IsPlayerPawn(viewTarget, pc);
+    // a scripted walk with the player's pawn still the view target (Prison Break's start: the camera follows the
+    // animated robots, the pawns wait far off in the dark): the game's camera far from the pawn - shown as a cutscene
+    // (its camera + the head), not from the pawn. (A few frames in a row, back below 10 m: no flicker on a teleport.)
+    static int scriptedFrames;
+    static bool scripted;
+    Vec3f at;
+    if (player && ReadActorLocation(viewTarget, at)) {
+        float dx = pov->x - at.x, dy = pov->y - at.y, dz = pov->z - at.z;
+        float d = sqrtf(dx * dx + dy * dy + dz * dz);
+        scriptedFrames = d > 1500.0f ? scriptedFrames + 1 : 0;
+        bool was = scripted;
+        if (scriptedFrames >= 3) scripted = true;
+        else if (d < 1000.0f) scripted = false;
+        if (scripted != was) Log("camera: %s (the game's camera %.0f from the pawn)", scripted ? "scripted view far from the pawn - shown as a cutscene" : "back to the pawn", d);
+    }   // (other view targets leave it be: the game may update a cutscene camera and the pawn's in the same frame)
+    if (scripted) player = false;
     // the main menu's backdrop camera stays on the virtual screen; cutscenes use the same camera class, but there
     // the controller has a pawn: they are shown in 3D (head tracked, like the classic mode)
     // (cutscenes on the screen too unless Cutscenes3D: their staging depends on the game's camera)
