@@ -94,6 +94,17 @@ void Remember(void** arr, void* v)
     for (int i = 0; i < 16; i++) if (!arr[i]) { arr[i] = v; return; }
 }
 
+// Keeps only the weapons still in the inventory (or in hand). Before, the memories only grew: weapons of past lives,
+// turrets and dropped guns filled them, a new weapon was no longer noted as held in hand and fell out of the wheel
+// (and a freed weapon's address could come back as a new one with the old one's verdict).
+void Prune(void** arr, void* const* live, int n)
+{
+    int k = 0;
+    for (int i = 0; i < 16; i++)
+        if (arr[i] && Contains(live, n, arr[i])) arr[k++] = arr[i];
+    for (; k < 16; k++) arr[k] = nullptr;
+}
+
 // While held, the game may not detach the kept meshes (it does so from several places when an attack ends); the mod
 // detaches them itself through the original function.
 bool __stdcall KeepAttached(uint8_t* mesh, uint8_t* comp, uintptr_t ret)
@@ -333,12 +344,28 @@ void HoldInPlace(uint8_t* pawn, DWORD now)
 void UpdateList(uint8_t* pawn, bool vehicle, DWORD now)
 {
     void* cur = *(void**)(pawn + kPawnWeapon);
-    if (cur) Remember(vehicle ? g_vehicleWeapons : g_handWeapons, cur);
     uint8_t* inv = *(uint8_t**)(pawn + kPawnInvManager);
+    void* live[17] = {};
+    int liveCount = 0;
+    for (uint8_t* w = inv ? *(uint8_t**)(inv + kInvChain) : nullptr; w && liveCount < 16; w = *(uint8_t**)(w + kInvChain))
+        live[liveCount++] = w;
+    int chainCount = liveCount;
+    if (cur) live[liveCount++] = cur;
+    if (chainCount) {   // (not while the inventory is away)
+        Prune(g_handWeapons, live, liveCount);
+        Prune(g_vehicleWeapons, live, liveCount);
+        Prune(g_unreachable, live, liveCount);
+    }
+    if (cur) Remember(vehicle ? g_vehicleWeapons : g_handWeapons, cur);
     WeaponList l;
     void* ptrs[8] = {};
-    uint8_t* w = inv ? *(uint8_t**)(inv + kInvChain) : nullptr;
-    for (int guard = 0; w && guard < 16 && l.count < 8; guard++, w = *(uint8_t**)(w + kInvChain)) {
+    if (cur && !vehicle) {   // (the setup of the gun in hand follows it even when the wheel leaves it out)
+        const wchar_t* cls = NameOf(*(unsigned*)((uint8_t*)cur + 4));
+        if (cls && !GrenadeWeaponClass(cls) && *(int*)((uint8_t*)cur + kWeaponGroup) != 50) DisplayName(cls, l.held, 40);
+    }
+    wchar_t left[256] = {};   // (for the log: the ones left out)
+    for (int i = 0; i < chainCount && l.count < 8; i++) {
+        uint8_t* w = (uint8_t*)live[i];
         bool hand = Contains(g_handWeapons, 16, w);
         int group = *(int*)(w + kWeaponGroup);
         const wchar_t* cls = NameOf(*(unsigned*)(w + 4));
@@ -346,13 +373,34 @@ void UpdateList(uint8_t* pawn, bool vehicle, DWORD now)
         bool guessVehicle = group == 1 || wcsstr(cls, L"Vehicle") || wcsstr(cls, L"Plane");
         // grenades are thrown with their own button, the "next weapon" button never reaches them
         bool grenade = GrenadeWeaponClass(cls);
-        if (grenade || Contains(g_unreachable, 16, w)) continue;
-        if (!hand && (Contains(g_vehicleWeapons, 16, w) || guessVehicle || group == 50)) continue;
+        bool out = grenade || Contains(g_unreachable, 16, w) ||
+                   (!hand && (Contains(g_vehicleWeapons, 16, w) || guessVehicle || group == 50));
+        if (out) {
+            if (!grenade) {
+                wchar_t s[128];
+                _snwprintf_s(s, _TRUNCATE, L"%ls%ls (%d%ls)", left[0] ? L", " : L"", cls, group,
+                             Contains(g_unreachable, 16, w) ? L" unreachable" : Contains(g_vehicleWeapons, 16, w) ? L" vehicle" : L"");
+                wcsncat_s(left, s, _TRUNCATE);
+            }
+            continue;
+        }
         if (w == cur) l.current = l.count;
         DisplayName(cls, l.name[l.count], 40);
         ptrs[l.count++] = w;
     }
     memcpy(g_listWeapon, ptrs, sizeof(ptrs));
+    // the list in the log when it changes
+    static wchar_t shown[640];
+    wchar_t text[640] = {};
+    for (int i = 0; i < l.count; i++) {
+        wcsncat_s(text, i ? L", " : L"", _TRUNCATE);
+        wcsncat_s(text, l.name[i], _TRUNCATE);
+    }
+    if (left[0]) { wcsncat_s(text, L"; left out: ", _TRUNCATE); wcsncat_s(text, left, _TRUNCATE); }
+    if (wcscmp(text, shown)) {
+        wcscpy_s(shown, text);
+        Log("weapons: the wheel lists %ls", text[0] ? text : L"nothing");
+    }
     std::lock_guard<std::mutex> lock(g_listMutex);
     g_list = l;
 }

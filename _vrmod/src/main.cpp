@@ -259,6 +259,9 @@ static void LoadConfig()
     g_cfg.twoHandRadius = IniFloat(ini, L"Input", L"TwoHandRadius", g_cfg.twoHandRadius);
     g_cfg.gunstock = (int)IniFloat(ini, L"Input", L"Gunstock", (float)g_cfg.gunstock);
     g_cfg.weaponSmoothing = IniFloat(ini, L"Input", L"WeaponSmoothing", g_cfg.weaponSmoothing);
+    g_cfg.elbowInGun[0] = IniFloat(ini, L"Input", L"ElbowInGunForward", g_cfg.elbowInGun[0]);   // (temporary)
+    g_cfg.elbowInGun[1] = IniFloat(ini, L"Input", L"ElbowInGunUp", g_cfg.elbowInGun[1]);
+    g_cfg.elbowInGun[2] = IniFloat(ini, L"Input", L"ElbowInGunOut", g_cfg.elbowInGun[2]);
     {   // (optional: StockShoulder, StockButt, StockSight - x,y,z metres)
         const wchar_t* keys[3] = { L"StockShoulder", L"StockButt", L"StockSight" };
         float* dst[3] = { g_cfg.stockShoulder, g_cfg.stockButt, g_cfg.stockSight };

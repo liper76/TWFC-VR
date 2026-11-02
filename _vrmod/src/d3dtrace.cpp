@@ -4,7 +4,10 @@
 //   full-screen pass and then the 2D HUD on top. While the VR gameplay view is active, every draw into that
 //   texture after the first one is redirected into our own transparent textures, one per HUD layer (the layer is
 //   set by gfx.cpp around the HUD movie's drawing; the rest - the game's Canvas - goes to kHudEyes). The eyes then
-//   get the scene without HUD, and vr.cpp puts the layers where they belong.
+//   get the scene without HUD, and vr.cpp puts the layers where they belong. Hurt (its post-process chain 1), the
+//   game draws the movie into a texture of its own instead, runs scan lines over it and lays that over the screen
+//   with one draw: the movie's draws go to their layers wherever the game sends them (else that one draw put the
+//   whole HUD - the crosshair in the middle - into the eye images, and the panel and the reticle were empty).
 #include "common.h"
 #include <d3d11.h>
 #include "MinHook.h"
@@ -34,6 +37,8 @@ static ID3D11DeviceContext* g_imm;    // dgVoodoo's immediate context (our own d
 static ID3D11Device* g_dev;
 static ID3D11Resource* g_curRT;       // resource of the bound render target 0 (not AddRef'd)
 static ID3D11DepthStencilView* g_curDSV;
+static ID3D11RenderTargetView* g_curRTVs[8];   // ... the bound targets as the game bound them
+static UINT g_curRTVn;
 static int g_drawsOnRT;
 static long g_traceDraws;             // draws of the traced frame
 
@@ -44,6 +49,7 @@ static ID3D11Resource* g_bbTex;       // dgVoodoo's D3D9 backbuffer texture (sou
 static bool g_copySeen;
 static int g_drawsOnBB;
 static int g_hudLayer;                // where the HUD's draws go now
+static bool g_hudMovie;               // ... and the HUD movie draws now (HudSetLayer)
 static int g_boundLayer = -1;         // the layer whose target is bound instead of the backbuffer texture's
 struct HudLayer {
     ID3D11Texture2D* tex;
@@ -104,12 +110,20 @@ static bool EnsureLayers(UINT w, UINT h)
     return true;
 }
 
-// Before a draw into the backbuffer texture: after the scene's final pass, send the draw to the current layer.
+// Before a draw into the backbuffer texture: after the scene's final pass, send the draw to the current layer. While
+// the HUD movie draws, also a draw into a texture of the game's as large (hurt: the movie drawn there first).
 static void BeforeDraw(ID3D11DeviceContext* c)
 {
-    if (c != g_imm || !g_hudActive || g_curRT != g_bbTex || !g_bbTex || g_drawsOnBB < 1 || g_boundLayer == g_hudLayer) return;
-    UINT w, h;
-    if (!TexSize(g_bbTex, w, h) || !EnsureLayers(w, h)) return;
+    if (c != g_imm) return;
+    if (g_boundLayer >= 0 && g_curRT != g_bbTex && !g_hudMovie) {   // (the movie done: the game's texture back)
+        g_oSetRT(c, g_curRTVn, g_curRTVs, g_curDSV);
+        g_boundLayer = -1;
+    }
+    if (!g_hudActive || !g_curRT || !g_bbTex || g_drawsOnBB < 1 || g_boundLayer == g_hudLayer) return;
+    UINT w, h, rw, rh;
+    if (!TexSize(g_bbTex, w, h)) return;
+    if (g_curRT != g_bbTex && (!g_hudMovie || !TexSize(g_curRT, rw, rh) || rw != w || rh != h)) return;
+    if (!EnsureLayers(w, h)) return;
     HudLayer& l = g_layers[g_hudLayer];
     if (!l.cleared) {
         const FLOAT zero[4] = { 0, 0, 0, 0 };
@@ -128,9 +142,10 @@ static void AfterDraw(ID3D11DeviceContext* c)
 }
 
 bool HudSplitActive() { return g_hudActive; }
-void HudSetLayer(int layer)
+void HudSetLayer(int layer, bool movie)
 {
     g_hudLayer = layer >= 0 && layer < kHudLayers ? layer : kHudEyes;
+    g_hudMovie = movie;
     if (g_traceFrames > 0) Log("trace: HUD layer %d", g_hudLayer);
 }
 
@@ -147,6 +162,8 @@ static void STDMETHODCALLTYPE HSetRT(ID3D11DeviceContext* c, UINT n, ID3D11Rende
         }
         g_curRT = r;
         g_curDSV = dsv;
+        g_curRTVn = rtv ? std::min(n, 8u) : 0;
+        for (UINT i = 0; i < g_curRTVn; i++) g_curRTVs[i] = rtv[i];
         g_boundLayer = -1;
     }
     g_oSetRT(c, n, rtv, dsv);
@@ -369,6 +386,7 @@ void TraceEndFrame(ID3D11ShaderResourceView* layers[kHudLayers])
     g_drawsOnBB = 0;
     g_boundLayer = -1;
     g_hudLayer = kHudEyes;
+    g_hudMovie = false;
     for (HudLayer& l : g_layers) { l.cleared = false; l.draws = 0; }
     g_curRT = nullptr;
 }

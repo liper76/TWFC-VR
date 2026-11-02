@@ -74,6 +74,8 @@ struct Config {
     float twoHandRadius = 0.15f;    // how close the left hand must be to that point
     int   gunstock = 2;             // held two-handed, a virtual stock: 0 none, 1 at the shoulder, 2 about the front hand
     float weaponSmoothing = 3.0f;   // the gun's turn filtered: 0 off .. 10 most (fast flicks less)
+    float elbowInGun[3] = {};       // TEMPORARY (calibration): where the gun arm's elbow goes into the gun, moved
+                                    // forward, up, out along the gun - in drawn forearm lengths
     float stockShoulder[3] = { 0.145f, -0.21f, 0.04f };   // the gun hand's shoulder from the eyes: aside, up, back (m)
     float stockButt[3] = { 0.0f, 0.02f, 0.24f };          // the virtual butt from the gun hand's grip (m, aim axes)
     float stockSight[3] = { 0.0f, 0.075f, -0.08f };       // the sights from the grip (m, aim axes: x right, y up, -z forward)
@@ -203,6 +205,7 @@ struct WeaponList {
     int count = 0;
     int current = -1;            // index of the weapon in hand (-1 = unknown)
     wchar_t name[8][40] = {};
+    wchar_t held[40] = {};       // the hand weapon in hand, listed or not ("" = none, a grenade, in vehicle form)
 };
 void WeaponsInstall();
 void WeaponsUpdate(void* pawn);             // game thread, once per frame (null = not in first person)
@@ -299,7 +302,8 @@ void GfxInstall();                          // the HUD movie drawn in layers (be
 // eye image), kHudPanel (the floating panel), kHudReticle (the game's crosshair: the VR reticle).
 enum { kHudEyes, kHudPanel, kHudReticle, kHudLayers };
 bool HudSplitActive();                      // this frame's HUD is being split off
-void HudSetLayer(int layer);                // where the coming draws go (kHudEyes outside the HUD movie)
+void HudSetLayer(int layer, bool movie = false);   // where the coming draws go (kHudEyes outside the HUD movie;
+                                            // movie: the HUD movie draws, wherever the game sends it)
 
 // ---- game.cpp (movies) ----
 void GameInstallMovieHook();
