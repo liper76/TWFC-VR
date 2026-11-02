@@ -68,6 +68,20 @@ bool GrenadeProjectileClass(const wchar_t* n)
     return !wcsstr(n, L"Launcher") && !wcsstr(n, L"Spike") && !wcsstr(n, L"Martyr") && !wcsstr(n, L"Killstreak") && !wcsstr(n, L"Data");
 }
 
+// A mine (TnProjectileKamikazeMine) is not flown by the mod. Found (MockXR): the game's own fall (heavy) brings it down,
+// and where it first hits something it wakes - flies off it at 150 units/s for half a second (up, off the floor), then
+// hangs in the air and flies at an enemy that comes near, going off on contact. Held in the hand it does not wake.
+// Along the mod's arc it was pushed into the floor and lay there.
+bool IsMine(uint8_t* a)
+{
+    __try {
+        const wchar_t* n = NameOf(*(unsigned*)(a + 4));
+        return n && wcsstr(n, L"Mine");
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 // the flying grenades of the world's levels
 void FindGrenades(Grenades& out)
 {
@@ -237,10 +251,11 @@ void LetGo(uint8_t* pawn, const float hand[3])
         for (int k = 0; k < 3; k++) v[k] = (dbg ? g_debugVel[k] * g_cfg.worldScale : g_vel[k]) * g_cfg.grenadeThrowScale;
         MoveActorTo(g_grenade, hand, true);
         SetVelocity(g_grenade, v);
-        g_fly = { g_grenade, { hand[0], hand[1], hand[2] }, { v[0], v[1], v[2] }, -1.0f, GetTickCount() };
+        bool mine = IsMine(g_grenade);
+        if (!mine) g_fly = { g_grenade, { hand[0], hand[1], hand[2] }, { v[0], v[1], v[2] }, -1.0f, GetTickCount() };
         __try { memcpy(g_grenade + kActorRotationRate, g_savedRate, sizeof(g_savedRate)); } __except (EXCEPTION_EXECUTE_HANDLER) {}   // spins in flight
         VRHaptic(g_hand,0.5f, 0.04f);
-        Log("grenades: thrown at %.0f units/s", sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]));
+        Log("grenades: %s at %.0f units/s", mine ? "mine let go (the game flies it)" : "thrown", sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]));
     } else {
         // back into the pouch: the count is given back; the grenade waits out of the world for the next grab
         int count = 0;
@@ -517,6 +532,7 @@ void GrenadesUpdate(void* pawnPtr)
             if (uint8_t* w = GrenadeWeapon(pawn, &count)) *(int*)(w + kWeaponReserve) = count - 1;
             g_grenade = g_spare;
             g_spare = nullptr;
+            Remember(g_grenade);
             g_state = Holding;
             g_armed = false;
             VRHaptic(g_hand,0.5f, 0.05f);
@@ -542,6 +558,7 @@ void GrenadesUpdate(void* pawnPtr)
             if (!g_before.Has(now_.a[i])) g_grenade = now_.a[i];
         if (g_grenade) {
             g_state = Holding;
+            Remember(g_grenade);   // (not taken again for a button throw once it is let go)
             Hush(g_grenade, true);
             Shrink(g_grenade);
             VRHaptic(g_hand,0.5f, 0.05f);
@@ -571,6 +588,7 @@ void GrenadesUpdate(void* pawnPtr)
             uint8_t* a = all.a[i];
             if (a == g_spare || Contains(g_seen, a)) continue;
             Remember(a);
+            if (IsMine(a)) continue;
             __try {
                 if (*(uint8_t**)(a + kActorInstigator) != pawn) continue;
                 const float* l = (const float*)(a + kActorLocation);
