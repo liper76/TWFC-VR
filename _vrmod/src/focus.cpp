@@ -13,7 +13,7 @@ static WNDPROC g_origWndProc;
 typedef HWND(WINAPI* PFN_GetWnd)();
 static PFN_GetWnd g_origGetForeground, g_origGetActive, g_origGetFocus;
 
-static bool ForceSize() { VRRenderSizeWait(); return g_cfg.renderWidth > 0 && g_cfg.renderHeight > 0; }
+static bool ForceSize() { return g_cfg.renderWidth > 0 && g_cfg.renderHeight > 0; }
 
 static bool IsGameClass(const wchar_t* cls)
 {
@@ -189,14 +189,14 @@ static LPSTR WINAPI HookGetCmdA()
 // Called from DllMain, before the game creates its window.
 void WindowEarlyInit()
 {
-    if (VRRenderSizeOn()) {   // (DllMain: not waiting for the headset's size)
+    if (ForceSize()) {
         MH_Initialize();
         MH_CreateHookApi(L"kernel32", "GetCommandLineW", (void*)HookGetCmdW, (void**)&g_origGetCmdW);
         MH_CreateHookApi(L"kernel32", "GetCommandLineA", (void*)HookGetCmdA, (void**)&g_origGetCmdA);
     }
     // Without DPI awareness Windows scales the window (125% etc.) and dgVoodoo's swapchain would not match
     // the render size pixel for pixel.
-    if (VRRenderSizeOn()) SetProcessDPIAware();
+    if (ForceSize()) SetProcessDPIAware();
     MH_Initialize();
     MH_CreateHookApi(L"user32", "CreateWindowExW", (void*)HookCreateWindowExW, (void**)&g_origCreateWindowExW);
     MH_EnableHook(MH_ALL_HOOKS);

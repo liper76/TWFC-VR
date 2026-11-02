@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <vector>
+#include <intrin.h>
 #include "MinHook.h"
 
 static std::mutex g_dbgMutex;
@@ -405,7 +406,37 @@ static DWORD WINAPI PressRelayThread(LPVOID)
 }
 
 // A crash while testing: where it happened (the game itself just closes).
-static LONG WINAPI CrashLogger(EXCEPTION_POINTERS* e)
+// "module+offset" for an address in the process.
+static const char* ModuleAt(const void* p, char* buf, size_t n)
+{
+    HMODULE m = nullptr;
+    char path[MAX_PATH] = "?";
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)p, &m))
+        GetModuleFileNameA(m, path, MAX_PATH);
+    const char* base = strrchr(path, '\\');
+    sprintf_s(buf, n, "%s+%X", base ? base + 1 : path, (unsigned)((const char*)p - (const char*)m));
+    return buf;
+}
+
+// The game is 32-bit (4 GB with the large-address flag): what of its address space is used and the largest free block.
+void LogMemory(const char* when)
+{
+    MEMORYSTATUSEX ms = { sizeof(ms) };
+    GlobalMemoryStatusEx(&ms);
+    SIZE_T largest = 0;
+    MEMORY_BASIC_INFORMATION mbi;
+    for (const char* p = nullptr; VirtualQuery(p, &mbi, sizeof(mbi)) == sizeof(mbi);) {
+        if (mbi.State == MEM_FREE && mbi.RegionSize > largest) largest = mbi.RegionSize;
+        const char* next = (const char*)mbi.BaseAddress + mbi.RegionSize;
+        if (next <= p) break;
+        p = next;
+    }
+    Log("mem: %s: %u of %u MB of the address space in use, the largest free block %u MB", when,
+        (unsigned)((ms.ullTotalVirtual - ms.ullAvailVirtual) >> 20), (unsigned)(ms.ullTotalVirtual >> 20),
+        (unsigned)(largest >> 20));
+}
+
+static void LogException(const char* what, EXCEPTION_POINTERS* e)
 {
     CONTEXT* c = e->ContextRecord;
     uintptr_t* sp = (uintptr_t*)c->Esp;
@@ -416,26 +447,99 @@ static LONG WINAPI CrashLogger(EXCEPTION_POINTERS* e)
             if (sp[i] >= 0x10901000 && sp[i] < 0x11948000) { len += sprintf_s(stack + len, sizeof(stack) - len, " %08X", (unsigned)sp[i]); k++; }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     stack[len] = 0;
-    Log("CRASH: code %08X at EIP %08X (addr %08X) eax=%08X ecx=%08X edx=%08X esi=%08X edi=%08X stack:%s",
-        (unsigned)e->ExceptionRecord->ExceptionCode, (unsigned)c->Eip,
+    char at[MAX_PATH + 16];
+    Log("%s: code %08X at %s (EIP %08X, addr %08X, thread %lu) eax=%08X ecx=%08X edx=%08X esi=%08X edi=%08X stack:%s",
+        what, (unsigned)e->ExceptionRecord->ExceptionCode, ModuleAt((void*)c->Eip, at, sizeof(at)), (unsigned)c->Eip,
         (unsigned)(e->ExceptionRecord->NumberParameters > 1 ? e->ExceptionRecord->ExceptionInformation[1] : 0),
-        c->Eax, c->Ecx, c->Edx, c->Esi, c->Edi, stack);
+        GetCurrentThreadId(), c->Eax, c->Ecx, c->Edx, c->Esi, c->Edi, stack);
+}
+
+static LONG WINAPI CrashLogger(EXCEPTION_POINTERS* e)
+{
+    LogException("CRASH", e);
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-// First-chance access violations (the engine catches crashes itself and just quits): the first few are logged.
-static LONG CALLBACK FirstChanceLogger(EXCEPTION_POINTERS* e)
+// ---- Always on: why the game ended, when it ends by itself ----
+// The engine catches a crash itself and quits without a Windows report or a dump (the headset: gone at the first 3D
+// frame, the log just stops). So the first exceptions are logged as they are raised, before any handler (a game
+// session raises none normally), and so is the exit with who asked for it, with the address space at each.
+static LONG CALLBACK ExceptionTrace(EXCEPTION_POINTERS* e)
 {
-    static volatile long logged;
-    if (e->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && InterlockedIncrement(&logged) <= 6)
-        CrashLogger(e);
+    const EXCEPTION_RECORD* r = e->ExceptionRecord;
+    DWORD code = r->ExceptionCode;
+    if (code == DBG_PRINTEXCEPTION_C || code == 0x4001000A || code == 0x406D1388 || code == DBG_CONTROL_C)
+        return EXCEPTION_CONTINUE_SEARCH;   // (debug output, thread names)
+    // each place once: the address, and the game's code above it (RaiseException is one address for every throw)
+    uintptr_t key = (uintptr_t)r->ExceptionAddress;
+    __try {
+        const uintptr_t* sp = (const uintptr_t*)e->ContextRecord->Esp;
+        for (int k = 0; k < 64; k++)
+            if (sp[k] >= 0x10901000 && sp[k] < 0x11948000) { key ^= sp[k] * 31; break; }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    static uintptr_t seen[12];
+    static volatile long count;
+    for (long i = 0; i < count && i < 12; i++)
+        if (seen[i] == key) return EXCEPTION_CONTINUE_SEARCH;
+    long i = InterlockedIncrement(&count) - 1;
+    if (i >= 12) return EXCEPTION_CONTINUE_SEARCH;
+    seen[i] = key;
+    LogException("exception", e);
+    LogMemory("at the exception");
     return EXCEPTION_CONTINUE_SEARCH;
+}
+
+typedef VOID(WINAPI* PFN_ExitProcess)(UINT);
+typedef BOOL(WINAPI* PFN_TerminateProcess)(HANDLE, UINT);
+static PFN_ExitProcess g_origExitProcess;
+static PFN_TerminateProcess g_origTerminateProcess;
+
+static void LogExit(const char* how, UINT code, void* caller)
+{
+    char at[MAX_PATH + 16];
+    Log("exit: %s (code %u), called from %s", how, code, ModuleAt(caller, at, sizeof(at)));
+    void* frames[16];
+    USHORT n = CaptureStackBackTrace(1, 16, frames, nullptr);
+    char stack[1024];
+    int len = 0;
+    stack[0] = 0;
+    for (USHORT k = 0; k < n && len < (int)sizeof(stack) - (MAX_PATH + 20); k++)
+        len += sprintf_s(stack + len, sizeof(stack) - len, " %s", ModuleAt(frames[k], at, sizeof(at)));
+    Log("exit: stack%s", stack);
+    LogMemory("at the exit");
+}
+
+static VOID WINAPI ExitProcessHook(UINT code)
+{
+    LogExit("the game ends its process", code, _ReturnAddress());
+    g_origExitProcess(code);
+}
+
+static BOOL WINAPI TerminateProcessHook(HANDLE h, UINT code)
+{
+    if (h == GetCurrentProcess() || GetProcessId(h) == GetCurrentProcessId())
+        LogExit("the process is terminated", code, _ReturnAddress());
+    return g_origTerminateProcess(h, code);
+}
+
+// From DllMain.
+void CrashTraceStart()
+{
+    AddVectoredExceptionHandler(0, ExceptionTrace);
+    MH_Initialize();
+    void* ep = (void*)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "ExitProcess");
+    HMODULE kb = GetModuleHandleW(L"kernelbase.dll");
+    void* tp = kb ? (void*)GetProcAddress(kb, "TerminateProcess") : nullptr;
+    if (!tp) tp = (void*)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "TerminateProcess");
+    bool ok = ep && MH_CreateHook(ep, (void*)ExitProcessHook, (void**)&g_origExitProcess) == MH_OK && MH_EnableHook(ep) == MH_OK;
+    bool ok2 = tp && MH_CreateHook(tp, (void*)TerminateProcessHook, (void**)&g_origTerminateProcess) == MH_OK &&
+               MH_EnableHook(tp) == MH_OK;
+    if (!ok || !ok2) Log("debug: exit hooks %d %d", ok, ok2);
 }
 
 void DebugStart()
 {
     SetUnhandledExceptionFilter(CrashLogger);
-    AddVectoredExceptionHandler(0, FirstChanceLogger);
     CloseHandle(CreateThread(nullptr, 0, DebugThread, nullptr, 0, nullptr));
     CloseHandle(CreateThread(nullptr, 0, PressRelayThread, nullptr, 0, nullptr));
 }

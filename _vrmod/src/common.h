@@ -24,6 +24,7 @@ struct Config {
     int   renderWidth = 1800;       // game resolution override for VR (0 = game setting)
     int   renderHeight = 1800;
     float renderScale = 1.0f;       // >0: the render size follows the headset's recommended one, times this (startup)
+    int   maxRenderSize = 2560;     // ... and is at most this (0 = no limit)
     int   aimMode = 1;              // 0 = aim where you look, 1 = aim with the right controller
     int   vrHud = 1;                // game HUD on a floating panel instead of painted into the eyes
     float hudDistance = 1.6f;       // metres
@@ -314,12 +315,12 @@ void WindowEarlyInit();
 // ---- debug.cpp ----
 void DebugStart();
 bool DebugGetPad(XINPUT_GAMEPAD& out);
+void CrashTraceStart();                 // always: exceptions and the process's exit logged (the engine quits silently)
+void LogMemory(const char* when);       // the 32-bit address space: in use, largest free block
 
 // ---- vr.cpp ----
 void VRStart();   // installs present hooks from a worker thread
-void VRRenderSizeStart();   // (DllMain) asks the headset for the render size on a thread of its own
-void VRRenderSizeWait();    // waits for that answer before the size is used (never under the loader lock)
-bool VRRenderSizeOn();      // a render size will be forced (without waiting)
+void VRRenderSizeStart();   // (DllMain) the render size from the last headset's (twfcvr_headset.txt)
 
 // Latest VR controller state mapped to an Xbox pad (written by the VR thread, read by XInput proxy).
 struct VRPadState {
