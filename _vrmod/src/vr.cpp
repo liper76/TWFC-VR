@@ -618,18 +618,13 @@ void VRDebugCalib(int confirm, int left)
     else GripCalibrationToggle();
 }
 
-// A mounted turret's handrails: two grips in front of the player, seated on the gun - they turn with its yaw about the
-// eyes, as the gun does in view (CameraTurretSeat). A squeeze at one holds it until let go; a holding hand's trigger
-// fires. The held grips turn the gun by how far the hands went round the player since they took hold (both hands: the
-// mean), and they pitch it as the spade grips of a mounted gun that pivots ahead of them: raised - and tipped forward -
-// the gun dips, pressed down it rises (the grips' swing about that pivot and the hands' tilt, blended; the gun pitches
-// kTurretGain times as far, so its -30..25 degrees are a hand's span). Before, the hands' height round the eyes
-// pitched it the other way round, and the bottom wanted the hands down at the chest. Let go, the gun stays aimed where
-// it was (relative to the body: turning turns it too).
+// A mounted turret's handrails: two grips in front of the player, seated on the gun - they turn with it about the eyes,
+// as the gun does in view (CameraTurretSeat). A squeeze at one holds it until let go; the held grips turn the gun by
+// how far the hands went round the player since they took hold (both hands: the mean), and a holding hand's trigger
+// fires. Let go, the gun stays aimed where it was (relative to the body: turning turns it too). (Tried: the grips as a
+// lever pivoting ahead - raised, the gun down; the user asked for this way back.)
 static const XrVector3f kTurretGrip[2] = { { -0.18f, -0.30f, -0.40f }, { 0.18f, -0.30f, -0.40f } };   // LOCAL, gun ahead
 static const float kTurretGripHalf = 0.07f;   // half the grips' length
-static const float kTurretLever = 0.30f;      // the gun pivots this far ahead of the grips (m)
-static const float kTurretGain = 1.3f;        // ... and it pitches this many times as far as the grips swing about it
 static struct {
     bool on;                       // on a mounted turret: the grips are there
     bool aimed;                    // ... and the aim is set (the gun as it was when mounted)
@@ -637,9 +632,8 @@ static struct {
     int hover = -1;                // a free hand is at this grip
     float yaw, pitch;              // the aim relative to the room (LOCAL: yaw + = left, pitch + = up; radians)
     float baseYaw, basePitch;      // ... when the holding hands last changed
-    float handYaw[2], handY[2], handTilt[2];   // ... and those hands then: round the player, their height, the aim's pitch
-    XrQuaternionf seat = { 0, 0, 0, 1 };   // the gun's yaw as it is, as far as the eyes are seated: the grips turned so
-    float lever;                   // ... and its pitch from the turret's own over kTurretGain: the grips swung so
+    float handYaw[2], handPitch[2];   // ... and where those hands were then (round the player)
+    XrQuaternionf seat = { 0, 0, 0, 1 };   // the gun as it is, as far as the eyes are seated: the grips turned so
 } g_tg;
 
 static XrQuaternionf YawPitchQuat(float yaw, float pitch)
@@ -647,14 +641,11 @@ static XrQuaternionf YawPitchQuat(float yaw, float pitch)
     return QuatMul({ 0, sinf(yaw * 0.5f), 0, cosf(yaw * 0.5f) }, { sinf(pitch * 0.5f), 0, 0, cosf(pitch * 0.5f) });
 }
 
-// Grip g as it is drawn (LOCAL): its middle and the way up along it - swung about the pivot ahead with the gun's pitch
-// (the gun dipped: the grip higher, its top tipped forward), then turned with the gun's yaw.
+// Grip g as it is drawn (LOCAL): its middle and the way up along it, turned with the gun.
 static void TurretGripAt(int g, XrVector3f& mid, XrVector3f& up)
 {
-    const XrVector3f& c = kTurretGrip[g];
-    float s = sinf(g_tg.lever), co = cosf(g_tg.lever);
-    mid = Rotate(g_tg.seat, { c.x, c.y - kTurretLever * s, c.z - kTurretLever + kTurretLever * co });
-    up = Rotate(g_tg.seat, { 0.0f, co, s });
+    mid = Rotate(g_tg.seat, kTurretGrip[g]);
+    up = Rotate(g_tg.seat, { 0.0f, 1.0f, 0.0f });
 }
 
 // UpdateGestures: true while on a turret (its grips hold the hands that squeeze at them)
@@ -667,11 +658,7 @@ static bool UpdateTurretGrips(const float squeeze[2])
         return false;
     }
     if (!g_tg.aimed) { g_tg.yaw = sy; g_tg.pitch = sp; g_tg.aimed = true; }
-    g_tg.seat = YawPitchQuat(sy * seated, 0.0f);
-    float lim[4], rest = 0.0f;   // (the pitch the turret itself stands at)
-    int bp, by;
-    if (WeaponsTurretLimits(lim, bp, by)) rest = (short)(uint16_t)bp * (6.2831853f / 65536.0f);
-    g_tg.lever = fminf(fmaxf(remainderf(sp - rest, 6.2831853f) / kTurretGain, -1.0f), 1.0f) * seated;
+    g_tg.seat = YawPitchQuat(sy * seated, sp * seated);
     g_tg.on = true;
     bool changed = false;
     g_tg.hover = -1;
@@ -681,12 +668,9 @@ static bool UpdateTurretGrips(const float squeeze[2])
             continue;
         }
         for (int g = 0; g < 2; g++) {
-            XrVector3f c, u;
-            TurretGripAt(g, c, u);
+            XrVector3f c = Rotate(g_tg.seat, kTurretGrip[g]);
             float dx = g_gripPos[h].x - c.x, dy = g_gripPos[h].y - c.y, dz = g_gripPos[h].z - c.z;
-            float along = dx * u.x + dy * u.y + dz * u.z;   // (along the grip; then off it)
-            dx -= u.x * along; dy -= u.y * along; dz -= u.z * along;
-            if (g_tg.held[1 - h] == g || dx * dx + dy * dy + dz * dz > 0.1f * 0.1f || fabsf(along) > kTurretGripHalf + 0.06f) continue;
+            if (g_tg.held[1 - h] == g || dx * dx + dz * dz > 0.1f * 0.1f || fabsf(dy) > kTurretGripHalf + 0.06f) continue;
             if (squeeze[h] > 0.6f) {   // (a squeeze already on - the one that got in - takes it too)
                 g_tg.held[h] = g;
                 changed = true;
@@ -697,28 +681,26 @@ static bool UpdateTurretGrips(const float squeeze[2])
             break;
         }
     }
-    float hy[2], ht[2];
+    float hy[2], hp[2];
     for (int h = 0; h < 2; h++) {
         const Vec3f& p = g_gripPos[h];
         hy[h] = atan2f(-p.x, -p.z);
-        ht[h] = asinf(fminf(fmaxf(g_aimFwd[h].y, -1.0f), 1.0f));
+        hp[h] = atan2f(p.y, sqrtf(p.x * p.x + p.z * p.z));
     }
     if (changed) {   // the hands now holding take the gun as it is aimed
         g_tg.baseYaw = g_tg.yaw;
         g_tg.basePitch = g_tg.pitch;
-        for (int h = 0; h < 2; h++) { g_tg.handYaw[h] = hy[h]; g_tg.handY[h] = g_gripPos[h].y; g_tg.handTilt[h] = ht[h]; }
+        for (int h = 0; h < 2; h++) { g_tg.handYaw[h] = hy[h]; g_tg.handPitch[h] = hp[h]; }
     }
     int n = 0;
     float dy = 0.0f, dp = 0.0f;
     for (int h = 0; h < 2; h++)
         if (g_tg.held[h] >= 0) {
             dy += remainderf(hy[h] - g_tg.handYaw[h], 6.2831853f);
-            // the grip swung about the pivot ahead (raised: the gun down) and the hand tipped (forward: down)
-            float lift = fminf(fmaxf((g_gripPos[h].y - g_tg.handY[h]) / kTurretLever, -1.0f), 1.0f);
-            dp += -asinf(lift) * 0.7f + (ht[h] - g_tg.handTilt[h]) * 0.3f;
+            dp += hp[h] - g_tg.handPitch[h];
             n++;
         }
-    if (n) { g_tg.yaw = g_tg.baseYaw + dy / n; g_tg.pitch = g_tg.basePitch + kTurretGain * dp / n; }
+    if (n) { g_tg.yaw = g_tg.baseYaw + dy / n; g_tg.pitch = g_tg.basePitch + dp / n; }
     CameraTurretClamp(g_tg.yaw, g_tg.pitch);
     return true;
 }
@@ -1241,29 +1223,242 @@ static void UpdateInput()
 
 static bool g_retryLater;   // headset not available yet: try again in a few seconds
 
+// The OpenXR instance: made once, by whichever comes first - the render size query at startup or InitXR.
+static std::mutex g_xrInstanceMutex;
+static XrResult CreateXrInstance()
+{
+    std::lock_guard<std::mutex> lock(g_xrInstanceMutex);
+    if (xr.instance) return XR_SUCCESS;
+    const char* exts[] = { XR_KHR_D3D11_ENABLE_EXTENSION_NAME };
+    XrInstanceCreateInfo ici = { XR_TYPE_INSTANCE_CREATE_INFO };
+    strcpy_s(ici.applicationInfo.applicationName, "TWFC VR");
+    strcpy_s(ici.applicationInfo.engineName, "UnrealEngine3");
+    ici.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
+    ici.enabledExtensionCount = 1;
+    ici.enabledExtensionNames = exts;
+    XrResult r = xrCreateInstance(&ici, &xr.instance);
+    if (XR_FAILED(r)) {
+        xr.instance = XR_NULL_HANDLE;
+        return r;
+    }
+    XrInstanceProperties ip = { XR_TYPE_INSTANCE_PROPERTIES };
+    xrGetInstanceProperties(xr.instance, &ip);
+    Log("vr: runtime %s %u.%u.%u", ip.runtimeName, XR_VERSION_MAJOR(ip.runtimeVersion), XR_VERSION_MINOR(ip.runtimeVersion),
+        XR_VERSION_PATCH(ip.runtimeVersion));
+    return r;
+}
+
+// ---- The game's render size from the headset's ----
+// Each frame the game draws one eye into its back buffer, which is the size the game is told the screen is
+// (registry.cpp, d3d9modes.cpp, focus.cpp) - fixed before the game reads it at startup. With RenderScale > 0 that
+// size follows the headset: the runtime's recommended eye size (Virtual Desktop: its quality setting), at the same
+// pixels per degree over the square frustum the game draws for both eyes (LocateEyes), times RenderScale. The eyes'
+// FOV needs a session, which comes only later, so it is kept in twfcvr_headset.txt per headset (the last one first):
+// the first start on a new headset guesses, the next is exact. Without a runtime or headset at startup: the last
+// headset's size; never seen one: RenderWidth/RenderHeight from the ini.
+static std::atomic<int> g_sizeState;   // 0 asking the runtime, 3 applying the answer, 1 settled, 2 given up (the ini's)
+static HANDLE g_sizeEvent;              // set when the answer is in (or none came)
+
+static void SafeHeadsetName(char* name)
+{
+    for (char* c = name; *c; c++)
+        if (*c == '\t' || *c == '\r' || *c == '\n') *c = ' ';
+    if (!*name) strcpy_s(name, XR_MAX_SYSTEM_NAME_SIZE, "headset");
+}
+
+// The headset as the runtime has it now, without a session: its name and the recommended eye size (the larger eye's).
+static bool QueryHeadset(char* name, int rec[2], bool quiet = false)
+{
+    XrResult r = CreateXrInstance();
+    if (XR_FAILED(r)) { if (!quiet) Log("vr: render size: no OpenXR runtime (%d)", (int)r); return false; }
+    XrSystemGetInfo sgi = { XR_TYPE_SYSTEM_GET_INFO };
+    sgi.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
+    XrSystemId sys = XR_NULL_SYSTEM_ID;
+    r = xrGetSystem(xr.instance, &sgi, &sys);
+    if (XR_FAILED(r)) { if (!quiet) Log("vr: render size: no headset yet (%d)", (int)r); return false; }
+    XrSystemProperties sp = { XR_TYPE_SYSTEM_PROPERTIES };
+    name[0] = 0;
+    if (XR_SUCCEEDED(xrGetSystemProperties(xr.instance, sys, &sp))) strcpy_s(name, XR_MAX_SYSTEM_NAME_SIZE, sp.systemName);
+    SafeHeadsetName(name);
+    XrViewConfigurationView v[2] = { { XR_TYPE_VIEW_CONFIGURATION_VIEW }, { XR_TYPE_VIEW_CONFIGURATION_VIEW } };
+    uint32_t n = 0;
+    r = xrEnumerateViewConfigurationViews(xr.instance, sys, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 2, &n, v);
+    if (XR_FAILED(r) || !n) { if (!quiet) Log("vr: render size: the runtime gave no eye size (%d)", (int)r); return false; }
+    rec[0] = rec[1] = 0;
+    for (uint32_t i = 0; i < n && i < 2; i++) {
+        rec[0] = std::max(rec[0], (int)v[i].recommendedImageRectWidth);
+        rec[1] = std::max(rec[1], (int)v[i].recommendedImageRectHeight);
+    }
+    return rec[0] > 0 && rec[1] > 0;
+}
+
+// twfcvr_headset.txt: a line per headset - "name<TAB>recW recH<TAB>the eyes' FOV tangents (left eye: left right up
+// down, then the right eye's)", the last one used first.
+struct HeadsetLine { std::string name; int rec[2]; float tan[8]; };
+static std::wstring HeadsetFile() { return ModDir() + L"twfcvr_headset.txt"; }
+
+static std::vector<std::string> ReadHeadsetFile()
+{
+    std::vector<std::string> lines;
+    FILE* f = _wfopen(HeadsetFile().c_str(), L"r");
+    if (!f) return lines;
+    char buf[512];
+    while (fgets(buf, sizeof(buf), f)) {
+        buf[strcspn(buf, "\r\n")] = 0;
+        if (buf[0]) lines.push_back(buf);
+    }
+    fclose(f);
+    return lines;
+}
+
+static bool ParseHeadsetLine(const std::string& s, HeadsetLine& h)
+{
+    size_t t = s.find('\t');
+    if (t == std::string::npos) return false;
+    h.name = s.substr(0, t);
+    float* a = h.tan;
+    return sscanf_s(s.c_str() + t + 1, "%d %d %f %f %f %f %f %f %f %f", &h.rec[0], &h.rec[1], &a[0], &a[1], &a[2], &a[3],
+                    &a[4], &a[5], &a[6], &a[7]) == 10 && h.rec[0] > 0 && h.rec[1] > 0;
+}
+
+// The square back buffer's side for a headset: its recommended pixels per tangent unit over the frustum LocateEyes
+// draws (both eyes' FOV, symmetric, square; FovScale), times RenderScale. Without its FOV: a guess.
+static int RenderSideFor(const int rec[2], const float* tan)
+{
+    float side;
+    if (tan) {
+        float density = 0.0f, ext = 0.0f;
+        for (int e = 0; e < 2; e++) {
+            const float* t = tan + 4 * e;   // left right up down
+            if (t[1] - t[0] > 0.01f) density = std::max(density, rec[0] / (t[1] - t[0]));
+            if (t[2] - t[3] > 0.01f) density = std::max(density, rec[1] / (t[2] - t[3]));
+            for (int i = 0; i < 4; i++) ext = std::max(ext, fabsf(t[i]));
+        }
+        ext = tanf(std::min(atanf(ext * g_cfg.fovScale), 1.39f));
+        side = 2.0f * ext * density;
+    } else {
+        side = std::max(rec[0], rec[1]) * 1.15f * g_cfg.fovScale;
+    }
+    int s = (int)(side * g_cfg.renderScale + 4.0f) / 8 * 8;
+    return std::min(std::max(s, 640), 8192);
+}
+
+static DWORD WINAPI RenderSizeThread(LPVOID)
+{
+    char name[XR_MAX_SYSTEM_NAME_SIZE] = "";
+    int rec[2] = {};
+    bool live = QueryHeadset(name, rec);
+    HeadsetLine h;
+    bool known = false;   // its FOV is in the file
+    for (const std::string& l : ReadHeadsetFile())
+        if (ParseHeadsetLine(l, h) && (!live || h.name == name)) { known = true; break; }
+    if (!live && known) { strncpy_s(name, h.name.c_str(), _TRUNCATE); rec[0] = h.rec[0]; rec[1] = h.rec[1]; }
+    int side = live || known ? RenderSideFor(rec, known ? h.tan : nullptr) : 0;
+    int asking = 0;
+    if (side && g_sizeState.compare_exchange_strong(asking, 3)) {
+        g_cfg.renderWidth = g_cfg.renderHeight = side;
+        g_sizeState = 1;
+        Log("vr: render size %dx%d for %s%s (recommended %dx%d per eye, RenderScale %.2f%s)", side, side, name,
+            live ? "" : " (the last headset - not connected now)", rec[0], rec[1], g_cfg.renderScale,
+            known ? "" : "; its FOV not known yet: a guess, exact from the next start");
+    } else if (!side && g_sizeState.compare_exchange_strong(asking, 2)) {
+        Log("vr: render size: no headset known - %dx%d from the ini", g_cfg.renderWidth, g_cfg.renderHeight);
+    } else if (side) {
+        Log("vr: render size %dx%d for %s came too late - the game started at %dx%d", side, side, name, g_cfg.renderWidth,
+            g_cfg.renderHeight);
+    }
+    SetEvent(g_sizeEvent);
+    return 0;
+}
+
+// Called from DllMain (the thread runs once it returns), long before the game reads its resolution.
+void VRRenderSizeStart()
+{
+    if (!g_cfg.vrEnabled || g_cfg.fakeHmd || g_cfg.renderScale <= 0.0f) { g_sizeState = 2; return; }
+    g_sizeEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    HANDLE t = g_sizeEvent ? CreateThread(nullptr, 0, RenderSizeThread, nullptr, 0, nullptr) : nullptr;
+    if (t) CloseHandle(t);
+    else g_sizeState = 2;
+}
+
+// The render size about to be used: waits for the headset's answer (not under the loader lock: the query's thread
+// could not run). No answer in 15 s: the ini's size.
+void VRRenderSizeWait()
+{
+    int s = g_sizeState.load();
+    if (s == 1 || s == 2 || !g_sizeEvent) return;
+    DWORD t0 = GetTickCount();
+    if (WaitForSingleObject(g_sizeEvent, 15000) != WAIT_OBJECT_0) {
+        int asking = 0;
+        if (g_sizeState.compare_exchange_strong(asking, 2))
+            Log("vr: render size: the OpenXR runtime did not answer in 15 s - %dx%d from the ini", g_cfg.renderWidth, g_cfg.renderHeight);
+        else
+            WaitForSingleObject(g_sizeEvent, INFINITE);   // (the answer is being applied this moment)
+    }
+    if (GetTickCount() - t0 >= 50) Log("vr: render size: waited %lu ms for the headset", GetTickCount() - t0);
+}
+
+// Whether a render size will be forced (the hooks are put in place from DllMain, before the answer).
+bool VRRenderSizeOn()
+{
+    return g_sizeEvent || (g_cfg.renderWidth > 0 && g_cfg.renderHeight > 0);
+}
+
+// Once a session runs: the eyes' FOV (and the size now recommended) written to twfcvr_headset.txt for the next start.
+// False while the views are not there yet.
+static bool SaveHeadsetFov(XrTime time)
+{
+    XrViewLocateInfo li = { XR_TYPE_VIEW_LOCATE_INFO };
+    li.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    li.displayTime = time;
+    li.space = xr.localSpace;
+    XrViewState vs = { XR_TYPE_VIEW_STATE };
+    XrView views[2] = { { XR_TYPE_VIEW }, { XR_TYPE_VIEW } };
+    uint32_t n = 0;
+    if (XR_FAILED(xrLocateViews(xr.session, &li, &vs, 2, &n, views)) || n != 2) return false;
+    for (const XrView& v : views)
+        if (!(v.fov.angleRight > v.fov.angleLeft && v.fov.angleUp > v.fov.angleDown)) return false;
+    char name[XR_MAX_SYSTEM_NAME_SIZE];
+    int rec[2];
+    if (!QueryHeadset(name, rec, true)) return true;
+    float tan[8];
+    for (int e = 0; e < 2; e++) {
+        tan[4 * e + 0] = tanf(views[e].fov.angleLeft);
+        tan[4 * e + 1] = tanf(views[e].fov.angleRight);
+        tan[4 * e + 2] = tanf(views[e].fov.angleUp);
+        tan[4 * e + 3] = tanf(views[e].fov.angleDown);
+    }
+    char line[512];
+    sprintf_s(line, "%s\t%d %d\t%.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f", name, rec[0], rec[1], tan[0], tan[1], tan[2], tan[3],
+              tan[4], tan[5], tan[6], tan[7]);
+    int want = RenderSideFor(rec, tan);
+    Log("vr: headset %s: %dx%d per eye recommended; the game renders %dx%d, at RenderScale %.2f it would be %dx%d", name,
+        rec[0], rec[1], g_cfg.renderWidth, g_cfg.renderHeight, g_cfg.renderScale, want, want);
+    std::vector<std::string> lines = ReadHeadsetFile();
+    if (!lines.empty() && lines[0] == line) return true;
+    FILE* f = _wfopen(HeadsetFile().c_str(), L"w");
+    if (!f) { Log("vr: cannot write twfcvr_headset.txt"); return true; }
+    fprintf(f, "%s\n", line);
+    HeadsetLine h;
+    for (const std::string& l : lines)
+        if (!ParseHeadsetLine(l, h) || h.name != name) fprintf(f, "%s\n", l.c_str());
+    fclose(f);
+    Log("vr: headset FOV saved (twfcvr_headset.txt)%s", g_cfg.renderScale > 0.0f && want != g_cfg.renderWidth ?
+        " - the new render size applies from the next start" : "");
+    return true;
+}
+
 static bool InitXR(ID3D11Device* dev)
 {
     g_retryLater = false;
     if (!xr.instance) {
-        const char* exts[] = { XR_KHR_D3D11_ENABLE_EXTENSION_NAME };
-        XrInstanceCreateInfo ici = { XR_TYPE_INSTANCE_CREATE_INFO };
-        strcpy_s(ici.applicationInfo.applicationName, "TWFC VR");
-        strcpy_s(ici.applicationInfo.engineName, "UnrealEngine3");
-        ici.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
-        ici.enabledExtensionCount = 1;
-        ici.enabledExtensionNames = exts;
-        XrResult r = xrCreateInstance(&ici, &xr.instance);
+        XrResult r = CreateXrInstance();
         if (XR_FAILED(r)) {
             // No runtime running (e.g. Virtual Desktop streamer closed) - keep polling.
             Log("vr: xrCreateInstance failed: %d (will retry)", (int)r);
-            xr.instance = XR_NULL_HANDLE;
             g_retryLater = true;
             return false;
         }
-        XrInstanceProperties ip = { XR_TYPE_INSTANCE_PROPERTIES };
-        xrGetInstanceProperties(xr.instance, &ip);
-        Log("vr: runtime %s %u.%u.%u", ip.runtimeName, XR_VERSION_MAJOR(ip.runtimeVersion), XR_VERSION_MINOR(ip.runtimeVersion),
-            XR_VERSION_PATCH(ip.runtimeVersion));
     }
 
     XrSystemGetInfo sgi = { XR_TYPE_SYSTEM_GET_INFO };
@@ -2099,6 +2294,7 @@ static const SettingItem kSettings[] = {
     { L"VR", L"VehicleHeadAim", L"\x041C\x0430\x0448\x0438\x043D\x0430: \x043F\x0440\x0438\x0446\x0435\x043B \x0432\x0437\x0433\x043B\x044F\x0434\x043E\x043C", L"Vehicle: aim with your gaze", 0, 1, 0, 1 },
     { L"VR", L"Cutscenes3D", L"\x0417\x0430\x0441\x0442\x0430\x0432\x043A\x0438 \x0432 3D", L"Cutscenes in 3D", 0, 1, 0, 1 },
     { L"VR", L"NearClip", L"\x0411\x043B\x0438\x0436\x043D\x044F\x044F \x0433\x0440\x0430\x043D\x0438\x0446\x0430 \x0432\x0438\x0434\x0438\x043C\x043E\x0441\x0442\x0438", L"Near clipping distance", 10, 5, 1, 100 },
+    { L"VR", L"RenderScale", L"\x0420\x0430\x0437\x0440\x0435\x0448\x0435\x043D\x0438\x0435: \x0448\x043B\x0435\x043C \x00D7 (0 = \x0438\x0437 ini; \x043F\x043E\x0441\x043B\x0435 \x043F\x0435\x0440\x0435\x0437\x0430\x043F\x0443\x0441\x043A\x0430)", L"Resolution: headset \x00D7 (0 = ini; after restart)", 1.0f, 0.05f, 0, 2 },
     { L"VR", L"MuzzleFlashScale", L"\x0420\x0430\x0437\x043C\x0435\x0440 \x0432\x0441\x043F\x044B\x0448\x0435\x043A \x0432\x044B\x0441\x0442\x0440\x0435\x043B\x0430", L"Muzzle flash size", 0.35f, 0.05f, 0, 1 },
     { L"HUD", L"Minimal", L"\x041A\x043E\x0440\x043E\x0442\x043A\x0438\x0439 HUD", L"Short HUD", 1, 1, 0, 1 },
     { L"HUD", L"MarkersInEyes", L"\x041C\x0435\x0442\x043A\x0438 \x0432 \x0433\x043B\x0430\x0437\x0430", L"Markers in the 3D view", 1, 1, 0, 1 },
@@ -3176,6 +3372,8 @@ static bool WaitAndBegin(XrFrameState& fs)
     fs = { XR_TYPE_FRAME_STATE };
     if (XR_FAILED(xrWaitFrame(xr.session, &wi, &fs))) return false;
     g_lastDisplayTime = fs.predictedDisplayTime;
+    static bool fovSaved;   // (once a run: the headset's FOV for the render size of the next start)
+    if (!fovSaved && fs.shouldRender) fovSaved = SaveHeadsetFov(fs.predictedDisplayTime);
     XrFrameBeginInfo bi = { XR_TYPE_FRAME_BEGIN_INFO };
     xrBeginFrame(xr.session, &bi);
     return true;

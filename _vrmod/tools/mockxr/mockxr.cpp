@@ -164,6 +164,21 @@ static XrResult XRAPI_CALL CreateInstance(const XrInstanceCreateInfo* ci, XrInst
 static XrResult XRAPI_CALL DestroyInstance(XrInstance) { return XR_SUCCESS; }
 static XrResult XRAPI_CALL GetInstanceProperties(XrInstance, XrInstanceProperties* p) { strcpy_s(p->runtimeName, "MockXR"); p->runtimeVersion = XR_MAKE_VERSION(0, 1, 0); return XR_SUCCESS; }
 static XrResult XRAPI_CALL GetSystem(XrInstance, const XrSystemGetInfo*, XrSystemId* s) { *s = 1; return XR_SUCCESS; }
+static XrResult XRAPI_CALL GetSystemProps(XrInstance, XrSystemId, XrSystemProperties* p) { p->systemId = 1; strcpy_s(p->systemName, "MockXR HMD"); return XR_SUCCESS; }
+// the recommended eye size (as a Quest at a high quality setting)
+static XrResult XRAPI_CALL EnumViewConfigViews(XrInstance, XrSystemId, XrViewConfigurationType, uint32_t cap, uint32_t* cnt, XrViewConfigurationView* v)
+{
+    *cnt = 2;
+    if (!cap) return XR_SUCCESS;
+    if (cap < 2) return XR_ERROR_SIZE_INSUFFICIENT;
+    for (int i = 0; i < 2; i++) {
+        v[i].recommendedImageRectWidth = 2064; v[i].recommendedImageRectHeight = 2208;
+        v[i].maxImageRectWidth = v[i].maxImageRectHeight = 4096;
+        v[i].recommendedSwapchainSampleCount = v[i].maxSwapchainSampleCount = 1;
+    }
+    L("xrEnumerateViewConfigurationViews");
+    return XR_SUCCESS;
+}
 static XrResult XRAPI_CALL GetD3D11Req(XrInstance, XrSystemId, XrGraphicsRequirementsD3D11KHR* r)
 {
     IDXGIFactory1* f = nullptr; IDXGIAdapter1* a = nullptr; DXGI_ADAPTER_DESC1 d = {};
@@ -443,7 +458,8 @@ static XrResult XRAPI_CALL GetProc(XrInstance, const char* name, PFN_xrVoidFunct
 #define E(n, f) { n, (PFN_xrVoidFunction)f }
         E("xrGetInstanceProcAddr", GetProc), E("xrEnumerateInstanceExtensionProperties", EnumInstExt), E("xrEnumerateApiLayerProperties", EnumApiLayers),
         E("xrCreateInstance", CreateInstance), E("xrDestroyInstance", DestroyInstance), E("xrGetInstanceProperties", GetInstanceProperties),
-        E("xrGetSystem", GetSystem), E("xrGetD3D11GraphicsRequirementsKHR", GetD3D11Req), E("xrPollEvent", PollEvent), E("xrStringToPath", StringToPath),
+        E("xrGetSystem", GetSystem), E("xrGetSystemProperties", GetSystemProps), E("xrEnumerateViewConfigurationViews", EnumViewConfigViews),
+        E("xrGetD3D11GraphicsRequirementsKHR", GetD3D11Req), E("xrPollEvent", PollEvent), E("xrStringToPath", StringToPath),
         E("xrCreateSession", CreateSession), E("xrDestroySession", DestroySession), E("xrBeginSession", BeginSession), E("xrEndSession", EndSession),
         E("xrCreateReferenceSpace", CreateRefSpace), E("xrDestroySpace", DestroySpace), E("xrEnumerateSwapchainFormats", EnumFormats),
         E("xrCreateSwapchain", CreateSwapchain), E("xrDestroySwapchain", DestroySwapchain), E("xrEnumerateSwapchainImages", EnumImages),

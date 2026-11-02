@@ -115,6 +115,10 @@ static void LoadConfig()
                   "WorldScale=200\n"
                   "; Game render resolution for VR (square is best: each frame is one eye). 0 = use the game's setting.\n"
                   "; Does not change the resolution of the normal (non-VR) game.\n"
+                  "; With RenderScale > 0 the size follows the headset (its recommended resolution - in Virtual Desktop\n"
+                  "; the quality setting - at the same sharpness, times RenderScale; set at game start) and these two\n"
+                  "; are only used until a headset has been seen. RenderScale=0: always these two.\n"
+                  "RenderScale=1.0\n"
                   "RenderWidth=1800\n"
                   "RenderHeight=1800\n"
                   "; Render a wider view than the headset needs (1.0 = exact)\n"
@@ -203,6 +207,7 @@ static void LoadConfig()
     g_cfg.levelView = (int)IniFloat(ini, L"VR", L"LevelView", (float)g_cfg.levelView);
     g_cfg.renderWidth = (int)IniFloat(ini, L"VR", L"RenderWidth", (float)g_cfg.renderWidth);
     g_cfg.renderHeight = (int)IniFloat(ini, L"VR", L"RenderHeight", (float)g_cfg.renderHeight);
+    g_cfg.renderScale = IniFloat(ini, L"VR", L"RenderScale", g_cfg.renderScale);
     g_cfg.cameraMode = (int)IniFloat(ini, L"VR", L"CameraMode", (float)g_cfg.cameraMode);
     g_cfg.aimMode = (int)IniFloat(ini, L"VR", L"AimMode", (float)g_cfg.aimMode);
     g_cfg.vrHud = (int)IniFloat(ini, L"HUD", L"FloatingHud", (float)g_cfg.vrHud);
@@ -399,6 +404,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID)
         Log("TWFC VR mod loaded (build %s %s)", __DATE__, __TIME__);
         // The resolution override must be in place before the game reads its settings at startup.
         LoadConfig();
+        VRRenderSizeStart();  // (the headset's answer comes before the game reads the size)
         GameEarlyPatches();   // (before the engine starts its render thread)
         RegistryInstallHooks();
         D3D9ModesInstall();
