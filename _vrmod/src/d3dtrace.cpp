@@ -47,6 +47,8 @@ static volatile bool g_hudWanted;     // set by vr.cpp for the coming frame
 static bool g_hudActive;              // redirect is active in this frame
 static ID3D11Resource* g_bbTex;       // dgVoodoo's D3D9 backbuffer texture (source of the first copy each frame)
 static bool g_copySeen;
+static ID3D11Resource* g_drawnRTs[16];   // the textures drawn into this frame (only these can be the backbuffer texture)
+static int g_drawnN;
 static int g_drawsOnBB;
 static int g_hudLayer;                // where the HUD's draws go now
 static bool g_hudMovie;               // ... and the HUD movie draws now (HudSetLayer)
@@ -60,6 +62,9 @@ struct HudLayer {
 };
 static HudLayer g_layers[kHudLayers];
 static UINT g_hudW, g_hudH;
+static ID3D11Resource* g_movieRT;    // where the HUD movie's first draw of this frame went (for the log)
+static long g_movieDraws;            // ... and how many it made
+static HRESULT g_layersFailed;       // the layers could not be made (logged once)
 
 static bool TexSize(ID3D11Resource* r, UINT& w, UINT& h)
 {
@@ -99,10 +104,14 @@ static bool EnsureLayers(UINT w, UINT h)
     D3D11_TEXTURE2D_DESC d = { w, h, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, { 1, 0 }, D3D11_USAGE_DEFAULT,
                                D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, 0, 0 };
     for (HudLayer& l : g_layers) {
-        if (FAILED(g_dev->CreateTexture2D(&d, nullptr, &l.tex))) return false;
-        g_dev->CreateRenderTargetView(l.tex, nullptr, &l.rtv);
-        g_dev->CreateShaderResourceView(l.tex, nullptr, &l.srv);
-        if (!l.rtv || !l.srv) return false;
+        HRESULT hr = g_dev->CreateTexture2D(&d, nullptr, &l.tex);
+        if (SUCCEEDED(hr)) hr = g_dev->CreateRenderTargetView(l.tex, nullptr, &l.rtv);
+        if (SUCCEEDED(hr)) hr = g_dev->CreateShaderResourceView(l.tex, nullptr, &l.srv);
+        if (FAILED(hr) || !l.rtv || !l.srv) {
+            if (!g_layersFailed) Log("hud: layer textures %ux%u FAILED (%08lX)", w, h, (unsigned long)hr);
+            g_layersFailed = FAILED(hr) ? hr : E_FAIL;
+            return false;
+        }
     }
     g_hudW = w;
     g_hudH = h;
@@ -115,6 +124,7 @@ static bool EnsureLayers(UINT w, UINT h)
 static void BeforeDraw(ID3D11DeviceContext* c)
 {
     if (c != g_imm) return;
+    if (g_hudActive && g_hudMovie && !g_movieDraws++) g_movieRT = g_curRT;
     if (g_boundLayer >= 0 && g_curRT != g_bbTex && !g_hudMovie) {   // (the movie done: the game's texture back)
         g_oSetRT(c, g_curRTVn, g_curRTVs, g_curDSV);
         g_boundLayer = -1;
@@ -134,8 +144,14 @@ static void BeforeDraw(ID3D11DeviceContext* c)
     g_boundLayer = g_hudLayer;
 }
 
+volatile bool g_d3dOwnCalls;   // set by vr.cpp while it issues its own copies and draws on the immediate context
+
 static void AfterDraw(ID3D11DeviceContext* c)
 {
+    if (g_d3dOwnCalls) return;   // (the eye images' draws: not the game's textures)
+    if (c == g_imm && g_curRT && (!g_drawnN || g_drawnRTs[g_drawnN - 1] != g_curRT) && g_drawnN < 16 &&
+        std::find(g_drawnRTs, g_drawnRTs + g_drawnN, g_curRT) == g_drawnRTs + g_drawnN)
+        g_drawnRTs[g_drawnN++] = g_curRT;
     if (c == g_imm && g_traceFrames > 0) g_traceDraws++;
     if (c == g_imm && g_curRT && g_curRT == g_bbTex) g_drawsOnBB++;
     if (c == g_imm && g_boundLayer >= 0) g_layers[g_boundLayer].draws++;
@@ -211,7 +227,21 @@ static void STDMETHODCALLTYPE HClear(ID3D11DeviceContext* c, ID3D11RenderTargetV
     g_oClear(c, rtv, col);
 }
 
-volatile bool g_d3dOwnCalls;   // set by vr.cpp while it issues its own copies on the immediate context
+// dgVoodoo's present path starts by copying the D3D9 backbuffer texture: with CopyResource when the game's window is
+// as large as its picture (1800), with CopySubresourceRegion and a scaling draw when Windows made the window smaller
+// (2560: 2560x2547 - then the first CopyResource is the scaled copy's, a texture the game never draws into, and the
+// HUD stayed in the eye images). So: the first copy of either kind, of a texture drawn into in this frame (not the
+// video frames of the loading screens either).
+static void NoteCopy(ID3D11Resource* src)
+{
+    if (g_copySeen || std::find(g_drawnRTs, g_drawnRTs + g_drawnN, src) == g_drawnRTs + g_drawnN) return;
+    g_copySeen = true;
+    if (src != g_bbTex) {
+        g_bbTex = src;
+        char b[96]; Desc(src, b, sizeof b);
+        Log("hud: backbuffer texture %s", b);
+    }
+}
 
 static void STDMETHODCALLTYPE HCopy(ID3D11DeviceContext* c, ID3D11Resource* dst, ID3D11Resource* src)
 {
@@ -220,20 +250,20 @@ static void STDMETHODCALLTYPE HCopy(ID3D11DeviceContext* c, ID3D11Resource* dst,
             char a[96], b[96]; Desc(dst, a, sizeof a); Desc(src, b, sizeof b);
             Log("trace: CopyResource %s <- %s", a, b);
         }
-        // dgVoodoo's present path starts by copying the D3D9 backbuffer texture.
-        if (!g_copySeen) {
-            g_copySeen = true;
-            if (src != g_bbTex) { g_bbTex = src; Log("hud: backbuffer texture %p", src); }
-        }
+        NoteCopy(src);
     }
     g_oCopy(c, dst, src);
 }
 
 static void STDMETHODCALLTYPE HCopySub(ID3D11DeviceContext* c, ID3D11Resource* dst, UINT ds, UINT x, UINT y, UINT z, ID3D11Resource* src, UINT ss, const D3D11_BOX* box)
 {
-    if (c == g_imm && g_traceFrames > 0) {
-        char a[96], b[96]; Desc(dst, a, sizeof a); Desc(src, b, sizeof b);
-        Log("trace: CopySubresourceRegion %s <- %s", a, b);
+    if (c == g_imm && !g_d3dOwnCalls) {
+        if (g_traceFrames > 0) {
+            char a[96], b[96]; Desc(dst, a, sizeof a); Desc(src, b, sizeof b);
+            if (box) Log("trace: CopySubresourceRegion %s <- %s box %u,%u-%u,%u", a, b, box->left, box->top, box->right, box->bottom);
+            else Log("trace: CopySubresourceRegion %s <- %s", a, b);
+        }
+        NoteCopy(src);
     }
     g_oCopySub(c, dst, ds, x, y, z, src, ss, box);
 }
@@ -356,8 +386,8 @@ static void SaveLayer(HudLayer& l, const wchar_t* name)
 }
 
 // Called at Present: closes the frame; gives the layers this frame's HUD was split into (null: nothing drawn there
-// or no split).
-void TraceEndFrame(ID3D11ShaderResourceView* layers[kHudLayers])
+// or no split) and the game's picture of it, the D3D9 backbuffer texture (null: not seen in this frame).
+void TraceEndFrame(ID3D11ShaderResourceView* layers[kHudLayers], ID3D11Resource** gameBB)
 {
     if (g_eyeBrightFrames > 0) {
         g_eyeBrightFrames--;
@@ -372,6 +402,22 @@ void TraceEndFrame(ID3D11ShaderResourceView* layers[kHudLayers])
         g_traceFrames--;
     }
     for (int i = 0; i < kHudLayers; i++) layers[i] = g_hudActive && g_layers[i].draws ? g_layers[i].srv : nullptr;
+    // The HUD movie drew but nothing went to the layers (its draws stayed in the eye images): why, now and then.
+    if (g_hudActive && g_movieDraws && !g_layers[kHudEyes].draws && !g_layers[kHudPanel].draws && !g_layers[kHudReticle].draws) {
+        static DWORD at;
+        static int times;
+        if (times < 8 && (!times || GetTickCount() - at > 20000)) {
+            at = GetTickCount();
+            times++;
+            char m[96], b[96];
+            Desc(g_movieRT, m, sizeof m);
+            Desc(g_bbTex, b, sizeof b);
+            Log("hud: the HUD movie drew %ld times into %s, kept in the eyes: the backbuffer texture %s, %d draws on it%s",
+                g_movieDraws, m, b, g_drawsOnBB, g_layersFailed ? ", the layers could not be made" : "");
+        }
+    }
+    g_movieRT = nullptr;
+    g_movieDraws = 0;
     if (g_hudSave && g_hudActive && g_layers[0].tex) {
         g_hudSave = 0;
         bool GameDrawingRightEye();
@@ -381,8 +427,10 @@ void TraceEndFrame(ID3D11ShaderResourceView* layers[kHudLayers])
         SaveLayer(g_layers[kHudPanel], L"hud_panel.bmp");
         SaveLayer(g_layers[kHudReticle], L"hud_reticle.bmp");
     }
+    *gameBB = g_copySeen ? g_bbTex : nullptr;
     g_hudActive = g_hudWanted;
     g_copySeen = false;
+    g_drawnN = 0;
     g_drawsOnBB = 0;
     g_boundLayer = -1;
     g_hudLayer = kHudEyes;

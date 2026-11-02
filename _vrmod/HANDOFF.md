@@ -155,20 +155,21 @@ D3D11/DXGI; мод хукает DXGI Present и отдаёт кадры в OpenX
   исключения сам и выходит без WER — смотреть эти строки в twfcvr.log.
 
 ### Вывод изображения (текущий)
-- **Чередование глаз (AFR)**: один кадр игры = один глаз. Пара L+R отдаётся в OpenXR как projection layer.
+- **Оба глаза за один тик** (`[VR] StereoPerFrame=1` + `SingleThreadRender=1`, по умолчанию с 29.10). Кадр OpenXR
+  начинается в начале тика: `appUpdateTimeAndHandleMaxTickRate` `0x110029B0` → `VRBeginTick` (xrWaitFrame,
+  xrBeginFrame, ввод). Один `xrLocateViews` на тик. Хук `DrawViewport` `0x11698A90` рисует мир два раза из одного
+  состояния: проход 1 — левый глаз, проход 2 — правый (своя `FSceneViewState`, поза ещё и в `pc+0xD8..0xEC`). После
+  второго Present пара уходит в `xrEndFrame`. Подробно — PROGRESS «29.10 ~20:25»; окклюзия, общая для глаз, во
+  втором проходе пропускается (PROGRESS «30.10 … 0x113C75A0»).
 - **Однопоточный рендер** (`[VR] SingleThreadRender=1`): патч `0x11002BB2` (`A3 44 0C B1 12 E9…` → `ret`) не даёт
-  движку запустить рендер-поток (`GUseThreadedRendering` 0x12B10C44). В одном такте: frame wait → dt → Draw
-  вьюпорта (из 0x1145B64A) → внутри UpdateViewTarget (мод ставит позу глаза) → рендер → Present (тот же поток).
-  Показ берёт позу **своего такта** (`g_tickEye`, номер такта), без очереди. FIFO-очередь осталась для
-  `SingleThreadRender=0`. FPS в MockXR ~176 (для 90 Гц нужно ~180).
-- **Удержание времени** (`SyncEyeTime=1`, game.cpp OnFrameDelta): кадр правого глаза получает dt = 1 мс
-  (`HeldFrameTime=0.001`), остаток отдаётся следующему левому — оба глаза показывают почти один момент. С 0.01 мс
-  физика машины взрывалась (860 000 ед/с при ударе). `SyncEyeTimeVehicle=1`.
-- **Правый глаз** повторяет позу скелета левого (ik.cpp g_frozen + сдвиг пешки).
-- **Отзыв пользователя (НЕ решено)**: всё ещё рассинхрон — объект перед глазами (машина) «плывёт», то плоский, то
-  объёмный. Это главная задача следующего этапа: изучить документацию/подходы (UEVR «synchronized sequential»,
-  R.E.A.L. Luke Ross, VorpX), возможно рендер обоих глаз из одного состояния игры (`StereoPerFrame` — попытка
-  была: двойной Draw не меняет вид, движок берёт вид из своей копии; в однопоточном режиме стоит попробовать заново).
+  движку запустить рендер-поток (`GUseThreadedRendering` 0x12B10C44). Тик, отрисовка и Present идут в одном потоке;
+  глаза тика лежат в `g_tickEyes[2]`, без очереди. FIFO-очередь осталась для `SingleThreadRender=0`.
+- **AFR** (`StereoPerFrame=0`, запасной: один кадр игры = один глаз): удержание времени (`SyncEyeTime=1`,
+  game.cpp OnFrameDelta, правому глазу dt = `HeldFrameTime`), правый глаз повторяет позу скелета левого (ik.cpp
+  g_frozen). Жалоба на «плывущие» объекты (машина то плоская, то объёмная) была на AFR — против неё и сделан двойной
+  проход; в шлеме это подтвердить.
+- **Откуда картинка глаз** (vr.cpp `VRFrame`): из бэкбуфера окна; если окно меньше картинки игры (2560 на экране
+  высотой 2560) — из D3D9-бэкбуфера dgVoodoo, см. HUD.
 
 ### HUD
 - HUD разделяется на слои через сам Scaleform, без пиксельных эвристик (gfx.cpp + d3dtrace.cpp). Хук
@@ -187,6 +188,14 @@ D3D11/DXGI; мод хукает DXGI Present и отдаёт кадры в OpenX
   true)` в gfx.cpp: пока мувик рисуется, вызовы в RT игры размером с бэкбуфер тоже идут в слой, потом игре
   возвращаются её RTV. В глазах остаются только скан-линии (эффект игры). Тест: `gfxcall
   _global.NotifyDownedWarningFade 60`.
+- **Бэкбуфер dgVoodoo** (d3dtrace.cpp `NoteCopy`): текстура D3D9-бэкбуфера — источник первой копии кадра
+  (CopyResource или CopySubresourceRegion) из тех текстур, в которые в этом кадре рисовали. Если рендер выше
+  рабочего стола (2560 при экране высотой 2560 физ. пикселей), dgVoodoo сам ужимает окно (SetWindowPos 2566x2582 из
+  Reset игры, `KeepWindowAspectRatio`) и делает swapchain 2560x2547. В окно идёт только верх картинки:
+  CopySubresourceRegion и отрисовка. Раньше бралась первая CopyResource — текстура, куда игра не рисует, и HUD
+  оставался в глазах. Тогда же глаза, прицел и театр берут картинку прямо из бэкбуфера игры (`TraceEndFrame` →
+  `VRFrame`, лог «vr: picture from the game's backbuffer …»), целиком и квадратной. При 1800 — из swapchain окна, как
+  раньше. С размером окна не воевать: dgVoodoo считает его сам, на мониторах ниже обрезка была бы больше.
 - Плавающая панель перед игроком (догоняет взгляд).
 - Прицел: VR-кольцо по лучу контроллера на точке попадания; `ReticleStyle=1` — вырезка центра слоя прицела
   (`kReticleCut` = 0.6 ширины, круг) на кольце в угловом размере игры. Размер — `ReticleSize` (0.6). Оптическая
@@ -261,7 +270,9 @@ GEngine `[0x12B10968]` (GameViewport +0x34C, Viewport +0x140), GCurrentTime `0x1
 
 Функции/хуки: после UpdateTime `0x1100956C` (удержание dt), UpdateViewTarget `0x113A8390` (thiscall, OutVT+8 =
 POV; камера = POV−0x324, CameraCache +0x300, PCOwner cam+0x1C8), frame wait `0x11593600`, Draw вьюпорта игры
-`0x1184FA20` (вызывается 2 раза за тик, рисует вызов из 0x1145B64A), FPerspectiveMatrix `0x10DD5530` (+ операнды
+`DrawViewport(FViewport*)` `0x11698A90` (__stdcall, ret 4; из UGameEngine::RedrawViewports `0x11698DDD` и загрузочного
+`0x115CB48F`; `0x1184FA20` — это UAudioDevice::Update, не отрисовка), начало тика
+`appUpdateTimeAndHandleMaxTickRate` `0x110029B0`, FPerspectiveMatrix `0x10DD5530` (+ операнды
 ближней плоскости `0x11451929`, `0x1145194C`), проверка рендер-потока `0x11002B60` (хвост 0x11002BB2),
 FarMoveActor `0x11689630` (thiscall world, actor, &dest, bTest, bNoCheck, bAttachedMove; снять bStatic actor+0x78
 бит0 и поставить 0x2000 в +0x7C на время), LineCheck `0x1167C9B0` (thiscall world, FCheckResult* hit (actor +4, location +8), source, -, &end, &start,
@@ -307,10 +318,10 @@ TnHealthPickupFactory, TnWeaponPickupFactory, TnDroppedPickup*, TnProjectileGren
 
 [VR]: Mode, RenderScale=1.0 (>0: размер рендера по шлему × это, при старте игры; 0 = всегда RenderWidth/Height),
 MaxRenderSize=2560 (предел для RenderScale; 0 = без предела),
-RenderWidth/Height=1800 (квадрат, один глаз на кадр; пока ни один шлем не встречался), WorldScale (по умолчанию 200 ед/м; при AutoScale
+RenderWidth/Height=1800 (квадрат, один глаз на проход; пока ни один шлем не встречался), WorldScale (по умолчанию 200 ед/м; при AutoScale
 — авто), AutoScale, UserEyeHeight, UserArmSpan, FirstPersonEyeHeight=150 / EyeForward=30, VehicleCamera (0 кабина,
 1 сзади), ChaseDistance/Height, VehicleEyeHeight/Forward, VehicleHeadAim, SyncEyeTime, SyncEyeTimeVehicle,
-HeldFrameTime, SingleThreadRender, StereoPerFrame=0, HandIK, ShowBody, ArmSize=0.8, LimbThickness, LegThickness, HandScale,
+HeldFrameTime, SingleThreadRender=1, StereoPerFrame=1 (оба глаза за тик; 0 = AFR), HandIK, ShowBody, ArmSize=0.8, LimbThickness, LegThickness, HandScale,
 WeaponScale, FingerPoses, NearClip=10, NoNearFade, MuzzleFlashScale, Reticle, ReticleSize, ReticleStyle,
 Cutscenes3D=0, GunGrip, Foregrip, EmptyGripR, AbilityAnimation=0, LevelView=1 (глаза рисуются без крена головы, рантайм
 доворачивает: имена и метки ровно по миру; фрустум растёт на крен).
@@ -338,15 +349,15 @@ HUD-панель + метки в глаза, HUD при малом HP (толь�
 расширен на «…Pickup…»/«…Dropped…»), автоподбор оружия (X 1.2 с), урон по врагам ударом, снайперский зум; от
 02.11: позиция оружия при смене (по оружию в руке, `WeaponList::held`), ручки турели в стиле игры, точка подбора,
 временные ElbowInGun*, разрешение по шлему (RenderScale; из файла шлема, до 2560 — в шлеме не проверено после
-краша на 3456), кожух пустой руки после смены оружия — в шлеме не проверены.
+краша на 3456), кожух пустой руки после смены оружия — в шлеме не проверены. HUD на панели и полная квадратная
+картинка при 2560 (окно 2560x2547) — только MockXR.
 
 ---
 
 ## 9. Открытые задачи (последний список пользователя)
 
-1. **VR-вывод** — рассинхрон/«плывущие» объекты перед глазами (особенно машина): сделать правильный стерео-режим
-   (изучить документацию OpenXR и подходы UEVR/R.E.A.L.; рассмотреть рендер обоих глаз из одного такта в
-   однопоточном режиме вместо AFR + удержания времени).
+1. **VR-вывод** — сделан режим «оба глаза за тик» (29.10, `StereoPerFrame=1`). Проверить в шлеме, ушли ли
+   рассинхрон и «плывущие» объекты перед глазами (особенно машина), и хватает ли GPU на два прохода.
 2. **Скелет/плечи** — плечи не похожи на плечи персонажа, руки выглядят короткими/неестественно.
 3. Проверить в шлеме всё из 28–29.10 (см. PROGRESS «28.10 ~23:00»).
 4. Если гранаты/оружие с земли всё ещё не притягиваются — найти реальные имена их классов на уровне, где они есть.
@@ -356,7 +367,8 @@ HUD-панель + метки в глаза, HUD при малом HP (толь�
 6. Проверить в шлеме от 02.11: старт после краша на первом 3D-кадре (лог «vr: render size 2560x2560 for Meta Quest 3 …»;
    при выходе — строки «exception:»/«exit:»/«mem:»; если снова закрывается — MaxRenderSize ниже или RenderScale=0),
    кожух пустой правой руки после смены оружия (Мегатрон и другие роботы), вид ручек турели, точку подбора,
-   сохранение позиции оружия при смене.
+   сохранение позиции оружия при смене. При 2560: HUD только на панели, а не в глазах; картинка не растянута;
+   в логе «vr: picture from the game's backbuffer 2560x2560 (the window's swapchain is …)».
 
 ---
 
