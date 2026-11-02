@@ -283,6 +283,17 @@ bool ReadActorLocation(void* actor, Vec3f& out)
     }
 }
 
+bool ReadActorRotation(void* actor, int out[3])
+{
+    if (!actor) return false;
+    __try {
+        memcpy(out, (uint8_t*)actor + kActorLocation + 12, 12);   // Rotation (pitch, yaw, roll) after Location
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 // ACamera::UpdateViewTarget(FTViewTarget& OutVT, FLOAT DeltaTime) - __thiscall, ret 8. OutVT+8 = TPOV.
 namespace addr {
     const uintptr_t kUpdateViewTarget = 0x113A8390;
