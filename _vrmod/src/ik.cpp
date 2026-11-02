@@ -1111,16 +1111,21 @@ Pose GunInComponent()
 // game attaches the root to the elbow bone, whose +x points back at the shoulder: the shell turned half about y lies
 // on the forearm as the left forearm's armour, mirrored (its blade on the outside, the point at the hand; about z it
 // lay turned over - the headset). It keeps to the wrist: shifted toward the hand as far as the forearm is stretched.
+// In the bind pose it lies on the elbow's own frame, not as the game last attached it: the game attaches it turned
+// half about y once a gun has been drawn (rot 32768 0 0), not turned at the level start - with that turn too the
+// shell lay turned back, behind the hand (the headset, after a weapon switch).
 bool PlaceArmModel(const Pose* pose)
 {
     Att* r = FindAtt(g_armComp);
     int hb = g_sk.arm[1].hand;
     if (!r || !g_armEntry || hb < 0) return false;
     if (BoneIndex(r->bone) != g_sk.arm[1].elbow) { RestoreEntry(r, g_armEntry); return false; }
-    Pose rel = RotatorPose(r->rot);
+    bool bind = g_armOurs && !g_armBindOff;
+    static const int kNoTurn[3] = {};
+    Pose rel = RotatorPose(bind ? kNoTurn : r->rot);
     for (int k = 0; k < 3; k++) rel.ax[k] = Scale(rel.ax[k], r->scale[k]);
-    rel.pos = { r->loc[0], r->loc[1], r->loc[2] };
-    if (g_armOurs && !g_armBindOff) {
+    rel.pos = bind ? Vec3{} : Vec3{ r->loc[0], r->loc[1], r->loc[2] };
+    if (bind) {
         static const Pose kTurn[2] = { { { { -1, 0, 0 }, { 0, -1, 0 }, { 0, 0, 1 } }, {} },
                                        { { { -1, 0, 0 }, { 0, 1, 0 }, { 0, 0, -1 } }, {} } };
         Pose t = kTurn[g_armTurn & 1];
@@ -1888,6 +1893,11 @@ void IKOnAttach(void* mesh, void* comp)
         Log("ik: arm model %p (%ls), attached by the game", c, SkelName(c));
     }
     if (c == g_armComp) {   // where the game wants it: the mod attaches it there too
+        if (!g_armGameSaved || g_armGameBone != *(const unsigned*)(e + 4) || memcmp(g_armGameLoc, e + 8, 12) ||
+            memcmp(g_armGameRot, e + 0x14, 12))
+            Log("ik: the game attaches the arm model on bone %d at %.1f %.1f %.1f, rot %d %d %d, scale %.2f",
+                BoneIndex(*(const unsigned*)(e + 4)), ((float*)(e + 8))[0], ((float*)(e + 8))[1], ((float*)(e + 8))[2],
+                ((int*)(e + 0x14))[0], ((int*)(e + 0x14))[1], ((int*)(e + 0x14))[2], ((float*)(e + 0x20))[0]);
         g_armGameBone = *(const unsigned*)(e + 4);
         memcpy(g_armGameLoc, e + 8, 12);
         memcpy(g_armGameRot, e + 0x14, 12);
