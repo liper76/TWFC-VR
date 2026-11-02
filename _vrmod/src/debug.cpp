@@ -255,6 +255,13 @@ static void RunLine(const char* line)
         float f[3];
         if (IKForegrip(f)) Log("debug: foregrip right %.3f up %.3f forward %.3f m", f[0], f[1], -f[2]);
         else Log("debug: no foregrip");
+    } else if (!strncmp(line, "gunstock", 8)) {   // gunstock <0|1|2> [smoothing 0..10]: the virtual stock (not saved)
+        int n = g_cfg.gunstock;
+        float s = g_cfg.weaponSmoothing;
+        sscanf_s(line + 8, "%d %f", &n, &s);
+        g_cfg.gunstock = n;
+        g_cfg.weaponSmoothing = s;
+        Log("debug: gunstock %d, weapon smoothing %.1f", n, s);
     } else if (!strncmp(line, "pickups", 7)) {
         PullDebug(1);
     } else if (!strncmp(line, "pullaim", 7)) {

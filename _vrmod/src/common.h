@@ -72,6 +72,11 @@ struct Config {
     int   twoHanded = 1;            // left grip near the weapon's front = hold it with both hands
     float twoHandReach = 0.25f;     // metres in front of the right controller where the left hand grabs
     float twoHandRadius = 0.15f;    // how close the left hand must be to that point
+    int   gunstock = 2;             // held two-handed, a virtual stock: 0 none, 1 at the shoulder, 2 about the front hand
+    float weaponSmoothing = 3.0f;   // the gun's turn filtered: 0 off .. 10 most (fast flicks less)
+    float stockShoulder[3] = { 0.145f, -0.21f, 0.04f };   // the gun hand's shoulder from the eyes: aside, up, back (m)
+    float stockButt[3] = { 0.0f, 0.02f, 0.24f };          // the virtual butt from the gun hand's grip (m, aim axes)
+    float stockSight[3] = { 0.0f, 0.075f, -0.08f };       // the sights from the grip (m, aim axes: x right, y up, -z forward)
     int   physicalAim = 0;          // weapon held two-handed and raised to the eyes = aiming (the game's FineAim)
     int   gripAbilities = 0;        // 1 = old layout: grips are the ability buttons (LB/RB), Y = next weapon
     float wheelSize = 0.30f;        // weapon wheel diameter (metres)
@@ -261,7 +266,6 @@ void GameSetRightEyeView(const TPOV& pov);  // game.cpp: the view of the second 
 bool VRNextStereoEye(int& eye);             // eye of the next stereo frame; false when no stereo views lately
 bool VRTwoHanded();                         // the weapon is held with both hands
 void VRFingerCurls(int hand, float out[4]); // empty hand: index, middle, ring, thumb bend (0..1) from the controller
-bool VRTwoHandTurn(float q[4]);             // held two-handed: turn (quaternion x,y,z,w, OpenXR LOCAL) of the right hand's aim
 // a mounted turret's aim as its handrails set it (LOCAL: quaternion x,y,z,w, from between the grips); false until set
 bool VRTurretAim(float q[4], float p[3]);
 bool IKForegrip(float out[3]);              // ik.cpp: held weapon's front grip relative to the right aim pose (OpenXR axes, metres)
