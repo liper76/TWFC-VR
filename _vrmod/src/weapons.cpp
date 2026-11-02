@@ -604,11 +604,14 @@ void WeaponsInstall()
     Log(InstallShotHook() ? "weapons: turret shot hook installed" : "weapons: turret shot hook FAILED");
 }
 
+bool g_debugGod;   // debug "god 1|0": the player's health kept up (tests in a boss fight; not saved)
+
 void WeaponsUpdate(void* pawnPtr)
 {
     uint8_t* pawn = (uint8_t*)pawnPtr;
     DWORD now = GetTickCount();
     __try {
+        if (g_debugGod && pawn && *(float*)(pawn + 0x35C) < 5000.0f) *(float*)(pawn + 0x35C) = 5000.0f;   // Pawn.Health
         uint8_t* mesh = pawn ? *(uint8_t**)(pawn + kPawnMesh) : nullptr;
         if (pawn != g_pawn || mesh != g_mesh) {
             // out of first person (cutscene, menu): put the melee weapon away; a new pawn or mesh has new meshes
@@ -648,6 +651,36 @@ void WeaponsDebugTurretFx()
         if (w) Log("debug: %ls: %d particle systems at %.2f", NameOf(*(unsigned*)(w + 4)), ShrinkTurretFx(w, g_cfg.muzzleFlashScale), g_cfg.muzzleFlashScale);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         Log("debug: turretfx failed");
+    }
+}
+
+// debug "turrets": every turret actor in the level - its distance and bearing from the player (yaw: Unreal degrees,
+// 0 = +x, the pawn's own yaw given too) - to walk to one in a test.
+void WeaponsDebugTurrets()
+{
+    __try {
+        if (!g_pawn) { Log("debug: no pawn"); return; }
+        const float* p = (const float*)((uint8_t*)g_pawn + kActorLocation);
+        Log("debug: pawn at %.0f %.0f %.0f yaw %.0f", p[0], p[1], p[2], *(int*)((uint8_t*)g_pawn + kActorRotation + 4) * (360.0f / 65536.0f));
+        uint8_t* world = *(uint8_t**)kGWorld;
+        uint8_t** levels = world ? *(uint8_t***)(world + kWorldLevels) : nullptr;
+        int levelCount = world ? *(int*)(world + kWorldLevels + 4) : 0;
+        for (int l = 0; levels && l < levelCount && l < 64; l++) {
+            uint8_t* level = levels[l];
+            uint8_t** actors = level ? *(uint8_t***)(level + kLevelActors) : nullptr;
+            int count = level ? *(int*)(level + kLevelActors + 4) : 0;
+            for (int i = 0; actors && i < count && i < 20000; i++) {
+                uint8_t* a = actors[i];
+                const wchar_t* name = a ? NameOf(*(unsigned*)(a + 4)) : nullptr;
+                if (!name || wcsncmp(name, L"TnMountable", 11)) continue;
+                const float* q = (const float*)(a + kActorLocation);
+                float dx = q[0] - p[0], dy = q[1] - p[1], dz = q[2] - p[2];
+                Log("debug: %ls %p: %.0f units, yaw %.0f, up %.0f", name, a, sqrtf(dx * dx + dy * dy + dz * dz),
+                    atan2f(dy, dx) * 57.2958f, dz);
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("debug: turrets failed");
     }
 }
 

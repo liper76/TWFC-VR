@@ -197,6 +197,7 @@ struct Skeleton {
     Pose ref[kMaxBones];                 // bind pose relative to the parent
     bool bindPose[kMaxBones];            // spine/clavicles: kept in the bind pose
     bool armour[kMaxBones];              // armour plates on the upper arm and forearm (*Robo*): kept in the bind pose
+    bool shoulderGear[kMaxBones];        // the shoulder pads and what hangs on the clavicles besides the arm: hidden on a turret
     uint8_t group[kMaxBones];            // 1 = torso (hidden unless ShowBody=2), 2 = waist/legs (hidden with ShowBody=0)
     Arm arm[2];
     int fingers[2][4][2];                // per hand: index, middle, ring, thumb - base and tip bone (-1: none)
@@ -218,6 +219,10 @@ Pose RefLocal(const uint8_t* b)
                { 2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y) } },
              { t[0], t[1], t[2] } };
 }
+
+// The player character: its robot model's name (e.g. one weapon setup per character), "" until one was seen.
+static wchar_t g_character[64];
+static std::mutex g_characterMx;
 
 bool ResolveSkeleton(uint8_t* mesh)
 {
@@ -280,14 +285,38 @@ bool ResolveSkeleton(uint8_t* mesh)
         if (p < 0 || !nm || !wcsstr(nm, L"Robo")) continue;
         for (int s = 0; s < 2; s++) if (p == k.arm[s].shoulder || p == k.arm[s].elbow) k.armour[i] = true;
     }
+    // on a mounted turret the eyes sit right over the shoulders and the grips pull the arms in: the pads and the
+    // clavicles' other parts filled the view (the clavicles and the arms themselves stay)
+    for (int i = 0; i < n; i++) {
+        int p = k.parent[i];
+        k.shoulderGear[i] = false;
+        if (p < 0) continue;
+        if (k.shoulderGear[p]) { k.shoulderGear[i] = true; continue; }
+        const wchar_t* pn = NameOf(*(const unsigned*)(bones + p * kMeshBoneSize));
+        for (int s = 0; s < 2; s++) {
+            if (i == k.arm[s].shoulder) continue;
+            if ((k.armour[i] && p == k.arm[s].shoulder) || (pn && wcsstr(pn, L"_Arm01_Clav_XB") && Starts(pn, side[s])))
+                k.shoulderGear[i] = true;
+        }
+        if (k.shoulderGear[i]) {
+            const wchar_t* nm = NameOf(*(const unsigned*)(bones + i * kMeshBoneSize));
+            Log("ik: shoulder part %d %ls (on %ls)", i, nm ? nm : L"?", pn ? pn : L"?");
+        }
+    }
     k.armsOk = true;
     for (int s = 0; s < 2; s++) {
         const Arm& a = k.arm[s];
         if (a.shoulder < 0 || a.elbow < 0 || a.hand < 0 || k.parent[a.elbow] != a.shoulder || k.parent[a.hand] != a.elbow)
             k.armsOk = false;
     }
-    Log("ik: skeleton %p, %d bones, arms %s (L %d/%d/%d R %d/%d/%d weapon %d) head %d", mesh, n, k.armsOk ? "found" : "NOT found",
-        k.arm[0].shoulder, k.arm[0].elbow, k.arm[0].hand, k.arm[1].shoulder, k.arm[1].elbow, k.arm[1].hand, k.arm[1].weapon, k.head);
+    const wchar_t* who = NameOf(*(const unsigned*)(mesh + 4));
+    if (k.armsOk && who) {   // the robot's model names the character (the vehicle form keeps the last one)
+        std::lock_guard<std::mutex> lk(g_characterMx);
+        wcsncpy_s(g_character, who, _TRUNCATE);
+    }
+    Log("ik: skeleton %p %ls, %d bones, arms %s (L %d/%d/%d R %d/%d/%d weapon %d) head %d", mesh, who ? who : L"?", n,
+        k.armsOk ? "found" : "NOT found", k.arm[0].shoulder, k.arm[0].elbow, k.arm[0].hand, k.arm[1].shoulder, k.arm[1].elbow,
+        k.arm[1].hand, k.arm[1].weapon, k.head);
     return true;
 }
 
@@ -788,9 +817,14 @@ void UpdateGun(uint8_t* mesh)
             }
         }
     }
+    // the gun hidden by the game itself while still attached: a button used, a lever pulled - the hand does that empty
+    // (before, the arm stayed posed on the hidden gun and the empty-hand model was kept away: an invisible hand)
+    bool gameHid = r && (*(uint32_t*)(found + kCompFlags) & kHiddenGame);
+    static bool loggedHid;
+    if (gameHid != loggedHid) { loggedHid = gameHid; Log("ik: the game %s the gun - the hand %s", gameHid ? "hid" : "shows", gameHid ? "empty" : "holds it"); }
     // the gun arm is posed from the gun while it is in use - also for the moment between one gun and the next (no
     // free hand flashing up while switching)
-    g_gun.held = use && (r || (g_gun.serial && now - g_gun.lastSeen < 150));
+    g_gun.held = use && !gameHid && (r || (g_gun.serial && now - g_gun.lastSeen < 150));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1520,7 +1554,7 @@ void OnSkelPose(uint8_t* comp)
                         }
                     }
                 } else {
-                    if (s == support && VRTwoHanded() && gunArm && g_cfg.foregripSet && gunValid) {
+                    if (s == support && VRTwoHanded() && gunArm && VRForegripSetting(nullptr) && gunValid) {
                         // other hand where it was set in the headset: relative to the gun grip, in the aim axes
                         // (set for the right hand: mirrored across for a gun in the left)
                         float f[3];
@@ -1631,6 +1665,9 @@ void OnSkelPose(uint8_t* comp)
             bool hide = i == g_sk.head || (g_sk.group[i] == 1 && g_cfg.showBody < 2) || (g_sk.group[i] == 2 && g_cfg.showBody == 0);
             if (hide) { for (auto& a : pose[i].ax) a = Scale(a, 0.01f); changed[i] = true; }
         }
+        if (WeaponsOnTurret())   // the shoulder pads out of the view (ResolveSkeleton)
+            for (int i = 0; i < n; i++)
+                if (g_sk.shoulderGear[i]) { for (auto& a : pose[i].ax) a = Scale(a, 0.01f); changed[i] = true; }
         if (eye == 0 && g_armDump && g_gun.comp) {   // ... and the gun's own bones
             uint8_t* gc = g_gun.comp;
             float* gb = *(float**)(gc + kCompSpaceBases);
@@ -1847,6 +1884,12 @@ bool IKWeaponHasScope()
     return g_pawn && GetTickCount() - g_poseTick < 500 && g_gun.comp && g_gun.scoped;
 }
 
+std::wstring IKCharacter()
+{
+    std::lock_guard<std::mutex> lk(g_characterMx);
+    return g_character;
+}
+
 bool IKPawnIsVehicle()
 {
     return g_pawn && GetTickCount() - g_poseTick < 500 && g_sk.mesh && !g_sk.armsOk;
@@ -1858,8 +1901,7 @@ bool IKForegrip(float out[3])
 {
     static float last[3];
     static bool have;
-    if (g_cfg.foregripSet && g_pawn && g_gun.comp) {   // set in the headset (for the right hand; mirrored for the left)
-        for (int k = 0; k < 3; k++) out[k] = g_cfg.foregrip[k];
+    if (g_pawn && g_gun.comp && VRForegripSetting(out)) {   // set in the headset (for the right hand; mirrored for the left)
         if (g_gunSide == 0) out[0] = -out[0];
         return true;
     }
