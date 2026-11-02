@@ -626,6 +626,85 @@ void VRDebugCalib(int confirm, int left)
     else GripCalibrationToggle();
 }
 
+// A mounted turret's handrails: two grips in front of the player, seated on the gun - they turn with it about the eyes,
+// as the gun does in view (CameraTurretSeat). A squeeze at one holds it until let go; the held grips turn the gun by
+// how far the hands went round the player since they took hold (both hands: the mean), and a holding hand's trigger
+// fires. Let go, the gun stays aimed where it was (relative to the body: turning turns it too).
+static const XrVector3f kTurretGrip[2] = { { -0.18f, -0.30f, -0.40f }, { 0.18f, -0.30f, -0.40f } };   // LOCAL, gun ahead
+static const float kTurretGripHalf = 0.07f;   // half the grips' length
+static struct {
+    bool on;                       // on a mounted turret: the grips are there
+    bool aimed;                    // ... and the aim is set (the gun as it was when mounted)
+    int held[2] = { -1, -1 };      // the grip hand h holds, -1 none
+    int hover = -1;                // a free hand is at this grip
+    float yaw, pitch;              // the aim relative to the room (LOCAL: yaw + = left, pitch + = up; radians)
+    float baseYaw, basePitch;      // ... when the holding hands last changed
+    float handYaw[2], handPitch[2];   // ... and where those hands were then (round the player)
+    XrQuaternionf seat = { 0, 0, 0, 1 };   // the gun as it is, as far as the eyes are seated: the grips turned so
+} g_tg;
+
+static XrQuaternionf YawPitchQuat(float yaw, float pitch)
+{
+    return QuatMul({ 0, sinf(yaw * 0.5f), 0, cosf(yaw * 0.5f) }, { sinf(pitch * 0.5f), 0, 0, cosf(pitch * 0.5f) });
+}
+
+// UpdateGestures: true while on a turret (its grips hold the hands that squeeze at them)
+static bool UpdateTurretGrips(const float squeeze[2])
+{
+    float sy, sp, seated;
+    if (!WeaponsOnTurret() || IKPawnIsVehicle() || !CameraTurretSeat(sy, sp, seated)) {
+        g_tg.on = g_tg.aimed = false;
+        g_tg.held[0] = g_tg.held[1] = g_tg.hover = -1;
+        return false;
+    }
+    if (!g_tg.aimed) { g_tg.yaw = sy; g_tg.pitch = sp; g_tg.aimed = true; }
+    g_tg.seat = YawPitchQuat(sy * seated, sp * seated);
+    g_tg.on = true;
+    bool changed = false;
+    g_tg.hover = -1;
+    for (int h = 0; h < 2; h++) {
+        if (g_tg.held[h] >= 0) {
+            if (squeeze[h] < 0.35f) { g_tg.held[h] = -1; changed = true; }
+            continue;
+        }
+        for (int g = 0; g < 2; g++) {
+            XrVector3f c = Rotate(g_tg.seat, kTurretGrip[g]);
+            float dx = g_gripPos[h].x - c.x, dy = g_gripPos[h].y - c.y, dz = g_gripPos[h].z - c.z;
+            if (g_tg.held[1 - h] == g || dx * dx + dz * dz > 0.1f * 0.1f || fabsf(dy) > kTurretGripHalf + 0.06f) continue;
+            if (squeeze[h] > 0.6f) {   // (a squeeze already on - the one that got in - takes it too)
+                g_tg.held[h] = g;
+                changed = true;
+                VRHaptic(h, 0.4f, 0.05f);
+            } else {
+                g_tg.hover = g;
+            }
+            break;
+        }
+    }
+    float hy[2], hp[2];
+    for (int h = 0; h < 2; h++) {
+        const Vec3f& p = g_gripPos[h];
+        hy[h] = atan2f(-p.x, -p.z);
+        hp[h] = atan2f(p.y, sqrtf(p.x * p.x + p.z * p.z));
+    }
+    if (changed) {   // the hands now holding take the gun as it is aimed
+        g_tg.baseYaw = g_tg.yaw;
+        g_tg.basePitch = g_tg.pitch;
+        for (int h = 0; h < 2; h++) { g_tg.handYaw[h] = hy[h]; g_tg.handPitch[h] = hp[h]; }
+    }
+    int n = 0;
+    float dy = 0.0f, dp = 0.0f;
+    for (int h = 0; h < 2; h++)
+        if (g_tg.held[h] >= 0) {
+            dy += remainderf(hy[h] - g_tg.handYaw[h], 6.2831853f);
+            dp += hp[h] - g_tg.handPitch[h];
+            n++;
+        }
+    if (n) { g_tg.yaw = g_tg.baseYaw + dy / n; g_tg.pitch = g_tg.basePitch + dp / n; }
+    CameraTurretClamp(g_tg.yaw, g_tg.pitch);
+    return true;
+}
+
 static void UpdateGestures(XINPUT_GAMEPAD& p, DWORD now)
 {
     XrTime t = g_lastDisplayTime.load();
@@ -670,7 +749,8 @@ static void UpdateGestures(XINPUT_GAMEPAD& p, DWORD now)
     }
     g_forePos = fore;
     if (g_setup.active) { xr.twoHand = false; return; }   // (the grips move the setup's cubes now)
-    if (!g_cfg.twoHanded || WeaponsMeleeHeld() >= 0 || VRGunHand() < 0) xr.twoHand = false;   // (both hands free for it)
+    bool turretGrips = UpdateTurretGrips(squeeze);
+    if (turretGrips || !g_cfg.twoHanded || WeaponsMeleeHeld() >= 0 || VRGunHand() < 0) xr.twoHand = false;   // (both hands free for it)
     else if (xr.twoHand) xr.twoHand = squeeze[S] > 0.35f;
     else if (squeeze[S] > 0.6f && !xr.gripHeld[S] && dist(g_gripPos[S], fore) < g_cfg.twoHandRadius) {
         xr.twoHand = true;
@@ -680,7 +760,7 @@ static void UpdateGestures(XINPUT_GAMEPAD& p, DWORD now)
     // grenade (like Half-Life: Alyx): a new squeeze of a free hand at the body - below the head, in front of the chest or
     // belt (the "pouch") - takes one out; that hand's trigger arms it; letting go throws it with the hand's own motion.
     // Free: the left hand unless it holds the gun's front or the melee weapon, the right one when chosen empty.
-    for (int h = 0; h < 2 && g_cfg.grenadeGrab && !xr.grenade && !IKPawnIsVehicle(); h++) {
+    for (int h = 0; h < 2 && g_cfg.grenadeGrab && !xr.grenade && !IKPawnIsVehicle() && !turretGrips; h++) {
         bool free = h == 0 ? !xr.twoHand && WeaponsMeleeHeld() != 0 && VRGunHand() != 0 : !xr.twoHand && VRRightEmpty() && WeaponsMeleeHeld() != 1;
         if (!free || squeeze[h] <= 0.6f || xr.gripHeld[h]) continue;
         XrPosef head;
@@ -710,7 +790,8 @@ static void UpdateGestures(XINPUT_GAMEPAD& p, DWORD now)
     }
     // pointing at a pickup with a free hand: a new squeeze pulls it (like gravity gloves; the flick works too)
     for (int h = 0; h < 2; h++) {
-        if (squeeze[h] > 0.6f && !xr.gripHeld[h] && !(xr.grenade && xr.grenadeHand == h) && PullGrab(h)) xr.pullSqueeze[h] = true;
+        if (squeeze[h] > 0.6f && !xr.gripHeld[h] && g_tg.held[h] < 0 && !(xr.grenade && xr.grenadeHand == h) && PullGrab(h))
+            xr.pullSqueeze[h] = true;
         if (squeeze[h] < 0.35f) xr.pullSqueeze[h] = false;
     }
     if (PullWantInteract()) p.wButtons |= XINPUT_GAMEPAD_X;   // a pulled weapon: "hold X" takes it
@@ -732,6 +813,13 @@ static void UpdateGestures(XINPUT_GAMEPAD& p, DWORD now)
     for (int h = 0; h < 2; h++) xr.gripHeld[h] = squeeze[h] > 0.6f || (xr.gripHeld[h] && squeeze[h] > 0.35f);   // grab only on a new squeeze
     xr.leftGripHeld = xr.gripHeld[0];
     if (VRGunHand() < 0) p.bRightTrigger = 0;   // the gun put away: nothing to fire
+    if (g_tg.held[0] >= 0 || g_tg.held[1] >= 0) {   // on a turret's grips: a holding hand's trigger fires
+        float fire = 0.0f;
+        for (int h = 0; h < 2; h++)
+            if (g_tg.held[h] >= 0) fire = fmaxf(fire, GetFloat(xr.trigger[h]));
+        p.bRightTrigger = (BYTE)(fire * 255.0f);
+        if (g_tg.held[G ^ 1] >= 0) p.bLeftTrigger = 0;   // (that hand's trigger is no fine aim then)
+    }
     if (xr.twoHand) {   // the gun turns about the gun hand's grip so that its front grip lies in the other hand
         Vec3f nominal = { fore.x - g_gripPos[G].x, fore.y - g_gripPos[G].y, fore.z - g_gripPos[G].z };
         Vec3f actual = { g_gripPos[S].x - g_gripPos[G].x, g_gripPos[S].y - g_gripPos[G].y, g_gripPos[S].z - g_gripPos[G].z };
@@ -810,7 +898,7 @@ static void UpdateGestures(XINPUT_GAMEPAD& p, DWORD now)
         XrVector3f hf = Rotate(mh.orientation, { 0, 0, -1 });
         for (int h = 0; h < 2 && meleeHand < 0; h++) {
             bool free = h == 0 ? !xr.twoHand && VRGunHand() != 0 : VRGunHand() != 1 || WeaponsMeleeHeld() == 1;
-            if (!free || (xr.grenade && xr.grenadeHand == h) || speed[h] <= g_cfg.meleeSpeed) continue;
+            if (!free || (xr.grenade && xr.grenadeHand == h) || g_tg.held[h] >= 0 || speed[h] <= g_cfg.meleeSpeed) continue;
             const XrVector3f& v = velocity[h];
             if ((v.x * hf.x + v.y * hf.y + v.z * hf.z) / speed[h] > 0.5f) meleeHand = h;
         }
@@ -2220,19 +2308,9 @@ static bool DrawPanel()
 // hand while the gun is held still (right grip).
 static Chain g_markChain[2];
 
-static bool MakeSquareChain(Chain& c, float r, float g, float b)
+// Puts an S x S image (32-bit, premultiplied alpha) into every image of a still chain, each released once.
+static bool FillChain(Chain& c, const std::vector<uint32_t>& px, UINT S)
 {
-    const UINT S = 32;
-    if (!CreateChain(c, S, S)) return false;
-    std::vector<uint32_t> px(S * S);
-    bool rgba = xr.format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || xr.format == DXGI_FORMAT_R8G8B8A8_UNORM;
-    for (UINT y = 0; y < S; y++)
-        for (UINT x = 0; x < S; x++) {
-            bool edge = x < 3 || y < 3 || x >= S - 3 || y >= S - 3;
-            float a = edge ? 0.95f : 0.45f;   // premultiplied
-            uint32_t R = (uint32_t)(255 * r * a), G = (uint32_t)(255 * g * a), B = (uint32_t)(255 * b * a);
-            px[y * S + x] = (rgba ? (R | (G << 8) | (B << 16)) : (B | (G << 8) | (R << 16))) | ((uint32_t)(255 * a) << 24);
-        }
     ID3D11DeviceContext* imm = nullptr;
     xr.device->GetImmediateContext(&imm);
     for (auto& img : c.images) imm->UpdateSubresource(img.texture, 0, nullptr, px.data(), S * 4, 0);
@@ -2248,14 +2326,26 @@ static bool MakeSquareChain(Chain& c, float r, float g, float b)
     return true;
 }
 
-// The menu's ray: a thin orange strip from the right hand to the point on the panel, turned to face the eyes.
-static bool BuildRay(const XrPosef& head, XrCompositionLayerQuad& q)
+static bool MakeSquareChain(Chain& c, float r, float g, float b)
 {
-    if (!g_setup.active || g_page != 1 || !g_pointer.valid) return false;
-    Chain& c = g_markChain[1];
-    if (!c.sc && !MakeSquareChain(c, 1.0f, 0.58f, 0.2f)) return false;
-    const XrVector3f& a = g_pointer.from;
-    const XrVector3f& b = g_pointer.to;
+    const UINT S = 32;
+    if (!CreateChain(c, S, S)) return false;
+    std::vector<uint32_t> px(S * S);
+    bool rgba = xr.format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || xr.format == DXGI_FORMAT_R8G8B8A8_UNORM;
+    for (UINT y = 0; y < S; y++)
+        for (UINT x = 0; x < S; x++) {
+            bool edge = x < 3 || y < 3 || x >= S - 3 || y >= S - 3;
+            float a = edge ? 0.95f : 0.45f;   // premultiplied
+            uint32_t R = (uint32_t)(255 * r * a), G = (uint32_t)(255 * g * a), B = (uint32_t)(255 * b * a);
+            px[y * S + x] = (rgba ? (R | (G << 8) | (B << 16)) : (B | (G << 8) | (R << 16))) | ((uint32_t)(255 * a) << 24);
+        }
+    return FillChain(c, px, S);
+}
+
+// A bar from a to b (LOCAL) width wide: a strip of c's image turned about its length to face the eyes (head).
+static bool BarQuad(const XrPosef& head, XrVector3f a, XrVector3f b, float width, const Chain& c, const XrRect2Di& rect,
+                    XrCompositionLayerQuad& q)
+{
     XrVector3f d = { b.x - a.x, b.y - a.y, b.z - a.z };
     float len = sqrtf(d.x * d.x + d.y * d.y + d.z * d.z);
     if (len < 0.02f) return false;
@@ -2272,11 +2362,65 @@ static bool BuildRay(const XrPosef& head, XrCompositionLayerQuad& q)
     q.space = xr.localSpace;
     q.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
     q.subImage.swapchain = c.sc;
-    q.subImage.imageRect = { { 8, 8 }, { 16, 16 } };   // (the square's solid middle)
+    q.subImage.imageRect = rect;
     q.pose.orientation = BasisToQuat(right, up, back);
     q.pose.position = mid;
-    q.size = { 0.005f, len };
+    q.size = { width, len };
     return true;
+}
+
+// The menu's ray: a thin orange strip from the right hand to the point on the panel, turned to face the eyes.
+static bool BuildRay(const XrPosef& head, XrCompositionLayerQuad& q)
+{
+    if (!g_setup.active || g_page != 1 || !g_pointer.valid) return false;
+    Chain& c = g_markChain[1];
+    if (!c.sc && !MakeSquareChain(c, 1.0f, 0.58f, 0.2f)) return false;
+    return BarQuad(head, g_pointer.from, g_pointer.to, 0.005f, c, { { 8, 8 }, { 16, 16 } }, q);   // (the square's solid middle)
+}
+
+// A mounted turret's handrails (UpdateTurretGrips): the two grips and the bar under them, turned with the gun as the
+// eyes are - grey, lit up when a free hand is at one, green while held.
+static Chain g_gripChain[3];
+
+static bool MakeBarChain(Chain& c, float r, float g, float b)
+{
+    const UINT S = 16;
+    if (!CreateChain(c, S, S)) return false;
+    std::vector<uint32_t> px(S * S);
+    bool rgba = xr.format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || xr.format == DXGI_FORMAT_R8G8B8A8_UNORM;
+    for (UINT y = 0; y < S; y++)
+        for (UINT x = 0; x < S; x++) {
+            // across the bar: shaded like a round rod lit from the upper left, a dark rim; premultiplied alpha
+            float u = (x + 0.5f) / S * 2.0f - 1.0f;
+            float l = x == 0 || x == S - 1 ? 0.2f : fminf(0.35f + 0.65f * sqrtf(fmaxf(0.0f, 1.0f - u * u)) - 0.2f * u, 1.0f);
+            float a = 0.9f;
+            uint32_t R = (uint32_t)(255 * r * l * a), G = (uint32_t)(255 * g * l * a), B = (uint32_t)(255 * b * l * a);
+            px[y * S + x] = (rgba ? (R | (G << 8) | (B << 16)) : (B | (G << 8) | (R << 16))) | ((uint32_t)(255 * a) << 24);
+        }
+    return FillChain(c, px, S);
+}
+
+// q[0], q[1] = the grips, q[2] = the bar under them; false when not on a turret
+static bool BuildTurretGrips(const XrPosef& head, XrCompositionLayerQuad q[3])
+{
+    if (!g_tg.on || g_setup.active) return false;
+    static const float kColor[3][3] = { { 0.55f, 0.6f, 0.68f }, { 0.75f, 0.92f, 1.0f }, { 0.35f, 1.0f, 0.45f } };
+    for (int i = 0; i < 3; i++)
+        if (!g_gripChain[i].sc && !MakeBarChain(g_gripChain[i], kColor[i][0], kColor[i][1], kColor[i][2])) { g_tg.on = false; return false; }
+    XrQuaternionf seat = g_tg.seat;
+    const XrRect2Di all = { { 0, 0 }, { 16, 16 } };
+    bool ok = true;
+    for (int g = 0; g < 2; g++) {
+        const XrVector3f& c = kTurretGrip[g];
+        int look = g_tg.held[0] == g || g_tg.held[1] == g ? 2 : g_tg.hover == g ? 1 : 0;
+        ok &= BarQuad(head, Rotate(seat, { c.x, c.y - kTurretGripHalf, c.z }), Rotate(seat, { c.x, c.y + kTurretGripHalf, c.z }),
+                      0.035f, g_gripChain[look], all, q[g]);
+    }
+    const XrVector3f& l = kTurretGrip[0];
+    const XrVector3f& r = kTurretGrip[1];
+    ok &= BarQuad(head, Rotate(seat, { l.x, l.y - kTurretGripHalf, l.z }), Rotate(seat, { r.x, r.y - kTurretGripHalf, r.z }), 0.025f,
+                  g_gripChain[0], all, q[2]);
+    return ok;
 }
 
 // i: 0 = the gun's front zone, 1 = the pouch, 2 = the real right hand (the weapon page only)
@@ -2333,19 +2477,7 @@ static bool MakeRingChain(Chain& c, float r, float g, float b)
             uint32_t R = (uint32_t)(255 * r * ring * a), G = (uint32_t)(255 * g * ring * a), B = (uint32_t)(255 * b * ring * a);
             px[y * S + x] = (rgba ? (R | (G << 8) | (B << 16)) : (B | (G << 8) | (R << 16))) | ((uint32_t)(255 * a) << 24);
         }
-    ID3D11DeviceContext* imm = nullptr;
-    xr.device->GetImmediateContext(&imm);
-    for (auto& img : c.images) imm->UpdateSubresource(img.texture, 0, nullptr, px.data(), S * 4, 0);
-    imm->Release();
-    for (size_t k = 0; k < c.images.size(); k++) {   // (each image released once: content to show)
-        uint32_t idx;
-        XrSwapchainImageAcquireInfo ai = { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
-        XrSwapchainImageWaitInfo wi = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
-        wi.timeout = XR_INFINITE_DURATION;
-        XrSwapchainImageReleaseInfo ri = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
-        if (XR_SUCCEEDED(xrAcquireSwapchainImage(c.sc, &ai, &idx))) { xrWaitSwapchainImage(c.sc, &wi); xrReleaseSwapchainImage(c.sc, &ri); }
-    }
-    return true;
+    return FillChain(c, px, S);
 }
 
 static bool BuildPullMark(const XrPosef& head, XrCompositionLayerQuad& q)
@@ -2799,11 +2931,11 @@ static bool ConsumeOrWaitFrame(XrFrameState& fs)
 static void EndFrame(const XrFrameState& fs, const XrCompositionLayerBaseHeader* layer,
                      std::initializer_list<const XrCompositionLayerBaseHeader*> overlays = {})
 {
-    const XrCompositionLayerBaseHeader* layers[12];   // (OpenXR runtimes take at least 16)
+    const XrCompositionLayerBaseHeader* layers[16];   // (OpenXR runtimes take at least 16)
     uint32_t n = 0;
     if (layer) layers[n++] = layer;
     for (auto* o : overlays) {
-        if (!layer || !o || n >= 12) continue;
+        if (!layer || !o || n >= 16) continue;
         if (o->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {   // a bad pose makes the runtime refuse the whole frame (black)
             XrPosef& p = ((XrCompositionLayerQuad*)o)->pose;
             XrQuaternionf& q = p.orientation;
@@ -3023,27 +3155,23 @@ static void UpdateGameReticle(ID3D11ShaderResourceView* hud)
     g_reticleGameAt = GetTickCount();
 }
 
-// The ray shots travel along (LOCAL space, forward = -Z of the pose): the right controller, the line from the
-// right hand to the left one when held two-handed, or the gaze in vehicles.
-void VRTurretAim(const VREyeView::Hand& l, const VREyeView::Hand& r, float q[4], float p[3])
+bool VRTurretAim(float q[4], float p[3])
 {
-    float s = l.qx * r.qx + l.qy * r.qy + l.qz * r.qz + l.qw * r.qw < 0.0f ? -1.0f : 1.0f;
-    float x = l.qx + s * r.qx, y = l.qy + s * r.qy, z = l.qz + s * r.qz, w = l.qw + s * r.qw;
-    float n = sqrtf(x * x + y * y + z * z + w * w);
-    if (n < 1e-4f) { x = r.qx; y = r.qy; z = r.qz; w = r.qw; n = 1.0f; }
-    q[0] = x / n; q[1] = y / n; q[2] = z / n; q[3] = w / n;
-    p[0] = (l.px + r.px) * 0.5f; p[1] = (l.py + r.py) * 0.5f; p[2] = (l.pz + r.pz) * 0.5f;
+    if (!g_tg.on || !g_tg.aimed) return false;
+    XrQuaternionf o = YawPitchQuat(g_tg.yaw, g_tg.pitch);
+    XrVector3f c = Rotate(o, { 0.0f, kTurretGrip[0].y, kTurretGrip[0].z });
+    q[0] = o.x; q[1] = o.y; q[2] = o.z; q[3] = o.w;
+    p[0] = c.x; p[1] = c.y; p[2] = c.z;
+    return true;
 }
 
+// The ray shots travel along (LOCAL space, forward = -Z of the pose): the right controller, the line from the
+// right hand to the left one when held two-handed, a turret's aim, or the gaze in vehicles.
 static bool AimRay(XrTime t, XrPosef& hand)
 {
-    // a mounted turret: both hands on its handles aim it (as camera.cpp does)
-    XrPosef l, r;
-    if (WeaponsOnTurret() && !IKPawnIsVehicle() && LocateHand(xr.aimSpace[0], t, l) && LocateHand(xr.aimSpace[1], t, r)) {
-        VREyeView::Hand hl = { true, l.position.x, l.position.y, l.position.z, l.orientation.x, l.orientation.y, l.orientation.z, l.orientation.w };
-        VREyeView::Hand hr = { true, r.position.x, r.position.y, r.position.z, r.orientation.x, r.orientation.y, r.orientation.z, r.orientation.w };
-        float q[4], p[3];
-        VRTurretAim(hl, hr, q, p);
+    // a mounted turret: as its handrails aim it (as camera.cpp does)
+    float q[4], p[3];
+    if (WeaponsOnTurret() && !IKPawnIsVehicle() && VRTurretAim(q, p)) {
         hand.orientation = { q[0], q[1], q[2], q[3] };
         hand.position = { p[0], p[1], p[2] };
         return true;
@@ -3233,6 +3361,8 @@ static void PresentStereo(ID3D11Texture2D* bb, const EyeFrame& f)
     XrCompositionLayerQuad scope, wheel, pullMark;
     bool haveScope = fs.shouldRender && BuildScope(fs.predictedDisplayTime, scope);
     bool havePullMark = fs.shouldRender && BuildPullMark(head, pullMark);
+    XrCompositionLayerQuad grips[3];
+    bool haveGrips = fs.shouldRender && BuildTurretGrips(head, grips);
     static bool scopeWas;
     if (haveScope != scopeWas) { Log("vr: scope %s", haveScope ? "shown" : "hidden"); scopeWas = haveScope; }
     bool haveWheel = fs.shouldRender && BuildWheel(wheel);
@@ -3244,7 +3374,10 @@ static void PresentStereo(ID3D11Texture2D* bb, const EyeFrame& f)
     XrCompositionLayerQuad ray;
     bool haveRay = havePanel && BuildRay(head, ray);
     EndFrame(fs, fs.shouldRender ? (XrCompositionLayerBaseHeader*)&proj : nullptr,
-             { haveHud ? (XrCompositionLayerBaseHeader*)&hud : nullptr,
+             { haveGrips ? (XrCompositionLayerBaseHeader*)&grips[2] : nullptr,
+               haveGrips ? (XrCompositionLayerBaseHeader*)&grips[0] : nullptr,
+               haveGrips ? (XrCompositionLayerBaseHeader*)&grips[1] : nullptr,
+               haveHud ? (XrCompositionLayerBaseHeader*)&hud : nullptr,
                havePullMark ? (XrCompositionLayerBaseHeader*)&pullMark : nullptr,
                haveScope ? (XrCompositionLayerBaseHeader*)&scope : nullptr,
                haveReticle && !haveWheel ? (XrCompositionLayerBaseHeader*)&reticle : nullptr,

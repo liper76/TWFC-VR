@@ -163,6 +163,7 @@ struct TPOV {
 // ---- camera.cpp ----
 void CameraOnUpdate(TPOV* pov, void* viewTarget, void* pc, float dt);   // game thread, after the engine computed the view
 bool ReadActorLocation(void* actor, Vec3f& out);               // game.cpp, SEH-guarded
+bool ReadActorRotation(void* actor, int out[3]);              // game.cpp, SEH-guarded: pitch, yaw, roll (rotator units)
 void GameSetAim(bool valid, int pitch, int yaw, float x, float y, float z);   // game.cpp: weapon aim, applied after the view is drawn
 long GameFrameCount();
 bool CameraInGameplay();                    // camera updated recently (not in menus / movies)
@@ -183,6 +184,7 @@ bool IKWeaponHasScope();                    // first person, holding a weapon fr
 float CameraVehicleSteer();                 // vehicle form: right stick (-1..1) that turns it towards the aim
 float CameraMoveYawDelta();                // radians to rotate the left stick so movement follows the head
 void CameraBaseOffset(float& forward, float& up);   // eye base relative to the pawn (Unreal units)
+Vec3f CameraEyeBase(const Vec3f& pawn, float bodyYaw);   // the eye base in the world (body yaw in radians; seated on a turret)
 bool CameraVehicleAim();                    // vehicle form: the weapon aims where the head looks
 float CameraAimHitMeters();                 // distance to where the game's aim trace hits (0 = unknown)
 void IKSetHand(int hand, bool valid, const float pos[3], const float axes[3][3]);   // body frame pose relative to the eye base; axes[k] = X/Y/Z
@@ -217,6 +219,8 @@ float WeaponsTurretClearance(const float o[3], const float dir[3]);   // the aim
 void WeaponsTurretShotStart(const float start[3], const float dir[3]);   // the turret's shots start there (past it)
 bool WeaponsTurretLimits(float lim[4], int& basePitch, int& baseYaw);   // how far the turret's gun turns (degrees)
 float CameraTurretLift();                   // on a turret: how far the eyes are raised (Unreal units, gliding)
+bool CameraTurretSeat(float& yaw, float& pitch, float& seated);   // the gun relative to the room (LOCAL, radians)
+void CameraTurretClamp(float& yaw, float& pitch);   // ... an aim so kept within how far the gun turns
 
 // ---- pull.cpp: pickups pulled from a distance with the left hand ----
 void PullUpdate(void* pawn);                // game thread, once per frame (null = not in first person)
@@ -258,8 +262,8 @@ bool VRNextStereoEye(int& eye);             // eye of the next stereo frame; fal
 bool VRTwoHanded();                         // the weapon is held with both hands
 void VRFingerCurls(int hand, float out[4]); // empty hand: index, middle, ring, thumb bend (0..1) from the controller
 bool VRTwoHandTurn(float q[4]);             // held two-handed: turn (quaternion x,y,z,w, OpenXR LOCAL) of the right hand's aim
-// a mounted turret's aim from both hands: the orientation between the two aim poses, from the point between them
-void VRTurretAim(const VREyeView::Hand& l, const VREyeView::Hand& r, float q[4], float p[3]);
+// a mounted turret's aim as its handrails set it (LOCAL: quaternion x,y,z,w, from between the grips); false until set
+bool VRTurretAim(float q[4], float p[3]);
 bool IKForegrip(float out[3]);              // ik.cpp: held weapon's front grip relative to the right aim pose (OpenXR axes, metres)
 bool VRMeleeSwing(float& x, float& z);      // recent melee swing direction (OpenXR horizontal)
 DWORD VRAbilityPressedAt();                 // GetTickCount of the last ability (bumper) press

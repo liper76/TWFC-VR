@@ -757,11 +757,14 @@ void UpdateGun(uint8_t* mesh)
             uint8_t* c = *(uint8_t**)e;
             const wchar_t* nm = c ? NameOf(*(unsigned*)(c + 4)) : nullptr;
             if (!nm || !wcsstr(nm, L"ParticleSystemComponent")) continue;
+            uint8_t* tmpl = *(uint8_t**)(c + 0x1B0);   // Template (MuzzleFlash_<weapon>_FX)
+            const wchar_t* tn = tmpl ? NameOf(*(unsigned*)(tmpl + 4)) : nullptr;
             float* sc = (float*)(e + 0x20);
             sc[0] = sc[1] = sc[2] = use ? g_cfg.muzzleFlashScale : 0.001f;
-            uint8_t* tmpl = *(uint8_t**)(c + 0x1B0);   // Template (MuzzleFlash_<weapon>_FX)
-            const wchar_t* tn = identify && tmpl ? NameOf(*(unsigned*)(tmpl + 4)) : nullptr;
-            if (tn) { names += L' '; names += tn; }
+            // a turret gun torn off and carried (MuzzleFlash_TurretIon_FX): its flash, made for a whole turret seen from
+            // far behind, is a cloud over a quarter of the view, and the attachment's scale does not shrink it - its own does
+            if (tn && wcsstr(tn, L"Turret")) *(float*)(c + kCompScale) = g_cfg.muzzleFlashScale;
+            if (identify && tn) { names += L' '; names += tn; }
         }
         if (identify) {
             g_gun.skelMesh = skel;
@@ -1137,8 +1140,9 @@ volatile long g_armDump;        // debug "armdump": the right arm's bones as ani
 Vec3 g_gripWorld;               // the right hand target (world) when it was posed
 Vec3 g_ctrlWorld[3];            // the right controller's axes then
 
-// LocalToWorld the engine is about to give the component: the pawn's current location and yaw, with the mesh's
+// LocalToWorld the engine is about to give the component: the pawn's current location and rotation, with the mesh's
 // offset from the pawn measured from the previous frame (LocalToWorld is still last frame's at this point).
+// (The pitch too: on a mounted turret the game pitches the seated robot with the gun.)
 Pose PredictComponentToWorld(uint8_t* comp)
 {
     static Vec3 prevPawn;
@@ -1150,10 +1154,11 @@ Pose PredictComponentToWorld(uint8_t* comp)
     Vec3 offset = prevValid ? Sub(m.pos, prevPawn) : Vec3{ 0, 0, m.pos.z - now.z };
     if (Len(offset) > 400.0f) offset = { 0, 0, m.pos.z - now.z };   // teleport / respawn
     float yaw = *(int*)((uint8_t*)g_pawn + kActorRotation + 4) * kUURotToRad;
-    float s = Len(m.ax[0]);
-    m.ax[0] = { cosf(yaw) * s, sinf(yaw) * s, 0 };
+    float pitch = (short)(uint16_t)*(int*)((uint8_t*)g_pawn + kActorRotation) * kUURotToRad;
+    float s = Len(m.ax[0]), cp = cosf(pitch) * s, sp = sinf(pitch) * s;
+    m.ax[0] = { cosf(yaw) * cp, sinf(yaw) * cp, sp };
     m.ax[1] = { -sinf(yaw) * s, cosf(yaw) * s, 0 };
-    m.ax[2] = { 0, 0, s };
+    m.ax[2] = { -cosf(yaw) * sp, -sinf(yaw) * sp, cp };
     m.pos = Add(now, offset);
     prevPawn = now;
     prevValid = true;
@@ -1265,9 +1270,9 @@ void OnSkelPose(uint8_t* comp)
         for (int i = 0; i < n; i++) { anim[i] = pose[i] = Load(bases + i * 16); moved[i] = driven[i] = false; }
 
         // hand targets in the world, from the pawn's position now and the latched yaw (as the camera does)
-        float baseFwd, baseUp;
-        CameraBaseOffset(baseFwd, baseUp);   // the eye base as the camera has it (glides when transforming)
-        Vec3 base = Add({ pawnNow.x, pawnNow.y, pawnNow.z + baseUp }, YawRotate({ baseFwd, 0, 0 }, g_bodyYaw));
+        // the eye base as the camera has it (glides when transforming, seated on a turret)
+        Vec3f eb = CameraEyeBase({ pawnNow.x, pawnNow.y, pawnNow.z }, g_bodyYaw);
+        Vec3 base = { eb.x, eb.y, eb.z };
         for (int s = 0; s < 2; s++) {
             Hand& h = g_hand[s];
             h.pos = Add(base, YawRotate(h.localPos, g_bodyYaw));
@@ -1353,9 +1358,10 @@ void OnSkelPose(uint8_t* comp)
                 Vec3 w = YawRotate({ g_headOffset.x, g_headOffset.y, 0.0f }, g_bodyYaw);
                 shift = DirTo(worldToComp, w);
             }
-            // on a mounted turret the eyes are raised (camera.cpp): the body goes up with them
+            // on a mounted turret the eyes are raised (camera.cpp): the body goes up with them (along the seat's up:
+            // the mesh is pitched with the gun)
             if (float lift = CameraTurretLift())
-                shift = Add(shift, Scale(Norm(DirTo(worldToComp, { 0, 0, 1 })), lift / fmaxf(Len(compToWorld.ax[0]), 1e-3f)));
+                shift = Add(shift, Scale(Vec3{ 0, 0, 1 }, lift / fmaxf(Len(compToWorld.ax[0]), 1e-3f)));
             // crouching (the head lower than at the start): the body goes down with the eyes - the feet stay on
             // the floor and the knees bend (below)
             float drop = -g_headOffset.z - 0.05f * g_cfg.worldScale;
@@ -1812,9 +1818,8 @@ bool IKHandWorld(int hand, float pos[3], float fwd[3], float rel[3])
     const Hand& h = g_hand[hand];
     Vec3f pl;
     if (!g_pawn || !h.valid || GetTickCount() - g_inputTick > 250 || !ReadActorLocation(g_pawn, pl)) return false;
-    float baseFwd, baseUp;
-    CameraBaseOffset(baseFwd, baseUp);
-    Vec3 base = Add({ pl.x, pl.y, pl.z + baseUp }, YawRotate({ baseFwd, 0, 0 }, g_bodyYaw));
+    Vec3f eb = CameraEyeBase(pl, g_bodyYaw);
+    Vec3 base = { eb.x, eb.y, eb.z };
     Vec3 r = YawRotate(h.localPos, g_bodyYaw), p = Add(base, r), f = Norm(YawRotate(h.localAx[0], g_bodyYaw));
     for (int k = 0; k < 3; k++) { pos[k] = Comp(p, k); fwd[k] = Comp(f, k); rel[k] = Comp(r, k); }
     return true;
