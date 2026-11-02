@@ -277,9 +277,11 @@ BeltRec g_beltRecs[8];
 int g_beltRecCount;
 
 // The weapon's own model is its pickup: several grenades (three mines). The grenade it throws is one - the projectile
-// class's (WEPDATA +0x34 -> class, +0x9C its defaults) mesh template. A skeletal one goes on the weapon's spare
-// skeletal component (its TnWeaponMesh's HmAnimatedMesh: a grenade launcher model never drawn for grenades),
-// a static one in place of the pickup model's mesh. Null when not found: the pickup model then.
+// class's (WEPDATA +0x34 -> class, +0x9C its defaults) mesh template, or (a template with no mesh: heal grenades) the
+// first static mesh of the projectile's look, its *_PROJMESH (WEP_Grenade_Heal_STAT at +0x64; the slots after it are
+// other projectiles' looks). A skeletal one goes on the weapon's spare skeletal component (its TnWeaponMesh's
+// HmAnimatedMesh: a grenade launcher model never drawn for grenades), a static one in place of the pickup model's
+// mesh. Null when not found: the pickup model then.
 const int kCompStaticMesh = 0x1C4, kWeaponData = 0x240, kDataProjectiles = 0x34, kClassDefaults = 0x9C;
 const int kWeaponMeshActor = 0x39C, kWeaponMeshAnimated = 0x3C, kAnimatedMeshComp = 0x30;
 
@@ -306,10 +308,18 @@ uint8_t* OneGrenadeComp(uint8_t* w, uint8_t* model, uint8_t** mesh, int* at)
         if (!cn || !GrenadeProjectileClass(cn)) return nullptr;
         uint8_t* def = *(uint8_t**)(cls + kClassDefaults);
         if (!NameStarts(def, L"Default__")) return nullptr;
+        uint8_t* look = nullptr;
         for (int off = 0x100; off < 0x400; off += 4) {
             uint8_t* t = *(uint8_t**)(def + off);   // its mesh component templates (other fields: anything)
             if ((uintptr_t)t < 0x10000) continue;
             __try {
+                if (!look && NameEnds(t, L"_PROJMESH")) {
+                    for (int o = 0x10; o < 0x100 && !look; o += 4) {
+                        uint8_t* m = *(uint8_t**)(t + o);
+                        if ((uintptr_t)m > 0x10000 && NameEnds(m, L"_STAT")) look = m;
+                    }
+                    continue;
+                }
                 if (!NameStarts(t, L"Mesh")) continue;
                 uint8_t* m = *(uint8_t**)(t + kCompSkelMesh);
                 if (m && (uintptr_t)m > 0x10000 && NameEnds(m, L"_SKEL")) {
@@ -325,6 +335,7 @@ uint8_t* OneGrenadeComp(uint8_t* w, uint8_t* model, uint8_t** mesh, int* at)
             } __except (EXCEPTION_EXECUTE_HANDLER) {
             }
         }
+        if (look) { *mesh = look; *at = kCompStaticMesh; return model; }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
     return nullptr;
