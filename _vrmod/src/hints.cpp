@@ -26,8 +26,8 @@ const Key kKeys[] = {
     { L"E", L"X", nullptr },               { L"R", L"X", nullptr },
     { L"F", L"L Stick", nullptr },
     { L"Shift", L"R Stick", L"R Grip" },   { L"LeftShift", L"R Stick", L"R Grip" }, { L"Left Shift", L"R Stick", L"R Grip" },
-    { L"Ctrl", L"B", L"L Grip" },          { L"Control", L"B", L"L Grip" },
-    { L"LeftControl", L"B", L"L Grip" },   { L"Left Ctrl", L"B", L"L Grip" },
+    { L"Ctrl", L"Tap B", L"L Grip" },      { L"Control", L"Tap B", L"L Grip" },
+    { L"LeftControl", L"Tap B", L"L Grip" }, { L"Left Ctrl", L"Tap B", L"L Grip" },
     { L"G", L"Y", L"B" },
     { L"C", L"A", nullptr },               { L"V", L"Y", L"B" },
     { L"Q", L"Swing", nullptr },           { L"Middle Mouse", L"Swing", nullptr }, { L"MiddleMouseButton", L"Swing", nullptr },
@@ -35,14 +35,14 @@ const Key kKeys[] = {
     { L"LMB", L"Trigger", nullptr },
     { L"Right Mouse", L"L Trigger", nullptr }, { L"RightMouseButton", L"L Trigger", nullptr },
     { L"Right Mouse Button", L"L Trigger", nullptr }, { L"RMB", L"L Trigger", nullptr },
-    { L"Mouse Wheel", L"Hold Y", L"Y" },   { L"PageUp", L"Hold Y", L"Y" },        { L"Page Up", L"Hold Y", L"Y" },
+    { L"Mouse Wheel", L"Hold B", L"Y" },   { L"PageUp", L"Hold B", L"Y" },        { L"Page Up", L"Hold B", L"Y" },
     { L"Escape", L"Menu", nullptr },       { L"Esc", L"Menu", nullptr },
     { L"W", L"L Stick", nullptr },         { L"A", L"L Stick", nullptr },
     { L"S", L"L Stick", nullptr },         { L"D", L"L Stick", nullptr },
     // as the tutorials print them
     { L"W, A, S, D", L"L Stick", nullptr }, { L"W, S, A, D", L"L Stick", nullptr }, { L"Arrow Keys", L"L Stick", nullptr },
     { L"Mouse", L"R Controller", nullptr }, { L"Middle Mouse Button", L"Swing", nullptr },
-    { L"Page Up/Page Down", L"Hold Y", L"Y" },
+    { L"Page Up/Page Down", L"Hold B", L"Y" },
 };
 
 const wchar_t* ButtonFor(const std::wstring& key)
