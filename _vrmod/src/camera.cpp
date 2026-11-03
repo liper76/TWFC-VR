@@ -238,9 +238,30 @@ void CameraOnUpdate(TPOV* pov, void* viewTarget, void* pc, float dt)
     VREyeView eye, eye2;
     bool pair = g_cfg.stereoPerFrame != 0;
     if (pair ? !VRBeginStereoPair(eye, eye2) : !VRBeginGameFrame(eye)) return;
+    // the scripted walk: the right stick turns the view where the game's camera stands (snap or smooth, as in
+    // play), so the player can face the robots when they turn; the game's camera does not take the stick there
+    static float scriptYaw;
+    static bool scriptSnapLatched;
+    if (!scripted) scriptYaw = 0.0f;
+    else if (eye.eye == 0 && g_cfg.ownTurning && g_cfg.aimMode == 1) {
+        float x = g_turnInput;
+        if (g_cfg.snapTurnDeg > 0) {
+            if (fabsf(x) > 0.7f && !scriptSnapLatched) {
+                scriptYaw += g_cfg.snapTurnDeg * 65536.0f / 360.0f * (x > 0 ? 1 : -1);
+                scriptSnapLatched = true;
+            } else if (fabsf(x) < 0.3f) {
+                scriptSnapLatched = false;
+            }
+        } else {
+            float pairDt = pair || GameTimeFrozenForRightEye() ? dt : dt * 2.0f;
+            scriptYaw += x * g_cfg.smoothTurnDegPerSec * 65536.0f / 360.0f * pairDt;
+        }
+        scriptYaw = fmodf(scriptYaw + 65536.0f, 65536.0f);
+    }
     if (!player) {
         IKSetPawn(nullptr, nullptr);
         g_latchValid = false;
+        if (scripted) pov->yaw = (int)(pov->yaw + scriptYaw) & 0xFFFF;
         TPOV right = *pov;
         ApplyHeadOnly(pov, eye);
         if (pair) { ApplyHeadOnly(&right, eye2); GameSetRightEyeView(right); }
