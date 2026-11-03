@@ -8,6 +8,9 @@ Run TWFC-VR-Setup.exe (github.com/liper76/TWFC-VR/releases), check the game fold
 and press Install. It makes the BinariesVR folder, the launchers, these guides, the controls picture
 ("VR controls.png") and a desktop shortcut. Reinstalling keeps your twfcvr.ini unless "Reset settings" is ticked.
 The classic mode below is not part of the installer.
+STEAM VERSION: the installer adds BinariesVR\steam_appid.txt; keep Steam running (logged in) when you start
+the VR version. The mod was made with the patched 2016 exe: with the Steam build some of it may not work -
+then please send BinariesVR\twfcvr.log (github.com/liper76/TWFC-VR/issues).
 
 TWO MODES
   "Launch VR.bat" ............. MAIN: first person, aim with the right controller,
