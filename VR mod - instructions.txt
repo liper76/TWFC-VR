@@ -35,8 +35,8 @@ CONTROLS (main mode; the buttons work like an Xbox gamepad)
   Right trigger ................... fire (with a melee weapon in the right hand: swing it)
   Left trigger .................... as in the game: precise aim / the weapon's second action (detonating grenades);
                                     in vehicle form - boost
-  Right stick click ............... main ability (RB, ability 1), at once, held while you hold it
-  B: short press .................. second ability (LB, ability 2)
+  Right stick click ............... second ability (LB), at once, held while you hold it
+  B: short press .................. main ability (RB)
   B: hold 0.35 s .................. the right hand's WEAPON WHEEL (like Half-Life: Alyx): point the hand at an item
                                     and release B. Items: your weapons / "Empty hand" (the gun back into an
                                     empty hand - pick the gun). (The grips do not open the wheel - they only
@@ -57,7 +57,7 @@ CONTROLS (main mode; the buttons work like an Xbox gamepad)
                                     (between them), the eyes are raised by TurretEyeUp=0.35 m ([VR]); the
                                     triggers work as with a gun: right - fire, left - aim (also with both
                                     hands on the grips). The shoulder pads are hidden on a turret (the view)
-  (in a vehicle: the right stick click - the vehicle's special move)
+  (in a vehicle: a short B - the vehicle's special move)
   The old layout (grips = abilities, Y = next weapon): GripAbilities=1 in [Input].
   (in the old layout the stick clicks are LS / RS)
   Menu button (left): short press .. Start (pause)
