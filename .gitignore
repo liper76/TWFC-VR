@@ -22,6 +22,7 @@
 !/_vrmod/
 /_vrmod/backup/
 /_vrmod/build/
+/_vrmod/dist/
 /_vrmod/ACTIVE_SESSION.txt
 
 # build outputs and run artefacts
@@ -35,6 +36,7 @@
 *.log
 *.bmp
 *.png
+!/_vrmod/docs/*.png
 __pycache__/
 *.pyc
 

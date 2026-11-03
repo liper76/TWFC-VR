@@ -35,17 +35,17 @@ struct Config {
     int   hudPrompts = 1;           // ... and the button hints ("Hold X for ...") below the centre
     int   reticle = 1;              // VR crosshair along the controller ray
     float reticleDistance = 8.0f;   // metres
-    float reticleSize = 0.6f;       // the ring's size (x the default, ~3 degrees; the game's crosshair: x its own size)
+    float reticleSize = 0.2963f;       // the ring's size (x the default, ~3 degrees; the game's crosshair: x its own size)
     int   reticleStyle = 1;         // 1 = the game's own crosshair on the VR reticle, 0 = a plain ring
-    float beltOffset[3] = { -0.16f, -0.55f, 0.12f };   // grenade pouch from the eyes: right, up, forward (m)
+    float beltOffset[3] = { -0.1463f, -0.5878f, 0.0817f };   // grenade pouch from the eyes: right, up, forward (m)
     int   stereoPerFrame = 1;      // stereo: each game frame is drawn twice, once per eye (0 = one eye per frame, alternating)
     int   syncEyeTime = 1;          // alternating stereo: the right-eye frame shows the same moment as the left
     int   syncEyeTimeVehicle = 1;   // ... also in vehicle form
     double heldFrameTime = 0.001;   // the game time a held (right-eye) frame still advances, seconds
-    int   autoScale = 1;            // WorldScale from the robot's arm span and the player's (T-pose in the setup)
-    float userArmSpan = 0.0f;       // the player's arm span, wrist to wrist (metres; 0 = not calibrated)
+    int   autoScale = 0;            // WorldScale from the robot's arm span and the player's (T-pose in the setup)
+    float userArmSpan = 1.4917f;      // the player's arm span, wrist to wrist (metres; 0 = not calibrated)
     float emptyGripR[7] = { 0, 0, 0, 1, 0, 0, 0 };   // the empty right hand on the controller (setup; qx qy qz qw tx ty tz)
-    float userEyeHeight = 0.0f;    // the player's eye height standing (metres; T-pose; 0 = not calibrated)
+    float userEyeHeight = 1.2425f;    // the player's eye height standing (metres; T-pose; 0 = not calibrated)
     int   singleThreadRender = 1; // the engine renders on the game thread: each image is matched to its eye exactly
     int   handIK = 1;               // first person: the robot's arms and weapon follow the controllers
     int   meleeGesture = 1;         // a fast swing of a hand is a melee attack
@@ -60,7 +60,7 @@ struct Config {
     float grenadeThrowScale = 3.0f; // thrown grenade speed = hand speed x this
     float grenadeGravity = 1.0f;    // a thrown grenade falls (x 9.8 m/s²; the game's own fly almost straight)
     int   hudMarkersInEyes = 1;     // the HUD's markers (waypoints, names, lock-on marks) drawn into the eyes
-    int   cutscenes3D = 0;          // 1 = in-engine cutscenes in 3D around you (0 = on the virtual screen)
+    int   cutscenes3D = 1;          // 1 = in-engine cutscenes in 3D around you (0 = on the virtual screen)
     int   grenadeBelt = 1;          // a grenade is seen on the belt (where they are taken from) while there are any
     float grenadeScale = 0.5f;      // size of the grenade on the belt and in the hand (1 = the game's thrown one)
     int   fingerPoses = 1;          // robot fingers follow yours on the controller (trigger, grip, thumb on the buttons)
@@ -77,7 +77,7 @@ struct Config {
     float twoHandRadius = 0.15f;    // how close the left hand must be to that point
     int   gunstock = 2;             // held two-handed, a virtual stock: 0 none, 1 at the shoulder, 2 about the front hand
     float weaponSmoothing = 3.0f;   // the gun's turn filtered: 0 off .. 10 most (fast flicks less)
-    float elbowInGun[3] = {};       // TEMPORARY (calibration): where the gun arm's elbow goes into the gun, moved
+    float elbowInGun[3] = { 0.90f };       // TEMPORARY (calibration): where the gun arm's elbow goes into the gun, moved
                                     // forward, up, out along the gun - in drawn forearm lengths
     float stockShoulder[3] = { 0.145f, -0.21f, 0.04f };   // the gun hand's shoulder from the eyes: aside, up, back (m)
     float stockButt[3] = { 0.0f, 0.02f, 0.24f };          // the virtual butt from the gun hand's grip (m, aim axes)
@@ -97,30 +97,30 @@ struct Config {
     wchar_t scopeWeapons[128] = L"Sniper,NullRay,Eliminator";   // weapon name parts that get a scope ("*" = all)
     float abilityYield = 0.0f;     // seconds the arms play the animation after an ability button (0 = never)
     float noNearFade = 600.0f;      // first person: robots closer than this (Unreal units) are not faded out (0 = game fades)
-    float nearClip = 10.0f;         // near clipping plane (Unreal units; game uses 100 = 0.5 m at VR scale)
+    float nearClip = 30.0f;         // near clipping plane (Unreal units; game uses 100 = 0.5 m at VR scale)
     int   showBody = 1;             // first person: 0 = arms only, 1 = arms + legs (torso hidden), 2 = whole body
-    float limbThickness = 0.5f;     // first person: upper arms drawn thinner (1 = original), on top of armSize
-    float armSize = 0.8f;           // first person: thickness of the whole arms - forearms, armour, arm shell (1 = original)
-    float legThickness = 0.75f;     // first person: legs drawn thinner (1 = original)
-    float handScale = 1.0f;         // first person: size of the robot's hands
-    float weaponScale = 1.0f;       // first person: size of the held weapon
+    float limbThickness = 0.65f;     // first person: upper arms drawn thinner (1 = original), on top of armSize
+    float armSize = 0.65f;           // first person: thickness of the whole arms - forearms, armour, arm shell (1 = original)
+    float legThickness = 0.65f;     // first person: legs drawn thinner (1 = original)
+    float handScale = 0.65f;         // first person: size of the robot's hands
+    float weaponScale = 0.65f;       // first person: size of the held weapon
     float muzzleFlashScale = 0.35f; // first person: size of the weapon's muzzle flash effects
     int   english = 1;              // the mod's own text: 1 English, 0 Russian ([General] Language=auto|en|ru)
     int   bodyFollowHead = 1;       // first person: the body stays under the head when you walk around the room
     int   moveByHead = 1;           // left stick moves where the head looks (0 = where the right controller aims)
     int   vehicleCamera = 1;        // vehicle form: 0 = driver's seat, 1 = chase camera behind and above
-    float chaseDistance = 450.0f;   // chase camera: distance behind (Unreal units)
-    float chaseHeight = 260.0f;     // chase camera: height above the vehicle origin
+    float chaseDistance = 651.1461f;   // chase camera: distance behind (Unreal units)
+    float chaseHeight = 358.5327f;     // chase camera: height above the vehicle origin
     int   vehicleHeadAim = 0;       // vehicle form: 0 = aim (and steer) with the right controller, 1 = where the head looks
-    float vehicleEyeHeight = 210.0f;  // vehicle form: eye height above the pawn origin
-    float vehicleEyeForward = -100.0f; // vehicle form: eye offset forward (negative = behind)
+    float vehicleEyeHeight = 154.6557f;  // vehicle form: eye height above the pawn origin
+    float vehicleEyeForward = 20.9122f; // vehicle form: eye offset forward (negative = behind)
     int   cameraMode = 1;       // 0 = third person (game camera), 1 = first person (at the pawn's eyes)
-    float eyeHeight = 150.0f;     // first person: eye height above the pawn origin (Unreal units)
+    float eyeHeight = 190.0f;     // first person: eye height above the pawn origin (Unreal units)
     float eyeForward = 30.0f;       // first person: eye offset forward of the pawn origin
     float turretEyeUp = 0.35f;      // on a mounted turret: eyes (and body) raised by this much (metres, real) to see over it
     int   keepStickPitch = 0;       // 1 = keep the game camera pitch under the head pitch
     int   snapTurnDeg = 0;              // >0 = snap turn by this many degrees, 0 = smooth turn
-    float smoothTurnDegPerSec = 120.0f;
+    float smoothTurnDegPerSec = 225.0f;
     int   ownTurning = 1;               // main mode: the mod turns the body (game turning/aim assist cannot move the view)
     unsigned menuCameraVTable = 0x1293D590;   // view target class of the main menu backdrop
     float screenDistance = 3.0f;    // metres

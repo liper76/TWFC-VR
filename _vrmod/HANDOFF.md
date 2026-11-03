@@ -74,6 +74,17 @@ C:\Games\Transformers - War for Cybertron\
 - Запуск из PowerShell: `cmd /c "<полный путь>\_vrmod\build.bat"`.
 - Код: комментарии английские; русский текст в UI — только через `\x0410`-escape в wide-строках (исходники не
   в UTF-8 для компилятора). Осторожно: `\x` жадно ест следующие hex-символы (a–f, 0–9).
+- Дефолтный `twfcvr.ini` (пишется при первом запуске) — `src\default_ini.h` (`kDefaultIni`); дефолты полей —
+  в структуре в `common.h`. Меняешь одно — меняй и другое.
+- Установщик: `_vrmod\installer\build_installer.bat` (после build.bat) → `_vrmod\dist\TWFC-VR-Setup.exe`.
+  `Installer.cs` — WinForms на .NET 4 (csc из Windows), payload вшит ресурсами: мод, openxr_loader, D3D9.dll и
+  dgVoodoo.conf из BinariesVR, bat-ы, обе инструкции, картинки управления. Ставит BinariesVR = копия 6 файлов
+  Binaries + LAA-патч exe (с пересчётом PE CheckSum; оригинал → TWFC.exe.noLAA), ярлык на рабочем столе.
+  Тихий режим: `/install|/uninstall "<игра>" [/reset] [/shortcut] [/log:<файл>]` (из Git Bash —
+  `MSYS_NO_PATHCONV=1`, иначе `/install` превращается в путь). Тестировать только на копии в Temp.
+- `ControlsImage.cs` рисует `_vrmod\docs\controls_en.png` / `controls_ru.png` (подписи и стрелки поверх
+  фото контроллеров `_vrmod\docs\controllers_photo.png`); координаты кнопок — в пикселях фото.
+- Релизы — GitHub Releases liper76/TWFC-VR (`gh release create`), ассеты: setup и обе картинки.
 
 ---
 

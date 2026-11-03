@@ -3,6 +3,12 @@ TRANSFORMERS: WAR FOR CYBERTRON - VR MOD (early version)
 
 (Русская версия: "VR-мод — инструкция.txt")
 
+INSTALLING
+Run TWFC-VR-Setup.exe (github.com/liper76/TWFC-VR/releases), check the game folder (the one with Binaries\TWFC.exe)
+and press Install. It makes the BinariesVR folder, the launchers, these guides, the controls picture
+("VR controls.png") and a desktop shortcut. Reinstalling keeps your twfcvr.ini unless "Reset settings" is ticked.
+The classic mode below is not part of the installer.
+
 TWO MODES
   "Launch VR.bat" ............. MAIN: first person, aim with the right controller,
                                 crosshair in the headset, sharp square render, menus on a screen.
@@ -221,5 +227,5 @@ crashed on heavy levels with "You ran out of memory". The original without the f
 Binaries is untouched.
 
 UNINSTALLING
-Delete the BinariesVR and BinariesVR_Classic folders, all the "Launch VR*.bat" / "Запуск VR*.bat" files and both
+Run TWFC-VR-Setup.exe and press Uninstall. Or by hand: delete the BinariesVR and BinariesVR_Classic folders, all the "Launch VR*.bat" / "Запуск VR*.bat" files and both
 guides. The _vrmod folder is the mod's sources and _vrmod_tools the build tools; they can be deleted too.
