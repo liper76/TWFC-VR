@@ -11,6 +11,9 @@ VR-мод для **Transformers: War for Cybertron** (2010, PC, Unreal Engine 3,
 - HUD на плавающей панели, подсказки кнопок VR, меню настроек в шлеме;
 - ролики и меню — на виртуальном экране.
 
+Скачать: **[TWFC-VR-Setup.exe](https://github.com/liper76/TWFC-VR/releases/latest)** — см. [Установка](#установка)
+и [Управление](#управление).
+
 ## Язык
 
 Русский и английский. Переключается в меню настроек VR: **Language / Язык**.
@@ -49,8 +52,31 @@ cmd /c "_vrmod\build.bat"
 
 ## Установка
 
-`BinariesVR\` — копия `Binaries\` игры, в которую добавлены `xinput1_3.dll` (мод), `openxr_loader.dll`
-и dgVoodoo 2 (`D3D9.dll` и др. + `dgVoodoo.conf` из репозитория). Оригинальная папка `Binaries\` не меняется.
-Настройки мода — `BinariesVR\twfcvr.ini` (создаётся при первом запуске), лог — `BinariesVR\twfcvr.log`.
+1. Скачайте **TWFC-VR-Setup.exe** в [Releases](https://github.com/liper76/TWFC-VR/releases/latest).
+2. Запустите. Папку игры он найдёт сам (Steam, обычные папки); если нет — укажите кнопкой **Обзор** папку,
+   где лежит `Binaries\TWFC.exe`. Нажмите **Установить**.
+3. Запустите OpenXR-рантайм (Virtual Desktop, Quest Link / Air Link, SteamVR...) и подключите шлем.
+4. Запускайте игру ярлыком **Transformers WFC VR** на рабочем столе или `Запуск VR.bat` в папке игры.
+5. В шлеме: **Menu** удерживать 1.5 с — настройки VR (язык, рост, размеры...).
 
-В репозиторий не входят файлы игры, dgVoodoo, MinHook, OpenXR SDK и собранные бинарники.
+Что делает установщик: создаёт `BinariesVR\` рядом с `Binaries\` игры (копия exe и DLL игры, exe с флагом
+Large Address Aware, чтобы тяжёлым уровням хватало памяти) и кладёт туда мод (`xinput1_3.dll`), `openxr_loader.dll`
+и dgVoodoo 2 (`D3D9.dll` + `dgVoodoo.conf`). Оригинальная папка `Binaries\` (и ваши ReShade, DLSS в ней)
+не меняется, обычная игра запускается как раньше. Переустановка сохраняет ваши настройки (`BinariesVR\twfcvr.ini`),
+если не отмечено **Сбросить настройки**. Кнопка **Удалить** в том же окне убирает всё, что было добавлено.
+
+Нужно: PC-версия игры (Steam / диск), Windows 10/11, ПК-VR-шлем с OpenXR-рантаймом.
+Настройки мода — `BinariesVR\twfcvr.ini` (создаётся при первом запуске), лог — `BinariesVR\twfcvr.log`.
+Полная инструкция игрока — `VR-мод — инструкция.txt` в папке игры.
+
+Тихая установка: `TWFC-VR-Setup.exe /install "<папка игры>" [/shortcut] [/reset]`, удаление — `/uninstall "<папка игры>"`.
+
+## Управление
+
+![Управление](_vrmod/docs/controls_ru.png)
+
+## Для разработчиков
+
+В репозиторий не входят файлы игры, dgVoodoo, MinHook и OpenXR SDK.
+Установщик собирается `_vrmod\installer\build_installer.bat` (после `_vrmod\build.bat`; нужен только
+компилятор .NET Framework 4, который есть в Windows) в `_vrmod\dist\TWFC-VR-Setup.exe`.

@@ -11,6 +11,9 @@ It runs through OpenXR (tested with Virtual Desktop and Quest controllers).
 - HUD on a floating panel, VR button hints, a settings menu inside the headset;
 - movies and menus on a virtual screen.
 
+Download: **[TWFC-VR-Setup.exe](https://github.com/liper76/TWFC-VR/releases/latest)** — see [Installation](#installation)
+and [Controls](#controls).
+
 ## Language
 
 English and Russian. Switch in the VR settings menu: **Language / Язык**.
@@ -50,8 +53,32 @@ This builds `xinput1_3.dll` and copies it, together with `openxr_loader.dll`, in
 
 ## Installation
 
-`BinariesVR\` is a copy of the game's `Binaries\` with `xinput1_3.dll` (the mod), `openxr_loader.dll`
-and dgVoodoo 2 (`D3D9.dll` etc. + `dgVoodoo.conf` from this repository) added. The original `Binaries\` folder
-is left untouched. Mod settings: `BinariesVR\twfcvr.ini` (created on first launch); log: `BinariesVR\twfcvr.log`.
+1. Download **TWFC-VR-Setup.exe** from [Releases](https://github.com/liper76/TWFC-VR/releases/latest).
+2. Run it. It finds the game folder by itself (Steam, the usual folders); otherwise pick the folder that
+   holds `Binaries\TWFC.exe` with **Browse**. Press **Install**.
+3. Start your OpenXR runtime (Virtual Desktop, Quest Link / Air Link, SteamVR...) and connect the headset.
+4. Start the game with the **Transformers WFC VR** shortcut on the desktop, or `Launch VR.bat` in the game folder.
+5. In the headset: hold **Menu** for 1.5 s for the VR settings (language, height, sizes...).
 
-The repository does not include game files, dgVoodoo, MinHook, the OpenXR SDK or built binaries.
+What the installer does: makes `BinariesVR\` next to the game's `Binaries\` (a copy of the game's exe and DLLs,
+the exe with the Large Address Aware flag so heavy levels don't run out of memory) and adds the mod
+(`xinput1_3.dll`), `openxr_loader.dll` and dgVoodoo 2 (`D3D9.dll` + `dgVoodoo.conf`). The original `Binaries\`
+folder (and your ReShade, DLSS etc. there) is left untouched; the normal game starts as before.
+Reinstalling keeps your settings (`BinariesVR\twfcvr.ini`) unless **Reset settings** is ticked.
+**Uninstall** in the same window removes everything it added.
+
+Requirements: the PC (Steam / retail) version of the game, Windows 10/11, a PC VR headset with an OpenXR runtime.
+Mod settings: `BinariesVR\twfcvr.ini` (created on first launch); log: `BinariesVR\twfcvr.log`.
+The full player guide: `VR mod - instructions.txt` in the game folder.
+
+Silent install: `TWFC-VR-Setup.exe /install "<game folder>" [/shortcut] [/reset]`, or `/uninstall "<game folder>"`.
+
+## Controls
+
+![Controls](_vrmod/docs/controls_en.png)
+
+## For developers
+
+The repository does not include game files, dgVoodoo, MinHook or the OpenXR SDK.
+The setup is built with `_vrmod\installer\build_installer.bat` (after `_vrmod\build.bat`;
+it needs only the .NET Framework 4 compiler that ships with Windows) into `_vrmod\dist\TWFC-VR-Setup.exe`.
