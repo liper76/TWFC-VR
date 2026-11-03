@@ -173,10 +173,9 @@ struct XR {
     bool pullSqueeze[2] = {}; // this squeeze pulled a pickup (no weapon wheel for it)
     WORD prevButtons = 0;
     DWORD gripAt[2] = {};     // grip squeezed since
-    int stickDir = 0;         // the right stick held up (1) or down (-1) - not sideways (VR layout: StickVertical)
-    DWORD bAt = 0;            // B held since (VR layout: the weapon wheel)
+    DWORD bAt = 0;            // Y held since (VR layout: grenade / the weapon wheel)
     bool bHeld = false;       // ... long enough: the wheel (no tap)
-    int bPulse = 0;           // a tap of B: the game's B for a few updates
+    int bPulse = 0;           // a tap of Y: the game's B (grenade) for a few updates
     int exitPulse = 0;        // the game's use button (X) for a few updates: off a mounted turret
     DWORD throwAt = 0;        // grenade throw gesture
     int throwPulse = 0;
@@ -1170,17 +1169,15 @@ static void UpdateInput()
         if (GetBool(xr.btn[kRClick])) p.wButtons |= XINPUT_GAMEPAD_RIGHT_THUMB;
     } else {
         // VR layout: the grips hold things (the weapon's front, grenades, pickups); the left trigger stays the game's
-        // (fine aim / the weapon's second action, e.g. detonating grenades; vehicle boost). Y = main ability (RB) at
-        // once, for as long as it is down; the right stick held up = second ability (LB, also the right click; the
-        // stick's vertical axis is not the game's - turning is only sideways). B tapped = the game's B (the grenade
-        // throw, and whatever else the game has on it), held = the weapon wheel; the right stick flicked down = next
-        // weapon (UpdateWeaponWheel). X = the game's X, the left click = transform (LS, one press). Grenades also
-        // from the belt with a grip. Melee: a punch forward with a hand.
-        UpdateWeaponWheel(p, grip, now);   // (takes up B and the right stick's direction)
-        if (xr.stickDir) p.sThumbRX = 0;   // (held up or down: no turning meanwhile)
+        // (fine aim / the weapon's second action, e.g. detonating grenades; vehicle boost). A = jump, X = the game's X
+        // (reload, use), B = second ability (LB), the right click = main ability (RB), each for as long as it is down.
+        // Y tapped = the game's B (the grenade throw), held = the weapon wheel (UpdateWeaponWheel). The right stick
+        // only turns (its vertical axis is not the game's: the head looks up and down). The left click = transform
+        // (LS, one press). Grenades also from the belt with a grip. Melee: a punch forward with a hand.
+        UpdateWeaponWheel(p, grip, now);   // (takes up Y)
         p.sThumbRY = 0;
-        if (GetBool(xr.btn[kY])) p.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
-        if (xr.stickDir == 1 || GetBool(xr.btn[kRClick])) p.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+        if (GetBool(xr.btn[kB])) p.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+        if (GetBool(xr.btn[kRClick])) p.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
         if (xr.bPulse > 0) { p.wButtons |= XINPUT_GAMEPAD_B; xr.bPulse--; }
         if (GetBool(xr.btn[kLClick])) p.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
         if (xr.exitPulse > 0) { p.wButtons |= XINPUT_GAMEPAD_X; xr.exitPulse--; }
@@ -1740,32 +1737,6 @@ static void WheelChoose()
 static volatile int g_dbgWheelHand = -2, g_dbgWheelHot = -1;   // debug "wheel <hand> <slot>" (hand -1 = choose)
 void VRDebugWheel(int hand, int hot) { g_dbgWheelHot = hot; g_dbgWheelHand = hand; }
 
-// The right stick pushed well up (1) or down (-1), not sideways (that turns); once held, it lets go only near the
-// middle or when turned sideways.
-static int StickVertical(XrVector2f s, int was)
-{
-    float ax = fabsf(s.x), ay = fabsf(s.y);
-    if (was && s.y * was > 0.4f && ay > ax) return was;
-    if (ay > 0.7f && ay > ax * 1.5f) return s.y > 0 ? 1 : -1;
-    return 0;
-}
-
-// The right stick flicked down: an empty right hand takes its gun back, else the next weapon (the game's Y).
-static void WheelQuickSwitch()
-{
-    Wheel& w = g_wheel;
-    if (WeaponsMeleeHand() == 1) WeaponsSetMeleeHand(-1);
-    if (g_gunHand == 1 && g_rightEmpty) {
-        g_rightEmpty = false;
-        Log("vr: right stick down -> the gun back in the right hand");
-    } else {
-        w.presses = 1;
-        Log("vr: right stick down -> next weapon");
-    }
-    xr.twoHand = false;
-    VRHaptic(1, 0.6f, 0.05f);
-}
-
 // grip[h]: squeeze of each hand; a hand whose grip holds the weapon's front (two-handed) does not open a wheel.
 static void UpdateWeaponWheel(XINPUT_GAMEPAD& p, const float grip[2], DWORD now)
 {
@@ -1774,8 +1745,7 @@ static void UpdateWeaponWheel(XINPUT_GAMEPAD& p, const float grip[2], DWORD now)
     if (g_setup.active) {   // the grips set up the gun there
         w.open = false;
         xr.gripAt[0] = xr.gripAt[1] = 0;
-        xr.stickDir = 0;
-        xr.bAt = 0;   // (B sets the gun's rotation there)
+        xr.bAt = 0;
         xr.bHeld = false;
         return;
     }
@@ -1788,21 +1758,19 @@ static void UpdateWeaponWheel(XINPUT_GAMEPAD& p, const float grip[2], DWORD now)
         w.open = false;
         g_dbgWheelHand = -2;
     }
-    // The wheel is on B held (not the grips: grabbing things kept opening it; not the stick clicks: they wear the
-    // sticks; the right stick held down was tried - in the headset it never stayed down long enough): B held 0.35 s
-    // opens the right hand's wheel, let go to take the slot under the hand; a short B is the game's B (grenade), sent
-    // when it is let go. In vehicle form B held switches the vehicle's weapon (the game's "next weapon"). The right
-    // stick flicked down = WheelQuickSwitch at once (in vehicle form the vehicle's next weapon); held up = the second
-    // ability (UpdateInput).
+    // The wheel is on Y held (not the grips: grabbing things kept opening it; not the stick clicks: they wear the
+    // sticks; the right stick held down was tried - in the headset it never stayed down long enough): Y held 0.35 s
+    // opens the right hand's wheel, let go to take the slot under the right hand; a short Y is the game's B (grenade),
+    // sent when it is let go. In vehicle form Y held switches the vehicle's weapon (the game's "next weapon").
     bool vehicle = IKPawnIsVehicle();
     if (!debug) {
-        if (GetBool(xr.btn[kB])) {
+        if (GetBool(xr.btn[kY])) {
             if (!xr.bAt) xr.bAt = now;
             if (now - xr.bAt > 350 && !xr.bHeld) {
                 xr.bHeld = true;
                 if (vehicle) w.presses = 1;
                 else if (!w.open && t) WheelOpen(t, 1);
-                if (g_cfg.logFps) Log("vr: B held -> %s", vehicle ? "next vehicle weapon" : "weapon wheel");
+                if (g_cfg.logFps) Log("vr: Y held -> %s", vehicle ? "next vehicle weapon" : "weapon wheel");
             }
         } else if (xr.bAt) {
             if (w.open && w.hand == 1) WheelChoose();
@@ -1810,16 +1778,6 @@ static void UpdateWeaponWheel(XINPUT_GAMEPAD& p, const float grip[2], DWORD now)
             if (w.open && w.hand == 1) w.open = false;
             xr.bAt = 0;
             xr.bHeld = false;
-        }
-        int was = xr.stickDir, dir = StickVertical(GetStick(xr.stick[1]), was);
-        if (dir != was) {
-            xr.stickDir = dir;
-            if (dir) VRHaptic(1, 0.15f, 0.02f);   // (a stick has no click to feel)
-            if (dir && g_cfg.logFps) Log("vr: right stick %s", dir > 0 ? "up (second ability)" : "down");
-            if (dir == -1) {
-                if (vehicle) w.presses = 1;
-                else WheelQuickSwitch();
-            }
         }
     }
     (void)grip;
@@ -2283,13 +2241,26 @@ static const int kMenuRows = 12;
 static float g_settingValue[kSettingCount];
 static int g_settingSel, g_settingFirst, g_settingHover = -1;
 static bool g_settingsLoaded;
+static std::wstring g_settingsWho;   // the character the values were read for (the weapon size is its own)
+
+// Where a setting is kept: the weapon size is the character's own once there is one (the game sizes weapons per
+// character); the rest are shared
+static std::wstring SettingSection(const SettingItem& it)
+{
+    std::wstring who = IKCharacter();
+    if (!wcscmp(it.key, L"WeaponScale") && !who.empty()) return L"Character." + who;
+    return it.sec;
+}
 
 static void LoadSettings()
 {
+    g_settingsWho = IKCharacter();
     for (int i = 0; i < kSettingCount; i++) {
         float v;
         if (!kSettings[i].sec) continue;
-        g_settingValue[i] = IniFloats(kSettings[i].sec, kSettings[i].key, &v, 1) == 1 ? v : kSettings[i].def;
+        bool got = IniFloats(SettingSection(kSettings[i]).c_str(), kSettings[i].key, &v, 1) == 1 ||
+                   IniFloats(kSettings[i].sec, kSettings[i].key, &v, 1) == 1;   // the character's own, else the shared one
+        g_settingValue[i] = got ? v : kSettings[i].def;
     }
     g_settingsLoaded = true;
 }
@@ -2399,7 +2370,7 @@ static void SettingChange(int i, int dir)
     else v = std::min(std::max(roundf((v + dir * it.step) / it.step) * it.step, it.lo), it.hi);
     wchar_t b[32];
     swprintf_s(b, it.step >= 1.0f ? L"%.0f" : L"%.2f", v);
-    WritePrivateProfileStringW(it.sec, it.key, b, IniPath().c_str());
+    WritePrivateProfileStringW(SettingSection(it).c_str(), it.key, b, IniPath().c_str());
     VRHaptic(1, 0.2f, 0.02f);
     g_setup.dirty = true;
 }
@@ -2441,7 +2412,7 @@ static void MeasureTPose(XrTime t, const XrPosef& head)
 
 static void UpdateSettingsPage(XrTime t, const XrPosef& head, DWORD now)
 {
-    if (!g_settingsLoaded) LoadSettings();
+    if (!g_settingsLoaded || g_settingsWho != IKCharacter()) LoadSettings();
     static DWORD repeatAt, tposeShown;
     static int heldDir;
     static bool triggerWas = true, aWas = true;
@@ -2575,7 +2546,7 @@ static bool DrawPanel()
             DeleteObject(bg2);
             DrawTextW(dc, Tr(L"\x041D\x0410\x0421\x0422\x0420\x041E\x0419\x041A\x0418 VR", L"VR SETTINGS"), -1, &rt, DT_LEFT | DT_SINGLELINE);
             SelectObject(dc, body);
-            if (!g_settingsLoaded) LoadSettings();
+            if (!g_settingsLoaded || g_settingsWho != IKCharacter()) LoadSettings();
             y = kMenuTop;
             for (int i = g_settingFirst; i < g_settingFirst + kMenuRows && i < kSettingCount; i++) {
                 const SettingItem& it = kSettings[i];

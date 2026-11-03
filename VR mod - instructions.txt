@@ -35,16 +35,14 @@ CONTROLS (main mode; the buttons work like an Xbox gamepad)
   Right trigger ................... fire (with a melee weapon in the right hand: swing it)
   Left trigger .................... as in the game: precise aim / the weapon's second action (detonating grenades);
                                     in vehicle form - boost
-  Y ............................... main ability (RB), at once, held while you hold Y
-  Right stick UP (hold) ........... second ability (LB), held while you hold the stick up (the right stick click
-                                    does the same). Turning is sideways only: up/down do not turn.
-  B: short press .................. the game's B: throws a grenade (and whatever else the game has on B);
-                                    grenades also from the belt with the grip
-  B: hold 0.35 s .................. the right hand's WEAPON WHEEL (like Half-Life: Alyx): point the hand at an item
-                                    and release B. Items: your weapons / "Empty hand". (The grips do not open the
-                                    wheel - they only grab.) In a vehicle, holding B switches the vehicle's weapon.
-  Right stick DOWN (flick) ........ next weapon; with an empty right hand - the gun back into it.
-                                    In a vehicle - the vehicle's next weapon.
+  Right stick click ............... main ability (RB, ability 1), at once, held while you hold it
+  B ............................... second ability (LB, ability 2), held while you hold B
+  Right stick ..................... only turns: up/down do nothing (you look up and down with your head)
+  Y: short press (left controller)  grenade (the game's B); grenades also from the belt with the grip
+  Y: hold 0.35 s .................. the WEAPON WHEEL (like Half-Life: Alyx): point the right hand at an item
+                                    and release Y. Items: your weapons / "Empty hand" (the gun back into an
+                                    empty hand - pick the gun). (The grips do not open the wheel - they only
+                                    grab.) In a vehicle, holding Y switches the vehicle's weapon.
   Left stick click ................ transform.
                                     Empty right hand: the gun is put away and does not fire, the hand is free
                                     (grenades from the belt, pulling, fingers); its position on the controller
@@ -59,7 +57,7 @@ CONTROLS (main mode; the buttons work like an Xbox gamepad)
                                     (between them), the eyes are raised by TurretEyeUp=0.35 m ([VR]); the
                                     triggers work as with a gun: right - fire, left - aim (also with both
                                     hands on the grips). The shoulder pads are hidden on a turret (the view)
-  (in a vehicle: Y - the vehicle's special move)
+  (in a vehicle: the right stick click - the vehicle's special move)
   The old layout (grips = abilities, Y = next weapon): GripAbilities=1 in [Input].
   (in the old layout the stick clicks are LS / RS)
   Menu button (left): short press .. Start (pause)
@@ -105,6 +103,8 @@ SETTINGS - BinariesVR\twfcvr.ini (open with Notepad)
   WorldScale=200      head movement scale: bigger = you are "bigger", stronger depth
   Mode=1              1 = 3D in gameplay, 0 = always the virtual screen
   FpsLimit=120 / VRFpsLimit=300   FPS limit without / with the headset
+  TexturePoolMB=1024  memory for textures (MB): the game kept 250 at most, so at a high resolution textures
+                      stayed blurry; 0 - as in the game
   ScreenDistance / ScreenWidth - size and distance of the virtual screen (metres)
   Language=auto       [General]: the mod's language - auto, en or ru
 
@@ -125,6 +125,8 @@ HANDS (new, early version)
   LimbThickness=0.5 - the upper arms (shoulder to elbow) thinner still, on top of ArmSize,
     LegThickness=0.75 - thinner legs (1 = as in the game).
   HandScale=1.0 / WeaponScale=1.0 - size of the robot's hands and of the weapon in hand (1 = as in the game).
+    The weapon size is each character's own once changed in game ([Character.<skeleton>] sections in
+    twfcvr.ini); the weapon's position in the hand stays shared.
   HandOffsetForward / HandOffsetRight / HandOffsetUp - shift the robot's hands relative to yours, in cm
     (e.g. the robot's hands are right of yours - HandOffsetRight=-4). Can be changed in game.
   MuzzleFlashScale=0.35 - size of muzzle flashes (they are right at your eyes); also for turrets - mounted
@@ -176,8 +178,8 @@ PHYSICAL CONTROLS (new)
     and ring fingers, the thumb rests while it touches the stick/buttons (raised - "thumbs up"). With a grenade
     or a melee weapon - a fist, on the gun's foregrip - wrapped around it. [VR] FingerPoses=0 - off;
     FingerPalmSign=-1 - if the fingers bend the wrong way.
-  Pulling (like the gravity gloves in Alyx/Boneworks): point a free hand (the left; the right one if "Empty
-    hand" is picked) at a health pack / ammo / weapon - a light click of vibration - and SQUEEZE THE GRIP: like
+  Pulling (like the gravity gloves in Alyx/Boneworks): point a free hand (the left, or the right one if "Empty
+    hand" is picked - either works the same) at a health pack / ammo / weapon - a light click of vibration - and SQUEEZE THE GRIP: like
     in Boneworks, the item flies smoothly right into your hand (about a second) and is taken. Ammo and health
     count by themselves (if you are short of them); the mod takes weapons itself (holds X; PullAutoTake=0 -
     take with the X button). A weapon rack returns to its place when you walk away.
@@ -194,7 +196,8 @@ PHYSICAL CONTROLS (new)
   In vehicle form the camera is third person by default (VehicleCamera=1, ChaseDistance / ChaseHeight);
     VehicleCamera=0 - from the cockpit (VehicleEyeHeight / VehicleEyeForward).
   Video movies, in-engine cutscenes and menus are on the virtual screen ([VR] Cutscenes3D=1 - cutscenes in 3D
-    around you). So are scripted walks where the game's camera follows the characters (the start of Prison Break).
+    around you). So are scripted walks where the game's camera follows the characters (the start of Prison Break);
+    the right stick turns the view there (in place, like in gameplay).
   Interface markers (where to go, names over allies, target lock) are drawn right in the 3D view
     ([HUD] MarkersInEyes); translucent ability effects and text (hints, "reloading") are not - the text stays
     on the panel. The panel with health, abilities and weapon is as before.

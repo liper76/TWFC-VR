@@ -341,6 +341,19 @@ void HoldInPlace(uint8_t* pawn, DWORD now)
     g_prevValid = true;
 }
 
+// Melee weapons (the B24 modding package's list: TnWeaponButterflyAxe, ...TortureSword, ...SpikedMace, ...) and the
+// game's own "no weapon" (TnWeaponEmpty, the start of Prison Break): never on the wheel - the melee weapon is swung
+// with a hand (weapons.cpp melee), the empty hand is the wheel's own "Empty hand". (Before, only weapon group 50 was
+// left out, and that field is not a group: the axe was seen with 10 and came onto the wheel.)
+static bool OffWheelClass(const wchar_t* cls)
+{
+    static const wchar_t* const kinds[] = { L"Empty", L"Axe", L"Sword", L"Club", L"Hammer", L"Maul", L"Bat", L"Mace",
+                                            L"Staff", L"Dagger", L"Spear", L"Blade", L"Poke" };
+    for (const wchar_t* k : kinds)
+        if (wcsstr(cls, k)) return true;
+    return false;
+}
+
 void UpdateList(uint8_t* pawn, bool vehicle, DWORD now)
 {
     void* cur = *(void**)(pawn + kPawnWeapon);
@@ -361,7 +374,7 @@ void UpdateList(uint8_t* pawn, bool vehicle, DWORD now)
     void* ptrs[8] = {};
     if (cur && !vehicle) {   // (the setup of the gun in hand follows it even when the wheel leaves it out)
         const wchar_t* cls = NameOf(*(unsigned*)((uint8_t*)cur + 4));
-        if (cls && !GrenadeWeaponClass(cls) && *(int*)((uint8_t*)cur + kWeaponGroup) != 50) DisplayName(cls, l.held, 40);
+        if (cls && !GrenadeWeaponClass(cls) && !OffWheelClass(cls) && *(int*)((uint8_t*)cur + kWeaponGroup) != 50) DisplayName(cls, l.held, 40);
     }
     wchar_t left[256] = {};   // (for the log: the ones left out)
     for (int i = 0; i < chainCount && l.count < 8; i++) {
@@ -373,7 +386,7 @@ void UpdateList(uint8_t* pawn, bool vehicle, DWORD now)
         bool guessVehicle = group == 1 || wcsstr(cls, L"Vehicle") || wcsstr(cls, L"Plane");
         // grenades are thrown with their own button, the "next weapon" button never reaches them
         bool grenade = GrenadeWeaponClass(cls);
-        bool out = grenade || Contains(g_unreachable, 16, w) ||
+        bool out = grenade || OffWheelClass(cls) || Contains(g_unreachable, 16, w) ||
                    (!hand && (Contains(g_vehicleWeapons, 16, w) || guessVehicle || group == 50));
         if (out) {
             if (!grenade) {

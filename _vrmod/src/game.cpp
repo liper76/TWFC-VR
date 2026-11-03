@@ -8,6 +8,10 @@ namespace addr {
     const uintptr_t kImageBase = 0x10900000;
     const uint32_t kTimestamp = 1274231782;
     const uintptr_t kFpsLimit = 0x12A03F30;   // float, engine frame rate cap (default 30)
+    // uint32, the texture streaming budget in bytes: read once from [TextureStreaming] PoolSize (200 MB; the texture
+    // quality setting makes it 140-250) while 0, and given to the streamer each update as total less used (the
+    // function at 0x11343220)
+    const uintptr_t kTexturePool = 0x12B11624;
 }
 
 static uintptr_t ExeBase() { return (uintptr_t)GetModuleHandleW(nullptr); }
@@ -225,6 +229,20 @@ static DWORD WINAPI PatchThread(LPVOID)
             if (*fps != last) Log("game: fps cap %.1f -> %.1f", *fps, want);
             *fps = want;
             last = want;
+        }
+        // A bigger texture budget: at high resolutions every texture wants its top mips, the game's 250 MB runs out
+        // and models drop to blurry mips
+        volatile uint32_t* pool = (volatile uint32_t*)addr::kTexturePool;
+        uint32_t poolWant = (uint32_t)std::min(std::max(g_cfg.texturePoolMB, 0.0f), 2048.0f) << 20;
+        if (poolWant && *pool != poolWant) {
+            Log("game: texture budget %u -> %u MB", *pool >> 20, poolWant >> 20);
+            *pool = poolWant;
+        }
+        static uint32_t usedShown;
+        uint32_t used = *(volatile uint32_t*)(addr::kTexturePool + 4) >> 20;   // the textures' memory now
+        if (used > usedShown + 32 || used + 32 < usedShown) {
+            Log("game: textures use %u of %u MB", used, *pool >> 20);
+            usedShown = used;
         }
         ConfigReloadIfChanged();
         Sleep(500);

@@ -26,12 +26,14 @@ typedef int(__thiscall* FarMoveFn)(void* world, void* actor, const Vec3f* dest, 
 
 struct Pickup { uint8_t* actor; Vec3f loc, aim; bool factory, weapon; };   // aim: the drawn item (a factory's floats above it)
 volatile long g_grabNow;    // vr.cpp: the pointing hand's grip was squeezed - pull now
+volatile long g_grabHand = -1;   // the hand whose grip that was
+volatile bool g_points[2];  // each free hand points at a pickup now
 DWORD g_interactUntil;      // a pulled weapon arrived: the interact button is held until then (the game takes it so)
 Pickup g_list[64];
 int g_count;
 DWORD g_scanAt;
 
-uint8_t* g_target;          // pickup the left hand points at
+uint8_t* g_target;          // pickup the pointing hand (g_hand) points at
 DWORD g_targetAt;           // last time it was pointed at (the flick may turn the hand away)
 float g_prevRel[3];
 bool g_prevValid;
@@ -264,28 +266,9 @@ bool LineClear(uint8_t* source, const Vec3f& from, const Vec3f& to)
     return ((LineCheckFn)kLineCheck)(world, nullptr, nullptr, source, nullptr, &to, &from, 0x2286, &extent, nullptr, nullptr) != 0;
 }
 
-void Aim(uint8_t* pawn, float dt, DWORD now)
+// the pickup closest to a hand's pointing ray, not through walls (-1: none)
+int PointedPickup(uint8_t* pawn, const float pos[3], const float fwd[3])
 {
-    // the free left hand, or else the right one when it was chosen empty
-    float pos[3], fwd[3], rel[3];
-    int hand = !VRTwoHanded() && WeaponsMeleeHeld() != 0 && GrenadeHand() != 0 && VRGunHand() != 0 ? 0
-             : !VRTwoHanded() && VRRightEmpty() && WeaponsMeleeHeld() != 1 && GrenadeHand() != 1 ? 1 : -1;
-    if (hand != g_hand) { g_prevValid = false; g_target = nullptr; g_hand = hand; }
-    if (hand < 0 || !IKHandWorld(hand, pos, fwd, rel)) { g_prevValid = false; g_target = nullptr; return; }
-
-    // hand velocity relative to the body (walking and turning do not count)
-    if (g_prevValid && dt > 0) {
-        float d[3], len2 = 0;
-        for (int k = 0; k < 3; k++) { d[k] = (rel[k] - g_prevRel[k]) / dt; len2 += (rel[k] - g_prevRel[k]) * (rel[k] - g_prevRel[k]); }
-        if (len2 < 100.0f * 100.0f) {   // (a snap turn jumps)
-            float a = fminf(dt / 0.04f, 1.0f);
-            for (int k = 0; k < 3; k++) g_vel[k] += (d[k] - g_vel[k]) * a;
-        }
-    }
-    memcpy(g_prevRel, rel, sizeof(rel));
-    g_prevValid = true;
-
-    // the pickup closest to the pointing ray
     float range = g_cfg.pullRange * g_cfg.worldScale, cone = cosf(g_cfg.pullConeDeg * 0.0174533f);
     int best = -1;
     float bestCos = cone;
@@ -298,7 +281,7 @@ void Aim(uint8_t* pawn, float dt, DWORD now)
         float c = (d[0] * fwd[0] + d[1] * fwd[1] + d[2] * fwd[2]) / len;
         if (c > bestCos) { bestCos = c; best = i; }
     }
-    // not through walls: the line from the hand to (just short of) the pickup must be free
+    // the line from the hand to (just short of) the pickup must be free
     if (best >= 0) {
         Vec3f l = g_list[best].aim;
         Vec3f from = { pos[0], pos[1], pos[2] };
@@ -308,9 +291,48 @@ void Aim(uint8_t* pawn, float dt, DWORD now)
         Vec3f to = { pos[0] + d[0] * k, pos[1] + d[1] * k, pos[2] + d[2] * k + 20.0f };
         if (!LineClear(pawn, from, to)) best = -1;
     }
+    return best;
+}
+
+void Aim(uint8_t* pawn, float dt, DWORD now)
+{
+    // every free hand points; the one in use keeps it while it has a pickup, else a free hand that points at one
+    bool free[2] = {
+        !VRTwoHanded() && WeaponsMeleeHeld() != 0 && GrenadeHand() != 0 && VRGunHand() != 0,
+        !VRTwoHanded() && VRRightEmpty() && WeaponsMeleeHeld() != 1 && GrenadeHand() != 1 };
+    float hp[2][3], hf[2][3], hr[2][3];
+    int found[2] = { -1, -1 };
+    for (int h = 0; h < 2; h++) {
+        if (free[h] && !IKHandWorld(h, hp[h], hf[h], hr[h])) free[h] = false;
+        if (free[h]) found[h] = PointedPickup(pawn, hp[h], hf[h]);
+        g_points[h] = found[h] >= 0;
+    }
+    int want = InterlockedExchange(&g_grabHand, -1);   // a grip was squeezed (PullGrab)
+    bool kept = g_hand >= 0 && free[g_hand] && (found[g_hand] >= 0 || (g_target && now - g_targetAt <= 600));
+    int hand = kept ? g_hand : free[0] && found[0] >= 0 ? 0 : free[1] && found[1] >= 0 ? 1
+             : g_hand >= 0 && free[g_hand] ? g_hand : free[0] ? 0 : free[1] ? 1 : -1;
+    if (want >= 0 && want != hand && free[want] && found[want] >= 0) hand = want;
+    if (want >= 0 && want != hand) g_grabNow = 0;   // that hand points at nothing
+    if (hand != g_hand) { g_prevValid = false; g_target = nullptr; g_hand = hand; }
+    if (hand < 0) { g_prevValid = false; g_target = nullptr; return; }
+    float* pos = hp[hand], * fwd = hf[hand], * rel = hr[hand];
+
+    // hand velocity relative to the body (walking and turning do not count)
+    if (g_prevValid && dt > 0) {
+        float d[3], len2 = 0;
+        for (int k = 0; k < 3; k++) { d[k] = (rel[k] - g_prevRel[k]) / dt; len2 += (rel[k] - g_prevRel[k]) * (rel[k] - g_prevRel[k]); }
+        if (len2 < 100.0f * 100.0f) {   // (a snap turn jumps)
+            float a = fminf(dt / 0.04f, 1.0f);
+            for (int k = 0; k < 3; k++) g_vel[k] += (d[k] - g_vel[k]) * a;
+        }
+    }
+    memcpy(g_prevRel, rel, sizeof(g_prevRel));
+    g_prevValid = true;
+
+    int best = found[hand];
     if (g_debugAim) {
         g_debugAim = false;
-        Log("pull: left hand at %.0f %.0f %.0f points %.2f %.2f %.2f", pos[0], pos[1], pos[2], fwd[0], fwd[1], fwd[2]);
+        Log("pull: hand %d at %.0f %.0f %.0f points %.2f %.2f %.2f", hand, pos[0], pos[1], pos[2], fwd[0], fwd[1], fwd[2]);
         for (int i = 0; i < g_count; i++) {
             Vec3f l = g_list[i].loc;
             float d[3] = { l.x - pos[0], l.y - pos[1], l.z - pos[2] };
@@ -416,7 +438,8 @@ void PullUpdate(void* pawnPtr)
 // VR input: hand h's grip was just squeezed - true (and the pickup flies) when that hand points at one
 bool PullGrab(int h)
 {
-    if (h != g_hand || !g_target || g_fly.actor) return false;
+    if (h < 0 || h > 1 || g_fly.actor || !(g_points[h] || (h == g_hand && g_target))) return false;
+    g_grabHand = h;
     g_grabNow = 1;
     return true;
 }

@@ -51,6 +51,9 @@ static void LoadConfig()
                   "FpsLimit=120\n"
                   "; Cap while the headset is connected (the OpenXR runtime paces each tick via xrWaitFrame).\n"
                   "VRFpsLimit=300\n"
+                  "; Texture streaming budget in MB (the game allows 250 at most: at high resolutions models go blurry).\n"
+                  "; 0 = leave the game's own.\n"
+                  "TexturePoolMB=1024\n"
                   "; Language of the mod's VR menu and weapon wheel: auto (from Windows), en or ru\n"
                   "Language=auto\n"
                   "\n[VR]\n"
@@ -203,6 +206,7 @@ static void LoadConfig()
     }
     g_cfg.fpsLimit = IniFloat(ini, L"General", L"FpsLimit", g_cfg.fpsLimit);
     g_cfg.vrFpsLimit = IniFloat(ini, L"General", L"VRFpsLimit", g_cfg.vrFpsLimit);
+    g_cfg.texturePoolMB = IniFloat(ini, L"General", L"TexturePoolMB", g_cfg.texturePoolMB);
     g_cfg.vrEnabled = (int)IniFloat(ini, L"VR", L"Enabled", (float)g_cfg.vrEnabled);
     g_cfg.vrMode = (int)IniFloat(ini, L"VR", L"Mode", (float)g_cfg.vrMode);
     g_cfg.worldScale = IniFloat(ini, L"VR", L"WorldScale", g_cfg.worldScale);
@@ -319,6 +323,11 @@ static void LoadConfig()
     g_cfg.armSize = IniFloat(ini, L"VR", L"ArmSize", g_cfg.armSize);
     g_cfg.handScale = IniFloat(ini, L"VR", L"HandScale", g_cfg.handScale);
     g_cfg.weaponScale = IniFloat(ini, L"VR", L"WeaponScale", g_cfg.weaponScale);
+    {
+        // the game sizes weapons per character, so the size is the character's own once set (the grips stay shared)
+        std::wstring who = IKCharacter();
+        if (!who.empty()) g_cfg.weaponScale = IniFloat(ini, (L"Character." + who).c_str(), L"WeaponScale", g_cfg.weaponScale);
+    }
     g_cfg.muzzleFlashScale = IniFloat(ini, L"VR", L"MuzzleFlashScale", g_cfg.muzzleFlashScale);
     {
         // the mod's own text (VR menu, weapon wheel): en / ru, or auto = Russian for a Russian, Ukrainian or
@@ -361,18 +370,21 @@ static void LoadConfig()
 void ConfigReloadIfChanged()
 {
     static FILETIME last;
+    static std::wstring lastWho;   // another character: its own weapon size
     WIN32_FILE_ATTRIBUTE_DATA a;
     if (!GetFileAttributesExW((ModDir() + L"twfcvr.ini").c_str(), GetFileExInfoStandard, &a)) return;
-    if (!last.dwLowDateTime && !last.dwHighDateTime) { last = a.ftLastWriteTime; return; }
-    if (CompareFileTime(&a.ftLastWriteTime, &last) == 0) return;
+    std::wstring who = IKCharacter();
+    if (!last.dwLowDateTime && !last.dwHighDateTime) { last = a.ftLastWriteTime; lastWho = who; return; }
+    if (CompareFileTime(&a.ftLastWriteTime, &last) == 0 && who == lastWho) return;
     last = a.ftLastWriteTime;
+    lastWho = who;
     // Startup-only values (render size) keep their original effect; everything else applies live.
     int rw = g_cfg.renderWidth, rh = g_cfg.renderHeight;
     LoadConfig();
     g_cfg.renderWidth = rw;
     g_cfg.renderHeight = rh;
-    Log("config reloaded: worldScale %.0f eyeHeight %.0f camera %d aim %d snap %d", g_cfg.worldScale, g_cfg.eyeHeight,
-        g_cfg.cameraMode, g_cfg.aimMode, g_cfg.snapTurnDeg);
+    Log("config reloaded: worldScale %.0f eyeHeight %.0f camera %d aim %d snap %d, weapon size %.2f (%ls)", g_cfg.worldScale,
+        g_cfg.eyeHeight, g_cfg.cameraMode, g_cfg.aimMode, g_cfg.snapTurnDeg, g_cfg.weaponScale, who.empty() ? L"shared" : who.c_str());
 }
 
 static DWORD WINAPI InitThread(LPVOID)

@@ -16,6 +16,7 @@ void ConfigReloadIfChanged();   // re-reads twfcvr.ini when it was saved (tuning
 struct Config {
     float fpsLimit = 120.0f;        // 0 = leave game default
     float vrFpsLimit = 300.0f;      // cap while the headset session runs (the headset paces the game)
+    float texturePoolMB = 1024.0f;  // texture streaming budget written into the engine (game: 250 at most); 0 = leave it
     int   vrEnabled = 1;
     int   vrMode = 1;               // 0 = theater (virtual screen) always, 1 = stereo 3D in gameplay
     float worldScale = 200.0f;       // Unreal units per real metre for head movement
