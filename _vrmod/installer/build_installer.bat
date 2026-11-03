@@ -1,5 +1,5 @@
 @echo off
-rem Builds the mod's setup: ..\dist\TWFC-VR-Setup.exe (run ..\build.bat first for xinput1_3.dll).
+rem Builds the mod's setup: ..\dist\TWFC-VR-Setup.exe and TWFC-VR-Setup-Steam.exe (run ..\build.bat first for xinput1_3.dll).
 rem Needs only the .NET Framework 4 compiler that ships with Windows.
 setlocal
 set HERE=%~dp0
@@ -26,4 +26,6 @@ set R=
 for %%f in (xinput1_3.dll openxr_loader.dll D3D9.dll dgVoodoo.conf launch_en.bat launch_ru.bat readme_en.txt readme_ru.txt) do call set R=%%R%% /resource:"%STAGE%\%%f",%%f
 set R=%R% /resource:"%HERE%..\docs\controls_en.png",controls_en.png /resource:"%HERE%..\docs\controls_ru.png",controls_ru.png
 "%CSC%" /nologo /codepage:65001 /target:winexe /optimize+ /r:System.Windows.Forms.dll /r:System.Drawing.dll %R% /out:"%HERE%..\dist\TWFC-VR-Setup.exe" "%HERE%Installer.cs" || exit /b 1
-echo SETUP OK: _vrmod\dist\TWFC-VR-Setup.exe
+rem the same setup for the Steam version (always writes BinariesVR\steam_appid.txt, no version warning)
+"%CSC%" /nologo /codepage:65001 /target:winexe /optimize+ /define:STEAM /r:System.Windows.Forms.dll /r:System.Drawing.dll %R% /out:"%HERE%..\dist\TWFC-VR-Setup-Steam.exe" "%HERE%Installer.cs" || exit /b 1
+echo SETUP OK: _vrmod\dist\TWFC-VR-Setup.exe, _vrmod\dist\TWFC-VR-Setup-Steam.exe

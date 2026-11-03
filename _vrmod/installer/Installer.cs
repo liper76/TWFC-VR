@@ -16,16 +16,81 @@ using Microsoft.Win32;
 
 [assembly: AssemblyTitle("TWFC VR mod setup")]
 [assembly: AssemblyProduct("Transformers: War for Cybertron VR mod")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.0.1.0")]
+[assembly: AssemblyFileVersion("1.0.1.0")]
 
 static class Setup
 {
-    public const string Version = "1.0";
+#if STEAM   // TWFC-VR-Setup-Steam.exe: the same installer for the Steam version (always writes steam_appid.txt)
+    public const string Version = "1.0.1 Steam";
+    public const bool SteamBuild = true;
+#else
+    public const string Version = "1.0.1";
+    public const bool SteamBuild = false;
+#endif
     public const string KnownExeMd5 = "69acde90af160650ee5f60fff2f57d50";
 
-    // Game files the VR copy needs (copied from Binaries; D3D9.dll is ours - dgVoodoo)
-    static readonly string[] GameFiles = { "TWFC.exe", "PhysXExtensions.dll", "binkw32.dll", "cudart.dll", "fmodex.dll", "nvtt.dll" };
+    // Game files the VR copy needs: TWFC.exe and every DLL next to it (the Steam version also has
+    // steam_api.dll / Steam.dll ...), except the ones the mod brings (D3D9.dll is dgVoodoo).
+    static readonly string[] OwnDlls = { "d3d9.dll", "xinput1_3.dll", "openxr_loader.dll" };
+    public const string SteamAppIdTWFC = "42650";
+
+    static List<string> GameFiles(string bin)
+    {
+        var l = new List<string> { "TWFC.exe" };
+        if (Directory.Exists(bin))
+            foreach (var f in Directory.GetFiles(bin, "*.dll")) {
+                string n = Path.GetFileName(f);
+                if (Array.IndexOf(OwnDlls, n.ToLowerInvariant()) < 0) l.Add(n);
+            }
+        return l;
+    }
+
+    // The Steam version: its app id (from the library's appmanifest_<id>.acf for this folder), else null.
+    // A copy of a Steam game's exe started from another folder needs steam_appid.txt next to it, or Steam
+    // refuses it ("Application load error 3:0000065432").
+    public static string SteamAppId(string game)
+    {
+        string g = game.TrimEnd('\\', '/');
+        try {
+            string steamapps = Path.GetDirectoryName(Path.GetDirectoryName(g));
+            string dir = Path.GetFileName(g);
+            if (steamapps != null && Directory.Exists(steamapps))
+                foreach (var acf in Directory.GetFiles(steamapps, "appmanifest_*.acf")) {
+                    string t = File.ReadAllText(acf);
+                    var m = Regex.Match(t, "\"installdir\"\\s+\"([^\"]+)\"");
+                    var id = Regex.Match(t, "\"appid\"\\s+\"(\\d+)\"");
+                    if (m.Success && id.Success && string.Equals(m.Groups[1].Value, dir, StringComparison.OrdinalIgnoreCase))
+                        return id.Groups[1].Value;
+                }
+        } catch { }
+        string bin = Path.Combine(g, "Binaries");
+        bool steamDlls = File.Exists(Path.Combine(bin, "steam_api.dll")) || File.Exists(Path.Combine(bin, "Steam.dll"));
+        if (SteamBuild || steamDlls || g.IndexOf(@"\steamapps\", StringComparison.OrdinalIgnoreCase) >= 0) return SteamAppIdTWFC;
+        return null;
+    }
+
+    // PE timestamp, size and section names (for the log: which build this is; ".bind" = Steam's DRM wrapper)
+    public static string ExeInfo(string exe, out bool steamStub)
+    {
+        steamStub = false;
+        using (var f = File.OpenRead(exe)) {
+            var br = new BinaryReader(f);
+            f.Position = 0x3C; int pe = br.ReadInt32();
+            f.Position = pe + 6; int nsec = br.ReadUInt16();
+            uint stamp = br.ReadUInt32();
+            f.Position = pe + 20; int optSize = br.ReadUInt16();
+            long secAt = pe + 24 + optSize;
+            var names = new List<string>();
+            for (int i = 0; i < nsec && i < 32; i++) {
+                f.Position = secAt + 40 * i;
+                string n = Encoding.ASCII.GetString(br.ReadBytes(8)).TrimEnd('\0');
+                names.Add(n);
+                if (n == ".bind") steamStub = true;
+            }
+            return "PE timestamp " + stamp + ", size " + f.Length + ", sections " + string.Join(" ", names.ToArray());
+        }
+    }
     // Resource name -> path relative to the game folder
     static readonly string[,] Payload = {
         { "xinput1_3.dll",     @"BinariesVR\xinput1_3.dll" },
@@ -183,16 +248,30 @@ static class Setup
     {
         string bin = Path.Combine(game, "Binaries"), vr = Path.Combine(game, "BinariesVR");
         Directory.CreateDirectory(vr);
-        foreach (var f in GameFiles) {
+        string srcExe = Path.Combine(bin, "TWFC.exe");
+        bool stub = false;
+        try { log("Binaries\\TWFC.exe: md5 " + Md5(srcExe) + ", " + ExeInfo(srcExe, out stub)); } catch { }
+        foreach (var f in GameFiles(bin)) {
             string src = Path.Combine(bin, f);
             if (!File.Exists(src)) throw new FileNotFoundException(T("Game file not found: ", "\u041d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d \u0444\u0430\u0439\u043b \u0438\u0433\u0440\u044b: ") + src);
             File.Copy(src, Path.Combine(vr, f), true);
             log("Binaries\\" + f + " -> BinariesVR");
         }
         string exe = Path.Combine(vr, "TWFC.exe");
-        File.Copy(exe, exe + ".noLAA", true);
-        log(SetLargeAddressAware(exe) ? T("TWFC.exe (VR copy): 4 GB memory flag set", "TWFC.exe (\u043a\u043e\u043f\u0438\u044f \u0434\u043b\u044f VR): \u0432\u043a\u043b\u044e\u0447\u0451\u043d \u0444\u043b\u0430\u0433 \u043f\u0430\u043c\u044f\u0442\u0438 4 \u0413\u0411")
-                                      : T("TWFC.exe: 4 GB memory flag already set", "TWFC.exe: \u0444\u043b\u0430\u0433 \u043f\u0430\u043c\u044f\u0442\u0438 4 \u0413\u0411 \u0443\u0436\u0435 \u0441\u0442\u043e\u0438\u0442"));
+        string appId = SteamAppId(game);
+        if (appId != null) {
+            File.WriteAllText(Path.Combine(vr, "steam_appid.txt"), appId);
+            log(T("Steam version (app " + appId + "): BinariesVR\\steam_appid.txt written - keep Steam running when you play",
+                  "\u0412\u0435\u0440\u0441\u0438\u044f Steam (app " + appId + "): \u0437\u0430\u043f\u0438\u0441\u0430\u043d BinariesVR\\steam_appid.txt - Steam \u0434\u043e\u043b\u0436\u0435\u043d \u0431\u044b\u0442\u044c \u0437\u0430\u043f\u0443\u0449\u0435\u043d \u0432\u043e \u0432\u0440\u0435\u043c\u044f \u0438\u0433\u0440\u044b"));
+        }
+        if (stub) {   // Steam's DRM wrapper checks the exe: it stays exactly as Steam installed it
+            log(T("TWFC.exe has Steam's DRM wrapper: left unchanged (no 4 GB memory flag)",
+                  "TWFC.exe \u0432 DRM-\u043e\u0431\u0451\u0440\u0442\u043a\u0435 Steam: \u043e\u0441\u0442\u0430\u0432\u043b\u0435\u043d \u043a\u0430\u043a \u0435\u0441\u0442\u044c (\u0431\u0435\u0437 \u0444\u043b\u0430\u0433\u0430 \u043f\u0430\u043c\u044f\u0442\u0438 4 \u0413\u0411)"));
+        } else {
+            File.Copy(exe, exe + ".noLAA", true);
+            log(SetLargeAddressAware(exe) ? T("TWFC.exe (VR copy): 4 GB memory flag set", "TWFC.exe (\u043a\u043e\u043f\u0438\u044f \u0434\u043b\u044f VR): \u0432\u043a\u043b\u044e\u0447\u0451\u043d \u0444\u043b\u0430\u0433 \u043f\u0430\u043c\u044f\u0442\u0438 4 \u0413\u0411")
+                                          : T("TWFC.exe: 4 GB memory flag already set", "TWFC.exe: \u0444\u043b\u0430\u0433 \u043f\u0430\u043c\u044f\u0442\u0438 4 \u0413\u0411 \u0443\u0436\u0435 \u0441\u0442\u043e\u0438\u0442"));
+        }
         for (int i = 0; i < Payload.GetLength(0); i++) {
             var data = Res(Payload[i, 0]);
             if (data == null) continue;
@@ -213,7 +292,8 @@ static class Setup
     {
         string vr = Path.Combine(game, "BinariesVR");
         var names = new List<string>();
-        foreach (var f in GameFiles) names.Add(Path.Combine(vr, f));
+        foreach (var f in GameFiles(Path.Combine(game, "Binaries"))) names.Add(Path.Combine(vr, f));
+        names.Add(Path.Combine(vr, "steam_appid.txt"));
         foreach (var f in RunFiles) names.Add(Path.Combine(vr, f));
         names.Add(Path.Combine(vr, "twfcvr.ini.bak"));
         for (int i = 0; i < Payload.GetLength(0); i++) names.Add(Path.Combine(game, Payload[i, 1]));
@@ -318,11 +398,13 @@ class SetupForm : Form
         if (doInstall) {
             string md5 = "";
             try { md5 = Setup.Md5(Path.Combine(game, @"Binaries\TWFC.exe")); } catch { }
-            if (md5 != Setup.KnownExeMd5 &&
+            if (md5 != Setup.KnownExeMd5 && !Setup.SteamBuild &&
                 MessageBox.Show(this, T("Binaries\\TWFC.exe is not the version the mod was made for (PC, patch with the 2016 exe).\n" +
-                    "The mod finds the game's code by its addresses and may not work with it. Install anyway?",
+                    "The mod finds the game's code by its addresses: with another build (Steam...) it starts, but some of it may not work.\n" +
+                    "If so, please send BinariesVR\\twfcvr.log and the install log. Install anyway?",
                     "Binaries\\TWFC.exe \u2014 \u043d\u0435 \u0442\u0430 \u0432\u0435\u0440\u0441\u0438\u044f, \u043f\u043e\u0434 \u043a\u043e\u0442\u043e\u0440\u0443\u044e \u0441\u0434\u0435\u043b\u0430\u043d \u043c\u043e\u0434 (PC, exe 2016 \u0433\u043e\u0434\u0430).\n" +
-                    "\u041c\u043e\u0434 \u0438\u0449\u0435\u0442 \u043a\u043e\u0434 \u0438\u0433\u0440\u044b \u043f\u043e \u0430\u0434\u0440\u0435\u0441\u0430\u043c \u0438 \u043c\u043e\u0436\u0435\u0442 \u0441 \u043d\u0435\u0439 \u043d\u0435 \u0440\u0430\u0431\u043e\u0442\u0430\u0442\u044c. \u0412\u0441\u0451 \u0440\u0430\u0432\u043d\u043e \u0443\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u044c?"),
+                    "\u041c\u043e\u0434 \u0438\u0449\u0435\u0442 \u043a\u043e\u0434 \u0438\u0433\u0440\u044b \u043f\u043e \u0430\u0434\u0440\u0435\u0441\u0430\u043c: \u0441 \u0434\u0440\u0443\u0433\u043e\u0439 \u0441\u0431\u043e\u0440\u043a\u043e\u0439 (Steam...) \u043e\u043d \u0437\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u0441\u044f, \u043d\u043e \u0447\u0430\u0441\u0442\u044c \u043c\u043e\u0436\u0435\u0442 \u043d\u0435 \u0440\u0430\u0431\u043e\u0442\u0430\u0442\u044c.\n" +
+                    "\u0422\u043e\u0433\u0434\u0430 \u043f\u0440\u0438\u0448\u043b\u0438\u0442\u0435 BinariesVR\\twfcvr.log \u0438 \u043b\u043e\u0433 \u0443\u0441\u0442\u0430\u043d\u043e\u0432\u043a\u0438. \u0412\u0441\u0451 \u0440\u0430\u0432\u043d\u043e \u0443\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u044c?"),
                     Text, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
         } else if (MessageBox.Show(this, T("Remove the VR mod (BinariesVR, its settings, the VR launchers and instructions)?\nThe game itself stays.",
                     "\u0423\u0434\u0430\u043b\u0438\u0442\u044c VR-\u043c\u043e\u0434 (BinariesVR, \u0435\u0433\u043e \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438, \u0437\u0430\u043f\u0443\u0441\u043a VR \u0438 \u0438\u043d\u0441\u0442\u0440\u0443\u043a\u0446\u0438\u0438)?\n\u0421\u0430\u043c\u0430 \u0438\u0433\u0440\u0430 \u043e\u0441\u0442\u0430\u043d\u0435\u0442\u0441\u044f."),
