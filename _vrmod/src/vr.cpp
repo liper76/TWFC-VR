@@ -175,7 +175,7 @@ struct XR {
     DWORD gripAt[2] = {};     // grip squeezed since
     DWORD bAt = 0;            // B held since (VR layout: second ability / the weapon wheel)
     bool bHeld = false;       // ... long enough: the wheel (no tap)
-    int bPulse = 0;           // a tap of B: the second ability (LB) for a few updates
+    int bPulse = 0;           // a tap of B: the main ability (RB) for a few updates
     int exitPulse = 0;        // the game's use button (X) for a few updates: off a mounted turret
     DWORD throwAt = 0;        // grenade throw gesture
     int throwPulse = 0;
@@ -1170,15 +1170,15 @@ static void UpdateInput()
     } else {
         // VR layout: the grips hold things (the weapon's front, grenades, pickups); the left trigger stays the game's
         // (fine aim / the weapon's second action, e.g. detonating grenades; vehicle boost). A = jump, X = the game's X
-        // (reload, use), the right click = main ability (RB) for as long as it is down. B tapped = second ability (LB),
+        // (reload, use), the right click = second ability (LB) for as long as it is down. B tapped = main ability (RB),
         // held = the weapon wheel (UpdateWeaponWheel). Y = the game's B (the grenade throw). The right stick only turns
         // (its vertical axis is not the game's: the head looks up and down). The left click = transform (LS, one
         // press). Grenades also from the belt with a grip. Melee: a punch forward with a hand.
         UpdateWeaponWheel(p, grip, now);   // (takes up B)
         p.sThumbRY = 0;
-        if (xr.bPulse > 0) { p.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER; xr.bPulse--; }
+        if (xr.bPulse > 0) { p.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER; xr.bPulse--; }
         if (GetBool(xr.btn[kY])) p.wButtons |= XINPUT_GAMEPAD_B;
-        if (GetBool(xr.btn[kRClick])) p.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+        if (GetBool(xr.btn[kRClick])) p.wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
         if (GetBool(xr.btn[kLClick])) p.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
         if (xr.exitPulse > 0) { p.wButtons |= XINPUT_GAMEPAD_X; xr.exitPulse--; }
     }
@@ -1760,7 +1760,7 @@ static void UpdateWeaponWheel(XINPUT_GAMEPAD& p, const float grip[2], DWORD now)
     }
     // The wheel is on B held (not the grips: grabbing things kept opening it; not the stick clicks: they wear the
     // sticks; the right stick held down was tried - in the headset it never stayed down long enough): B held 0.35 s
-    // opens the right hand's wheel, let go to take the slot under the hand; a short B is the second ability (LB),
+    // opens the right hand's wheel, let go to take the slot under the hand; a short B is the main ability (RB),
     // sent when it is let go. In vehicle form B held switches the vehicle's weapon (the game's "next weapon").
     bool vehicle = IKPawnIsVehicle();
     if (!debug) {
@@ -1774,7 +1774,7 @@ static void UpdateWeaponWheel(XINPUT_GAMEPAD& p, const float grip[2], DWORD now)
             }
         } else if (xr.bAt) {
             if (w.open && w.hand == 1) WheelChoose();
-            else if (!xr.bHeld) { xr.bPulse = 8; if (g_cfg.logFps) Log("vr: B tapped -> second ability"); }
+            else if (!xr.bHeld) { xr.bPulse = 8; if (g_cfg.logFps) Log("vr: B tapped -> main ability"); }
             if (w.open && w.hand == 1) w.open = false;
             xr.bAt = 0;
             xr.bHeld = false;
