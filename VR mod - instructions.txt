@@ -42,7 +42,8 @@ CONTROLS (main mode; the buttons work like an Xbox gamepad)
                                     empty hand - pick the gun). (The grips do not open the wheel - they only
                                     grab.) In a vehicle, holding B switches the vehicle's weapon.
   Y (left controller) ............. grenade (the game's B); grenades also from the belt with the grip
-  Right stick ..................... only turns: up/down do nothing (you look up and down with your head)
+  Right stick up / down ........... previous / next weapon (one flick - one weapon; an empty right hand first
+                                    takes the gun back; in a vehicle - the vehicle's next weapon)
   Left stick click ................ transform.
                                     Empty right hand: the gun is put away and does not fire, the hand is free
                                     (grenades from the belt, pulling, fingers); its position on the controller
