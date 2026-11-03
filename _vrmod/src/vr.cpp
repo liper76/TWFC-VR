@@ -176,6 +176,7 @@ struct XR {
     DWORD bAt = 0;            // B held since (VR layout: second ability / the weapon wheel)
     bool bHeld = false;       // ... long enough: the wheel (no tap)
     int bPulse = 0;           // a tap of B: the main ability (RB) for a few updates
+    int stickDir = 0;         // the right stick held up (1) or down (-1) - not sideways (VR layout: weapon up / down)
     int exitPulse = 0;        // the game's use button (X) for a few updates: off a mounted turret
     DWORD throwAt = 0;        // grenade throw gesture
     int throwPulse = 0;
@@ -1171,10 +1172,12 @@ static void UpdateInput()
         // VR layout: the grips hold things (the weapon's front, grenades, pickups); the left trigger stays the game's
         // (fine aim / the weapon's second action, e.g. detonating grenades; vehicle boost). A = jump, X = the game's X
         // (reload, use), the right click = second ability (LB) for as long as it is down. B tapped = main ability (RB),
-        // held = the weapon wheel (UpdateWeaponWheel). Y = the game's B (the grenade throw). The right stick only turns
-        // (its vertical axis is not the game's: the head looks up and down). The left click = transform (LS, one
-        // press). Grenades also from the belt with a grip. Melee: a punch forward with a hand.
-        UpdateWeaponWheel(p, grip, now);   // (takes up B)
+        // held = the weapon wheel (UpdateWeaponWheel). Y = the game's B (the grenade throw). The right stick turns
+        // sideways; flicked up = the previous weapon, down = the next one (its vertical axis is not the game's: the
+        // head looks up and down). The left click = transform (LS, one press). Grenades also from the belt with a
+        // grip. Melee: a punch forward with a hand.
+        UpdateWeaponWheel(p, grip, now);   // (takes up B and the right stick's direction)
+        if (xr.stickDir) p.sThumbRX = 0;   // (held up or down: no turning meanwhile)
         p.sThumbRY = 0;
         if (xr.bPulse > 0) { p.wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER; xr.bPulse--; }
         if (GetBool(xr.btn[kY])) p.wButtons |= XINPUT_GAMEPAD_B;
@@ -1737,6 +1740,41 @@ static void WheelChoose()
 static volatile int g_dbgWheelHand = -2, g_dbgWheelHot = -1;   // debug "wheel <hand> <slot>" (hand -1 = choose)
 void VRDebugWheel(int hand, int hot) { g_dbgWheelHot = hot; g_dbgWheelHand = hand; }
 
+// The right stick pushed well up (1) or down (-1), not sideways (that turns); once held, it lets go only near the
+// middle.
+static int StickVertical(XrVector2f s, int was)
+{
+    float ax = fabsf(s.x), ay = fabsf(s.y);
+    if (was && s.y * was > 0.4f && ay > ax) return was;
+    if (ay > 0.7f && ay > ax * 1.5f) return s.y > 0 ? 1 : -1;
+    return 0;
+}
+
+// The right stick flicked up (dir 1) = the previous weapon of the list, down (-1) = the next one; an empty right hand
+// (or the melee weapon in it) takes its gun back first. Inventory unknown or vehicle form: the game's "next weapon".
+static void WheelStepWeapon(int dir, bool vehicle)
+{
+    Wheel& w = g_wheel;
+    xr.twoHand = false;
+    VRHaptic(1, 0.6f, 0.05f);
+    if (vehicle) { w.presses = 1; Log("vr: right stick -> next vehicle weapon"); return; }
+    bool back = false;
+    if (WeaponsMeleeHand() == 1) { WeaponsSetMeleeHand(-1); back = true; }
+    if (g_gunHand == 1 && g_rightEmpty) { g_rightEmpty = false; back = true; }
+    if (back) { Log("vr: right stick -> the gun back in the right hand"); return; }
+    WeaponList wl;
+    WeaponsGetList(wl);
+    if (wl.count < 2 || wl.current < 0) {
+        w.presses = 1;
+        Log("vr: right stick %s -> next weapon (list unknown)", dir > 0 ? "up" : "down");
+        return;
+    }
+    int i = (wl.current + (dir > 0 ? wl.count - 1 : 1)) % wl.count;
+    g_gunHand = 1;
+    WeaponsSelect(i);
+    Log("vr: right stick %s -> weapon %d of %d", dir > 0 ? "up" : "down", i, wl.count);
+}
+
 // grip[h]: squeeze of each hand; a hand whose grip holds the weapon's front (two-handed) does not open a wheel.
 static void UpdateWeaponWheel(XINPUT_GAMEPAD& p, const float grip[2], DWORD now)
 {
@@ -1745,6 +1783,7 @@ static void UpdateWeaponWheel(XINPUT_GAMEPAD& p, const float grip[2], DWORD now)
     if (g_setup.active) {   // the grips set up the gun there
         w.open = false;
         xr.gripAt[0] = xr.gripAt[1] = 0;
+        xr.stickDir = 0;
         xr.bAt = 0;
         xr.bHeld = false;
         return;
@@ -1778,6 +1817,12 @@ static void UpdateWeaponWheel(XINPUT_GAMEPAD& p, const float grip[2], DWORD now)
             if (w.open && w.hand == 1) w.open = false;
             xr.bAt = 0;
             xr.bHeld = false;
+        }
+        // the right stick flicked up / down: the previous / next weapon, once per flick (not while the wheel is open)
+        int dir = StickVertical(GetStick(xr.stick[1]), xr.stickDir);
+        if (dir != xr.stickDir) {
+            xr.stickDir = dir;
+            if (dir && !w.open) WheelStepWeapon(dir, vehicle);
         }
     }
     (void)grip;
