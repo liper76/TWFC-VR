@@ -156,6 +156,8 @@ float IKRobotEyeHeight();                    // ik.cpp: the robot's eye height a
 float IKRobotArmSpan();                     // ik.cpp: the robot's arm span, world units (0 = not measured yet)
 void* IKPawn();                          // ik.cpp: the player's pawn in first person (null otherwise)
 void GameEarlyPatches();                   // DllMain: rendering on the game thread (SingleThreadRender)
+bool GameCodeEncrypted();                    // the Steam version: the DRM wrapper has not decrypted the code yet
+void GameStartWhenDecrypted(void (*start)());   // ... start() once it has (before WinMain)
 bool GameSingleThreadRender();               // the engine has no render thread: presents happen inside the game tick
 DWORD GameThreadId();                        // thread ID of the engine's main/game loop
 
