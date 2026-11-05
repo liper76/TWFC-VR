@@ -255,6 +255,12 @@ static DWORD WINAPI InitThread(LPVOID)
     return 0;
 }
 
+static void StartGamePatches()
+{
+    GameEarlyPatches();   // (before the engine starts its render thread)
+    CloseHandle(CreateThread(nullptr, 0, InitThread, nullptr, 0, nullptr));
+}
+
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH) {
@@ -268,11 +274,12 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID)
         // The resolution override must be in place before the game reads its settings at startup.
         LoadConfig();
         VRRenderSizeStart();  // (before the game reads the size)
-        GameEarlyPatches();   // (before the engine starts its render thread)
         RegistryInstallHooks();
         D3D9ModesInstall();
         WindowEarlyInit();
-        CloseHandle(CreateThread(nullptr, 0, InitThread, nullptr, 0, nullptr));
+        // The game's code: patched now, or (the Steam version's DRM wrapper) once the wrapper has decrypted it.
+        if (GameCodeEncrypted()) GameStartWhenDecrypted(StartGamePatches);
+        else StartGamePatches();
     }
     return TRUE;
 }

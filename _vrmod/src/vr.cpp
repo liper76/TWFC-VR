@@ -12,6 +12,7 @@
 #include <vector>
 #include <atomic>
 #include "MinHook.h"
+#pragma comment(lib, "advapi32.lib")   // the OpenXR runtime lookup (registry)
 
 #define XR_CHECK(call) do { XrResult _r = (call); if (XR_FAILED(_r)) { Log("vr: %s failed: %d", #call, (int)_r); return false; } } while (0)
 
@@ -1397,11 +1398,160 @@ static bool SaveHeadsetFov(XrTime time)
     return true;
 }
 
+// ---- A 32-bit OpenXR runtime ----
+// The game is 32-bit, so the loader reads the 32-bit registry view's ActiveRuntime (WOW6432Node). SteamVR (and other
+// runtimes) set only the 64-bit one when made the active runtime, though SteamVR ships a 32-bit build next to it
+// (steamxr_win32.json -> bin\vrclient.dll): the loader then finds no runtime (XR_ERROR_RUNTIME_UNAVAILABLE, the game
+// stayed flat - PSVR2 through SteamVR). Then a 32-bit manifest is looked for - next to the 64-bit active one, among
+// the 32-bit view's AvailableRuntimes, SteamVR's own - and given to the loader by XR_RUNTIME_JSON.
+
+static std::wstring RegString(HKEY root, const wchar_t* key, const wchar_t* value, REGSAM view)
+{
+    HKEY k;
+    if (RegOpenKeyExW(root, key, 0, KEY_READ | view, &k) != ERROR_SUCCESS) return L"";
+    wchar_t buf[MAX_PATH * 2] = {};
+    DWORD type = 0, size = sizeof(buf) - sizeof(wchar_t);
+    LSTATUS s = RegQueryValueExW(k, value, nullptr, &type, (BYTE*)buf, &size);
+    RegCloseKey(k);
+    return s == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ) ? buf : L"";
+}
+
+static std::wstring DirOf(const std::wstring& path)
+{
+    size_t s = path.find_last_of(L"\\/");
+    return s == std::wstring::npos ? L"" : path.substr(0, s + 1);
+}
+
+// The manifest's runtime library, if it is a 32-bit (x86) DLL that exists.
+static bool Is32BitRuntimeManifest(const std::wstring& json)
+{
+    FILE* f = _wfopen(json.c_str(), L"rb");
+    if (!f) return false;
+    std::string text;
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0 && text.size() < 65536) text.append(buf, n);
+    fclose(f);
+    size_t p = text.find("\"library_path\"");
+    if (p == std::string::npos || (p = text.find(':', p)) == std::string::npos || (p = text.find('"', p)) == std::string::npos)
+        return false;
+    std::string lib;
+    for (p++; p < text.size() && text[p] != '"'; p++) {
+        if (text[p] == '\\' && p + 1 < text.size()) p++;   // \\ and \/
+        lib += text[p];
+    }
+    if (lib.empty()) return false;
+    std::wstring path(lib.begin(), lib.end());
+    bool absolute = path.size() > 1 && (path[1] == L':' || (path[0] == L'\\' && path[1] == L'\\'));
+    if (!absolute) path = DirOf(json) + path;
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    IMAGE_DOS_HEADER dos = {};
+    IMAGE_FILE_HEADER fh = {};
+    DWORD got = 0, sig = 0;
+    bool ok = ReadFile(h, &dos, sizeof(dos), &got, nullptr) && got == sizeof(dos) && dos.e_magic == IMAGE_DOS_SIGNATURE &&
+              SetFilePointer(h, dos.e_lfanew, nullptr, FILE_BEGIN) != INVALID_SET_FILE_POINTER &&
+              ReadFile(h, &sig, sizeof(sig), &got, nullptr) && sig == IMAGE_NT_SIGNATURE &&
+              ReadFile(h, &fh, sizeof(fh), &got, nullptr) && got == sizeof(fh) && fh.Machine == IMAGE_FILE_MACHINE_I386;
+    CloseHandle(h);
+    return ok;
+}
+
+// SteamVR's folder (openvrpaths.vrpath, written by SteamVR: "runtime" : [ "<folder>" ]).
+static std::wstring SteamVRFolder()
+{
+    wchar_t la[MAX_PATH];
+    if (!GetEnvironmentVariableW(L"LOCALAPPDATA", la, MAX_PATH)) return L"";
+    FILE* f = _wfopen((std::wstring(la) + L"\\openvr\\openvrpaths.vrpath").c_str(), L"rb");
+    if (!f) return L"";
+    std::string text;
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0 && text.size() < 65536) text.append(buf, n);
+    fclose(f);
+    size_t p = text.find("\"runtime\"");
+    if (p == std::string::npos || (p = text.find('[', p)) == std::string::npos || (p = text.find('"', p)) == std::string::npos)
+        return L"";
+    std::string dir;
+    for (p++; p < text.size() && text[p] != '"'; p++) {
+        if (text[p] == '\\' && p + 1 < text.size()) p++;
+        dir += text[p];
+    }
+    if (dir.empty()) return L"";
+    int wn = MultiByteToWideChar(CP_UTF8, 0, dir.c_str(), -1, nullptr, 0);
+    std::wstring w(wn, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, dir.c_str(), -1, &w[0], wn);
+    w.resize(wcslen(w.c_str()));
+    if (!w.empty() && w.back() != L'\\' && w.back() != L'/') w += L'\\';
+    return w;
+}
+
+static std::wstring Find32BitRuntime(const std::wstring& active64);
+
+// Once: a 32-bit runtime manifest set as XR_RUNTIME_JSON, if none is registered for 32-bit apps. True if one was set.
+static bool UseA32BitRuntime()
+{
+    static bool tried;
+    if (tried) return false;
+    tried = true;
+    wchar_t env[8];
+    if (GetEnvironmentVariableW(L"XR_RUNTIME_JSON", env, 8)) return false;   // the user's own choice
+    const wchar_t* kKey = L"SOFTWARE\\Khronos\\OpenXR\\1";
+    std::wstring active64 = RegString(HKEY_LOCAL_MACHINE, kKey, L"ActiveRuntime", KEY_WOW64_64KEY);
+    std::wstring active32 = RegString(HKEY_LOCAL_MACHINE, kKey, L"ActiveRuntime", KEY_WOW64_32KEY);
+    if (!active32.empty() && Is32BitRuntimeManifest(active32)) return false;   // registered - just not running yet
+    Log("vr: no OpenXR runtime for 32-bit apps (32-bit ActiveRuntime '%ls', 64-bit '%ls') - looking for a 32-bit one",
+        active32.c_str(), active64.c_str());
+    std::wstring use = Find32BitRuntime(active64);
+    if (use.empty()) {
+        Log("vr: no 32-bit OpenXR runtime found - the game is 32-bit and needs one (SteamVR, Virtual Desktop)");
+        return false;
+    }
+    SetEnvironmentVariableW(L"XR_RUNTIME_JSON", use.c_str());
+    Log("vr: using the 32-bit runtime %ls", use.c_str());
+    return true;
+}
+
+// A 32-bit runtime manifest: the 64-bit active runtime's own 32-bit build, one registered for 32-bit apps but not
+// active, SteamVR's. Empty if none.
+static std::wstring Find32BitRuntime(const std::wstring& active64)
+{
+    std::vector<std::wstring> cand;
+    // the active runtime's own 32-bit build, next to it (SteamVR: steamxr_win32.json, Virtual Desktop: *-32.json)
+    std::wstring dir = DirOf(active64);
+    if (!dir.empty()) {
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((dir + L"*.json").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do cand.push_back(dir + fd.cFileName); while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+    }
+    // runtimes registered for 32-bit apps but not active
+    HKEY k;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Khronos\\OpenXR\\1\\AvailableRuntimes", 0, KEY_READ | KEY_WOW64_32KEY, &k) ==
+        ERROR_SUCCESS) {
+        wchar_t name[MAX_PATH * 2];
+        for (DWORD i = 0;; i++) {
+            DWORD nlen = MAX_PATH * 2, type = 0, val = 1, vlen = sizeof(val);
+            if (RegEnumValueW(k, i, name, &nlen, nullptr, &type, (BYTE*)&val, &vlen) != ERROR_SUCCESS) break;
+            if (type == REG_DWORD && val == 0) cand.push_back(name);
+        }
+        RegCloseKey(k);
+    }
+    std::wstring svr = SteamVRFolder();
+    if (!svr.empty()) cand.push_back(svr + L"steamxr_win32.json");
+    for (const std::wstring& c : cand)
+        if (Is32BitRuntimeManifest(c)) return c;
+    return L"";
+}
+
 static bool InitXR(ID3D11Device* dev)
 {
     g_retryLater = false;
     if (!xr.instance) {
         XrResult r = CreateXrInstance();
+        if (r == XR_ERROR_RUNTIME_UNAVAILABLE && UseA32BitRuntime()) r = CreateXrInstance();
         if (XR_FAILED(r)) {
             // No runtime running (e.g. Virtual Desktop streamer closed) - keep polling.
             Log("vr: xrCreateInstance failed: %d (will retry)", (int)r);

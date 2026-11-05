@@ -754,3 +754,100 @@ void GameStartPatchThread()
             Log("probe: camera FOV hook installed");
     }
 }
+
+// ---- Steam's DRM wrapper ----
+// The Steam version's TWFC.exe is wrapped by SteamStub (a ".bind" section): the game's code stays encrypted until the
+// wrapper's entry point decrypts it, after the DLLs' DllMain. Patched or hooked before that, the code was garbage
+// ("unexpected code", hooks FAILED) and the hooks written into it were scrambled by the decryption (the game ended
+// with a privileged instruction at its first frames). With the code still encrypted at DllMain, the start (the early
+// patches, then the hooks) waits for the game's own code to call the CRT's first Windows functions - decrypted then,
+// and before WinMain, so the render thread patch is still in time.
+
+static uintptr_t g_bindStart, g_bindEnd;   // the wrapper's section
+
+static bool HasBindSection()
+{
+    uintptr_t base = ExeBase();
+    auto nt = (IMAGE_NT_HEADERS32*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
+    IMAGE_SECTION_HEADER* s = IMAGE_FIRST_SECTION(nt);
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; i++, s++)
+        if (!memcmp(s->Name, ".bind", 6)) {
+            g_bindStart = base + s->VirtualAddress;
+            g_bindEnd = g_bindStart + std::max(s->Misc.VirtualSize, s->SizeOfRawData);
+            return true;
+        }
+    return false;
+}
+
+bool GameCodeEncrypted()
+{
+    if (!GameIsSupportedBuild() || !HasBindSection()) return false;
+    static const uint8_t expect[] = { 0xA3, 0x44, 0x0C, 0xB1, 0x12, 0xE9 };   // kStartRenderThreadTail
+    return memcmp((void*)addr::kStartRenderThreadTail, expect, sizeof(expect)) != 0;
+}
+
+static void (*g_decryptedStart)();
+static volatile LONG g_decryptedFired;
+
+static void DecryptedFire(const char* by)
+{
+    if (InterlockedExchange(&g_decryptedFired, 1)) return;
+    Log("game: Steam DRM wrapper done (%s) - patching the game's code", by);
+    g_decryptedStart();
+}
+
+// A call from the game's own code (in the image, not the wrapper's section) - the code is decrypted.
+static void DecryptedCheck(void* ret, const char* by)
+{
+    if (g_decryptedFired) return;
+    uintptr_t r = (uintptr_t)ret, base = ExeBase();
+    auto nt = (IMAGE_NT_HEADERS32*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
+    if (r < base || r >= base + nt->OptionalHeader.SizeOfImage || (r >= g_bindStart && r < g_bindEnd)) return;
+    DecryptedFire(by);
+}
+
+static void (WINAPI* g_origGetSystemTimeAsFileTime)(LPFILETIME);
+static void (WINAPI* g_origGetStartupInfoW)(LPSTARTUPINFOW);
+static void (WINAPI* g_origGetStartupInfoA)(LPSTARTUPINFOA);
+static void WINAPI HookGetSystemTimeAsFileTime(LPFILETIME t)
+{
+    DecryptedCheck(_ReturnAddress(), "GetSystemTimeAsFileTime");
+    g_origGetSystemTimeAsFileTime(t);
+}
+static void WINAPI HookGetStartupInfoW(LPSTARTUPINFOW s)
+{
+    DecryptedCheck(_ReturnAddress(), "GetStartupInfoW");
+    g_origGetStartupInfoW(s);
+}
+static void WINAPI HookGetStartupInfoA(LPSTARTUPINFOA s)
+{
+    DecryptedCheck(_ReturnAddress(), "GetStartupInfoA");
+    g_origGetStartupInfoA(s);
+}
+
+// Not seen from the game's code in time (another wrapper?): start anyway once the code reads as decrypted.
+static DWORD WINAPI DecryptedWatchdog(LPVOID)
+{
+    for (int i = 0; i < 600 && !g_decryptedFired; i++) {
+        Sleep(50);
+        if (i >= 100 && !GameCodeEncrypted()) break;   // 5 s on, the code is plain
+    }
+    if (!g_decryptedFired) Log("game: the DRM wrapper's end was not seen");
+    DecryptedFire("watchdog");
+    return 0;
+}
+
+void GameStartWhenDecrypted(void (*start)())
+{
+    g_decryptedStart = start;
+    Log("game: the code is encrypted (Steam DRM wrapper) - the patches wait for it to be decrypted");
+    MH_Initialize();
+    void* t;
+    if (MH_CreateHookApiEx(L"kernel32", "GetSystemTimeAsFileTime", (void*)HookGetSystemTimeAsFileTime,
+                           (void**)&g_origGetSystemTimeAsFileTime, &t) == MH_OK) MH_EnableHook(t);
+    if (MH_CreateHookApiEx(L"kernel32", "GetStartupInfoW", (void*)HookGetStartupInfoW, (void**)&g_origGetStartupInfoW, &t) == MH_OK)
+        MH_EnableHook(t);
+    if (MH_CreateHookApiEx(L"kernel32", "GetStartupInfoA", (void*)HookGetStartupInfoA, (void**)&g_origGetStartupInfoA, &t) == MH_OK)
+        MH_EnableHook(t);
+    CloseHandle(CreateThread(nullptr, 0, DecryptedWatchdog, nullptr, 0, nullptr));
+}
