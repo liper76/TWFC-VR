@@ -16,16 +16,16 @@ using Microsoft.Win32;
 
 [assembly: AssemblyTitle("TWFC VR mod setup")]
 [assembly: AssemblyProduct("Transformers: War for Cybertron VR mod")]
-[assembly: AssemblyVersion("1.0.2.0")]
-[assembly: AssemblyFileVersion("1.0.2.0")]
+[assembly: AssemblyVersion("1.0.3.0")]
+[assembly: AssemblyFileVersion("1.0.3.0")]
 
 static class Setup
 {
 #if STEAM   // TWFC-VR-Setup-Steam.exe: the same installer for the Steam version (always writes steam_appid.txt)
-    public const string Version = "1.0.2 Steam";
+    public const string Version = "1.0.3 Steam";
     public const bool SteamBuild = true;
 #else
-    public const string Version = "1.0.2";
+    public const string Version = "1.0.3";
     public const bool SteamBuild = false;
 #endif
     public const string KnownExeMd5 = "69acde90af160650ee5f60fff2f57d50";

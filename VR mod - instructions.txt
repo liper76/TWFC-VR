@@ -70,6 +70,8 @@ CONTROLS (main mode; the buttons work like an Xbox gamepad)
   (in a vehicle: a short B - the vehicle's special move)
   The old layout (grips = abilities, Y = next weapon): GripAbilities=1 in [Input].
   (in the old layout the stick clicks are LS / RS)
+  Keyboard (game window in focus): F2 - the VR settings menu (in gameplay; F2 or Esc - leave it), Esc - pause.
+    For controllers whose menu button SteamVR does not pass to the game (PSVR2).
   Menu button (left): short press .. Start (pause)
                       hold + press A (or hold 1.5 s) in gameplay ... SETUP MODE (the game gets no buttons
                       meanwhile; a floating panel with the VR SETTINGS MENU appears in front of you):
@@ -219,6 +221,16 @@ PHYSICAL CONTROLS (new)
   A grenade in the hand does not spin and stays silent until armed; a grenade is visible on the belt while you
     have any (GrenadeBelt); the size of the grenade on the belt and in the hand - GrenadeScale (0.5).
   Sharpness: 16x anisotropic filtering is enabled in BinariesVR\dgVoodoo.conf.
+
+IF THE HEADSET SHOWS THE FLAT GAME OR THE VR VERSION DOES NOT START
+- The game is 32-bit and needs a 32-bit OpenXR runtime. The mod finds it itself: the 32-bit build of the
+  runtime picked in Windows (SteamVR, Virtual Desktop, Meta), then the others installed. Editing the registry
+  (WOW6432Node ActiveRuntime) is no longer needed. Its choice is written at the top of BinariesVR	wfcvr.log
+  ("runtime choice ...").
+- Do not run the game as administrator: then Windows' OpenXR loader ignores the runtime the mod picks.
+- Steam version: start "Launch VR.bat" (not the game from the Steam library) with Steam running. If the game
+  still starts without VR, send BinariesVR	wfcvr.log: it now says who started the game, whether another
+  TWFC.exe is running and where it waits if no window appears.
 
 NOT DONE YET
 - Turning off camera shake, HUD markers in the world.
