@@ -321,6 +321,7 @@ void WindowEarlyInit();
 void DebugStart();
 bool DebugGetPad(XINPUT_GAMEPAD& out);
 void CrashTraceStart();                 // always: exceptions and the process's exit logged (the engine quits silently)
+void SteamCopyStart();                  // the Steam version started from BinariesVR: Steam's environment, a startup watch
 void LogMemory(const char* when);       // the 32-bit address space: in use, largest free block
 
 // ---- vr.cpp ----

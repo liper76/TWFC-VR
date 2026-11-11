@@ -271,6 +271,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID)
         if (!g_log) g_log = _wfsopen((ModDir() + L"twfcvr_2.log").c_str(), L"w", _SH_DENYWR);
         Log("TWFC VR mod loaded (build %s %s)", __DATE__, __TIME__);
         CrashTraceStart();
+        SteamCopyStart();   // (before the Steam DRM wrapper runs)
         // The resolution override must be in place before the game reads its settings at startup.
         LoadConfig();
         VRRenderSizeStart();  // (before the game reads the size)

@@ -1240,3 +1240,25 @@ $env:XR_RUNTIME_JSON="...\_vrmod\tools\mockxr\mockxr.json"; Start-Process Binari
   - притягивание правой рукой вживую — в тесте пикапы в 94 м за стенами;
   - Y = граната (лог не пишет);
   - всё в шлеме.
+
+## 2026-11-11 — issue #1 и #2: выбор 32-битного рантайма OpenXR, диагностика Steam, клавиши F2/Esc
+- **Рантайм (issue #2, PSVR2/SteamVR; issue #1 лог 1, `xrCreateInstance -32`):** SteamVR пишет только 64-битный
+  ActiveRuntime, а 32-битный ключ WOW6432Node может остаться от другого рантайма и указывать на удалённый файл.
+  Теперь (vr.cpp `RuntimePrepare`, `CreateXrInstanceAnyRuntime`) мод сам составляет список 32-битных манифестов:
+  32-битная сборка из папки 64-битного ActiveRuntime → зарегистрированный 32-битный → AvailableRuntimes (32) →
+  SteamVR из openvrpaths (steamxr_win32.json) → стандартные пути VD / Meta / SteamVR. Пробует по порядку через
+  XR_RUNTIME_JSON, удачный ставит первым. XR_RUNTIME_JSON пользователя не трогается. Если процесс от администратора
+  — предупреждение в логе (загрузчик тогда игнорирует XR_RUNTIME_JSON).
+- **Steam (issue #1 лог 2: DRM снят, хуки стоят, но окна нет 60 с, выход с кодом 1):** вероятно, Steam
+  перезапускает игру. debug.cpp `SteamCopyStart` (из DllMain, до обёртки DRM): если копия Steam (секция .bind
+  или steam_api.dll / steam_appid.txt рядом) — ставит SteamAppId/SteamGameId (из steam_appid.txt, иначе 42650),
+  пишет родительский процесс, другие TWFC.exe с путями, нет ли steam.exe. Поток-сторож: если через 20 и 45 с нет
+  окна Unreal — пишет EIP и стек главного потока (стек копируется при остановленном потоке, разбор — после).
+- **Клавиатура (issue #2):** F2 — меню настроек VR (в бою), F2/Esc — выход из него, Esc — пауза (Start), только
+  когда окно игры в фокусе и игра сама клавиатуру не получает (BlockMouseKeyboard=1). F10 не взят: системное меню окна.
+- **Проверено (запуск без шлема, VD Streamer запущен):** в логе выбор 1 — VD-32, выбор 2 — steamxr_win32.json
+  (манифест SteamVR распознан как 32-битный), «OpenXR instance from runtime choice 1». С временным
+  BinariesVR\steam_appid.txt: «steam: the Steam version - SteamAppId/SteamGameId = 42650», «started by
+  powershell.exe», окно появилось, сторож молчит. Сохранения не изменились (md5).
+- **Не проверено:** настоящая Steam-сборка (уйдёт ли перезапуск), PSVR2 без 32-битного ключа, вывод стека
+  сторожа (окно всегда появлялось), клавиши F2/Esc, всё в шлеме.

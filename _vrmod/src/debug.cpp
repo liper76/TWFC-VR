@@ -7,6 +7,9 @@
 #include <vector>
 #include <intrin.h>
 #include "MinHook.h"
+#include <tlhelp32.h>
+#include <string>
+#include <algorithm>
 
 static std::mutex g_dbgMutex;
 static XINPUT_GAMEPAD g_dbgPad;
@@ -549,4 +552,143 @@ void DebugStart()
     SetUnhandledExceptionFilter(CrashLogger);
     CloseHandle(CreateThread(nullptr, 0, DebugThread, nullptr, 0, nullptr));
     CloseHandle(CreateThread(nullptr, 0, PressRelayThread, nullptr, 0, nullptr));
+}
+
+// ---- The Steam version, started from BinariesVR ----
+// Steam starts a game with SteamAppId / SteamGameId in its environment; the DRM wrapper (SteamStub) and steam_api look
+// for them (and steam_appid.txt) to see whether the game came from Steam. Without them the copy can be refused
+// ("Application load error 3:0000065432") or handed back to Steam, which starts its own exe - the flat game in
+// Binaries\ (issue #1: the VR copy then sat ~60 s without a window and ended with code 1). So they are set here,
+// before the wrapper runs. And if the game's window does not come, the log says where its main thread waits and
+// which other TWFC.exe runs.
+
+static DWORD g_mainThread;
+
+static bool IsSteamCopy(const std::wstring& dir)
+{
+    uintptr_t base = (uintptr_t)GetModuleHandleW(nullptr);
+    auto nt = (IMAGE_NT_HEADERS32*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
+    IMAGE_SECTION_HEADER* s = IMAGE_FIRST_SECTION(nt);
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; i++, s++)
+        if (!memcmp(s->Name, ".bind", 6)) return true;
+    return GetFileAttributesW((dir + L"steam_api.dll").c_str()) != INVALID_FILE_ATTRIBUTES ||
+           GetFileAttributesW((dir + L"Steam.dll").c_str()) != INVALID_FILE_ATTRIBUTES ||
+           GetFileAttributesW((dir + L"steam_appid.txt").c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+// Other processes: the exe name of the parent, every TWFC.exe / steam.exe.
+static void LogProcesses(bool parent)
+{
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    PROCESSENTRY32W pe = { sizeof(pe) };
+    DWORD me = GetCurrentProcessId(), parentId = 0;
+    for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe))
+        if (pe.th32ProcessID == me) parentId = pe.th32ParentProcessID;
+    bool steam = false;
+    for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
+        if (parent && pe.th32ProcessID == parentId) Log("steam: started by %ls (pid %lu)", pe.szExeFile, parentId);
+        if (!_wcsicmp(pe.szExeFile, L"steam.exe")) steam = true;
+        if (pe.th32ProcessID != me && !_wcsicmp(pe.szExeFile, L"TWFC.exe")) {
+            wchar_t path[MAX_PATH] = L"?";
+            DWORD n = MAX_PATH;
+            HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+            if (h) { QueryFullProcessImageNameW(h, 0, path, &n); CloseHandle(h); }
+            Log("steam: another TWFC.exe runs (pid %lu): %ls", pe.th32ProcessID, path);
+        }
+    }
+    CloseHandle(snap);
+    if (!steam) Log("steam: WARNING Steam is not running - start Steam first (the Steam version needs it)");
+}
+
+static BOOL CALLBACK FindGameWindow(HWND w, LPARAM out)
+{
+    DWORD pid = 0;
+    GetWindowThreadProcessId(w, &pid);
+    wchar_t cls[64];
+    if (pid == GetCurrentProcessId() && GetClassNameW(w, cls, 64) && wcsstr(cls, L"Unreal")) { *(HWND*)out = w; return FALSE; }
+    return TRUE;
+}
+
+static void LogMainThread()
+{
+    HANDLE t = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, g_mainThread);
+    if (!t) return;
+    CONTEXT c = {};
+    c.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+    char line[1024], at[MAX_PATH + 16];
+    int len = 0;
+    line[0] = 0;
+    // (copied while it is suspended, looked up after: it may hold the loader lock that GetModuleHandleEx takes)
+    static uintptr_t stack[2048];
+    int n = 0;
+    bool got = false;
+    if (SuspendThread(t) != (DWORD)-1) {
+        got = GetThreadContext(t, &c) != 0;
+        if (got) {
+            MEMORY_BASIC_INFORMATION mbi;
+            if (VirtualQuery((void*)c.Esp, &mbi, sizeof(mbi))) {
+                size_t room = ((uintptr_t)mbi.BaseAddress + mbi.RegionSize - c.Esp) / sizeof(uintptr_t);
+                n = (int)std::min<size_t>(room, 2048);
+                memcpy(stack, (void*)c.Esp, n * sizeof(uintptr_t));
+            }
+        }
+        ResumeThread(t);
+    }
+    CloseHandle(t);
+    if (!got) return;
+    len = sprintf_s(line, "at %s, stack:", ModuleAt((void*)c.Eip, at, sizeof(at)));
+    for (int i = 0, k = 0; i < n && k < 14 && len < (int)sizeof(line) - (MAX_PATH + 20); i++) {
+        HMODULE m = nullptr;
+        if (stack[i] > 0x10000 && GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)stack[i], &m) && m != (HMODULE)stack[i]) {
+            len += sprintf_s(line + len, sizeof(line) - len, " %s", ModuleAt((void*)stack[i], at, sizeof(at)));
+            k++;
+        }
+    }
+    Log("steam: the game's main thread %s", line);
+}
+
+static DWORD WINAPI StartupWatch(LPVOID)
+{
+    for (int s = 1; s <= 60; s++) {
+        Sleep(1000);
+        HWND w = nullptr;
+        EnumWindows(FindGameWindow, (LPARAM)&w);
+        if (w) return 0;
+        if (s == 20 || s == 45) {
+            Log("steam: no game window %d s after the start", s);
+            LogMainThread();
+            LogProcesses(false);
+        }
+    }
+    return 0;
+}
+
+// From DllMain (before the DRM wrapper runs).
+void SteamCopyStart()
+{
+    g_mainThread = GetCurrentThreadId();
+    wchar_t exe[MAX_PATH];
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring dir(exe);
+    dir = dir.substr(0, dir.find_last_of(L"\\/") + 1);
+    if (!IsSteamCopy(dir)) return;
+    char id[32] = "42650";   // Transformers: War for Cybertron
+    FILE* f = _wfopen((dir + L"steam_appid.txt").c_str(), L"rb");
+    if (f) {
+        char buf[32] = {};
+        fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+        int n = atoi(buf);
+        if (n > 0) sprintf_s(id, "%d", n);
+    } else Log("steam: WARNING no steam_appid.txt next to TWFC.exe - reinstall with TWFC-VR-Setup-Steam.exe");
+    char cur[32];
+    if (!GetEnvironmentVariableA("SteamAppId", cur, sizeof(cur))) {
+        SetEnvironmentVariableA("SteamAppId", id);
+        SetEnvironmentVariableA("SteamGameId", id);
+        Log("steam: the Steam version - SteamAppId/SteamGameId = %s set (as Steam does when it starts a game)", id);
+    } else Log("steam: the Steam version, SteamAppId %s already set", cur);
+    LogProcesses(true);
+    CloseHandle(CreateThread(nullptr, 0, StartupWatch, nullptr, 0, nullptr));
 }

@@ -1187,6 +1187,26 @@ static void UpdateInput()
         if (xr.exitPulse > 0) { p.wButtons |= XINPUT_GAMEPAD_X; xr.exitPulse--; }
     }
 
+    // Keyboard, for controllers whose menu button the runtime does not bind (PSVR2 in SteamVR, issue #2): F2 = the VR
+    // settings (in gameplay), Esc = pause (Start) or out of the settings. Only while the game's window has the focus
+    // (the game itself gets no keyboard while the headset is on - inputblock.cpp). (Not F10: Windows opens the
+    // window's system menu with it.)
+    {
+        static bool f2Was, escWas;
+        DWORD fgPid = 0;
+        GetWindowThreadProcessId(GetForegroundWindow(), &fgPid);
+        bool focused = fgPid == GetCurrentProcessId();
+        bool f2 = focused && (GetAsyncKeyState(VK_F2) & 0x8000);
+        bool esc = focused && (GetAsyncKeyState(VK_ESCAPE) & 0x8000);
+        if (f2 && !f2Was && (gameplay || g_setup.active)) { Log("vr: F2 -> VR settings"); SetupToggle(); }
+        if (esc && !escWas) {
+            if (g_setup.active) SetupToggle();
+            else if (g_cfg.blockMouseKeyboard) xr.startPulse = 8;   // (else the game gets the Esc itself)
+        }
+        f2Was = f2;
+        escWas = esc;
+    }
+
     // Menu button: short press = Start (pause). In gameplay, held 1.5 s = adjust how the gun sits in the hand;
     // elsewhere held 0.6 s = Back.
     bool menu = GetBool(xr.btn[kMenu]);
@@ -1486,48 +1506,67 @@ static std::wstring SteamVRFolder()
     return w;
 }
 
-static std::wstring Find32BitRuntime(const std::wstring& active64);
+static bool SamePath(const std::wstring& a, const std::wstring& b) { return _wcsicmp(a.c_str(), b.c_str()) == 0; }
 
-// Once: a 32-bit runtime manifest set as XR_RUNTIME_JSON, if none is registered for 32-bit apps. True if one was set.
-static bool UseA32BitRuntime()
+// The 32-bit runtime manifests to try, best first. g_rt[i] = "" means the loader's own choice (the 32-bit ActiveRuntime).
+static std::vector<std::wstring> g_rt;
+static bool g_rtUser;    // XR_RUNTIME_JSON set by the user: left alone
+static bool g_rtLogged;  // the first round's failures are logged
+
+static void RuntimeAdd(const std::wstring& json)
 {
-    static bool tried;
-    if (tried) return false;
-    tried = true;
-    wchar_t env[8];
-    if (GetEnvironmentVariableW(L"XR_RUNTIME_JSON", env, 8)) return false;   // the user's own choice
+    if (json.empty() || !Is32BitRuntimeManifest(json)) return;
+    for (const std::wstring& c : g_rt) if (SamePath(c, json)) return;
+    g_rt.push_back(json);
+}
+
+static bool ProcessElevated()
+{
+    HANDLE t;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &t)) return false;
+    TOKEN_ELEVATION e = {};
+    DWORD n = 0;
+    bool r = GetTokenInformation(t, TokenElevation, &e, sizeof(e), &n) && e.TokenIsElevated;
+    CloseHandle(t);
+    return r;
+}
+
+// Once, before the first xrCreateInstance. The runtime the user picked is the 64-bit ActiveRuntime (SteamVR, Meta, VD
+// set it; SteamVR sets only that one); its own 32-bit build (next to it) comes first, then the 32-bit ActiveRuntime,
+// the 32-bit AvailableRuntimes, SteamVR's, the usual folders. A 32-bit ActiveRuntime of another runtime (left by one
+// used before) is not taken over the picked one: it may point at a deleted file (-32 XR_ERROR_FILE_ACCESS_ERROR, issue
+// #1's log) or at a runtime that is not running.
+static void RuntimePrepare()
+{
+    static bool done;
+    if (done) return;
+    done = true;
+    wchar_t env[MAX_PATH * 2] = {};
+    if (GetEnvironmentVariableW(L"XR_RUNTIME_JSON", env, MAX_PATH * 2)) {
+        g_rtUser = true;
+        Log("vr: XR_RUNTIME_JSON is set (%ls) - using that runtime", env);
+        return;
+    }
     const wchar_t* kKey = L"SOFTWARE\\Khronos\\OpenXR\\1";
     std::wstring active64 = RegString(HKEY_LOCAL_MACHINE, kKey, L"ActiveRuntime", KEY_WOW64_64KEY);
     std::wstring active32 = RegString(HKEY_LOCAL_MACHINE, kKey, L"ActiveRuntime", KEY_WOW64_32KEY);
-    if (!active32.empty() && Is32BitRuntimeManifest(active32)) return false;   // registered - just not running yet
-    Log("vr: no OpenXR runtime for 32-bit apps (32-bit ActiveRuntime '%ls', 64-bit '%ls') - looking for a 32-bit one",
-        active32.c_str(), active64.c_str());
-    std::wstring use = Find32BitRuntime(active64);
-    if (use.empty()) {
-        Log("vr: no 32-bit OpenXR runtime found - the game is 32-bit and needs one (SteamVR, Virtual Desktop)");
-        return false;
-    }
-    SetEnvironmentVariableW(L"XR_RUNTIME_JSON", use.c_str());
-    Log("vr: using the 32-bit runtime %ls", use.c_str());
-    return true;
-}
-
-// A 32-bit runtime manifest: the 64-bit active runtime's own 32-bit build, one registered for 32-bit apps but not
-// active, SteamVR's. Empty if none.
-static std::wstring Find32BitRuntime(const std::wstring& active64)
-{
-    std::vector<std::wstring> cand;
-    // the active runtime's own 32-bit build, next to it (SteamVR: steamxr_win32.json, Virtual Desktop: *-32.json)
+    bool ok32 = !active32.empty() && Is32BitRuntimeManifest(active32);
+    Log("vr: OpenXR runtimes: 64-bit '%ls', 32-bit '%ls'%s", active64.c_str(), active32.c_str(),
+        active32.empty() ? " (none: the game is 32-bit)" : ok32 ? "" : " (no 32-bit runtime DLL there)");
+    // the picked runtime's own 32-bit build (SteamVR: steamxr_win32.json, VD: *-32.json, Meta: oculus_openxr_32.json)
     std::wstring dir = DirOf(active64);
     if (!dir.empty()) {
         WIN32_FIND_DATAW fd;
         HANDLE h = FindFirstFileW((dir + L"*.json").c_str(), &fd);
         if (h != INVALID_HANDLE_VALUE) {
-            do cand.push_back(dir + fd.cFileName); while (FindNextFileW(h, &fd));
+            do RuntimeAdd(dir + fd.cFileName); while (FindNextFileW(h, &fd));
             FindClose(h);
         }
     }
-    // runtimes registered for 32-bit apps but not active
+    // the registered 32-bit one: already in the list (the picked runtime's), else after it (another runtime's)
+    bool listed = false;
+    for (const std::wstring& c : g_rt) listed = listed || SamePath(c, active32);
+    if (ok32 && !listed) g_rt.push_back(L"");
     HKEY k;
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Khronos\\OpenXR\\1\\AvailableRuntimes", 0, KEY_READ | KEY_WOW64_32KEY, &k) ==
         ERROR_SUCCESS) {
@@ -1535,23 +1574,60 @@ static std::wstring Find32BitRuntime(const std::wstring& active64)
         for (DWORD i = 0;; i++) {
             DWORD nlen = MAX_PATH * 2, type = 0, val = 1, vlen = sizeof(val);
             if (RegEnumValueW(k, i, name, &nlen, nullptr, &type, (BYTE*)&val, &vlen) != ERROR_SUCCESS) break;
-            if (type == REG_DWORD && val == 0) cand.push_back(name);
+            if (type == REG_DWORD && val == 0 && !(ok32 && SamePath(name, active32))) RuntimeAdd(name);
         }
         RegCloseKey(k);
     }
     std::wstring svr = SteamVRFolder();
-    if (!svr.empty()) cand.push_back(svr + L"steamxr_win32.json");
-    for (const std::wstring& c : cand)
-        if (Is32BitRuntimeManifest(c)) return c;
-    return L"";
+    if (!svr.empty()) RuntimeAdd(svr + L"steamxr_win32.json");
+    wchar_t pf[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"ProgramW6432", pf, MAX_PATH) || GetEnvironmentVariableW(L"ProgramFiles", pf, MAX_PATH)) {
+        RuntimeAdd(std::wstring(pf) + L"\\Virtual Desktop Streamer\\OpenXR\\virtualdesktop-openxr-32.json");
+        RuntimeAdd(std::wstring(pf) + L"\\Oculus\\Support\\oculus-runtime\\oculus_openxr_32.json");
+    }
+    if (GetEnvironmentVariableW(L"ProgramFiles(x86)", pf, MAX_PATH))
+        RuntimeAdd(std::wstring(pf) + L"\\Steam\\steamapps\\common\\SteamVR\\steamxr_win32.json");
+    if (g_rt.empty()) {
+        Log("vr: no 32-bit OpenXR runtime found - the game is 32-bit and needs one (SteamVR, Virtual Desktop, Meta)");
+        g_rt.push_back(L"");
+    }
+    for (size_t i = 0; i < g_rt.size(); i++)
+        Log("vr: runtime choice %u: %ls", (unsigned)i + 1, g_rt[i].empty() ? (L"the registered one: " + active32).c_str() : g_rt[i].c_str());
+    if (ProcessElevated() && !g_rt[0].empty())
+        Log("vr: WARNING the game runs as administrator - the OpenXR loader then ignores the runtime the mod picks; "
+            "start it without admin rights");
+}
+
+// Each try: the choices in order until one makes an instance (a runtime that is not running yet fails them all -
+// tried again later from the first).
+static XrResult CreateXrInstanceAnyRuntime()
+{
+    if (xr.instance) return XR_SUCCESS;
+    RuntimePrepare();
+    if (g_rtUser) return CreateXrInstance();
+    XrResult first = XR_SUCCESS;
+    for (size_t i = 0; i < g_rt.size(); i++) {
+        SetEnvironmentVariableW(L"XR_RUNTIME_JSON", g_rt[i].empty() ? nullptr : g_rt[i].c_str());
+        XrResult r = CreateXrInstance();
+        if (XR_SUCCEEDED(r)) {
+            Log("vr: OpenXR instance from runtime choice %u", (unsigned)i + 1);
+            g_rtLogged = true;
+            if (i > 0) std::rotate(g_rt.begin(), g_rt.begin() + i, g_rt.begin() + i + 1);   // (this one first next time)
+            return r;
+        }
+        if (!g_rtLogged) Log("vr: runtime choice %u: xrCreateInstance %d", (unsigned)i + 1, (int)r);
+        if (i == 0) first = r;
+    }
+    g_rtLogged = true;
+    SetEnvironmentVariableW(L"XR_RUNTIME_JSON", g_rt[0].empty() ? nullptr : g_rt[0].c_str());
+    return first;
 }
 
 static bool InitXR(ID3D11Device* dev)
 {
     g_retryLater = false;
     if (!xr.instance) {
-        XrResult r = CreateXrInstance();
-        if (r == XR_ERROR_RUNTIME_UNAVAILABLE && UseA32BitRuntime()) r = CreateXrInstance();
+        XrResult r = CreateXrInstanceAnyRuntime();
         if (XR_FAILED(r)) {
             // No runtime running (e.g. Virtual Desktop streamer closed) - keep polling.
             Log("vr: xrCreateInstance failed: %d (will retry)", (int)r);
