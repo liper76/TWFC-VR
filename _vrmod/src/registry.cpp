@@ -10,10 +10,30 @@ typedef LSTATUS(WINAPI* PFN_QueryW)(HKEY, LPCWSTR, LPDWORD, LPDWORD, LPBYTE, LPD
 typedef LSTATUS(WINAPI* PFN_QueryA)(HKEY, LPCSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD);
 typedef LSTATUS(WINAPI* PFN_SetW)(HKEY, LPCWSTR, DWORD, DWORD, const BYTE*, DWORD);
 typedef LSTATUS(WINAPI* PFN_SetA)(HKEY, LPCSTR, DWORD, DWORD, const BYTE*, DWORD);
+typedef LSTATUS(WINAPI* PFN_OpenExW)(HKEY, LPCWSTR, DWORD, REGSAM, PHKEY);
 static PFN_QueryW g_origQueryW;
 static PFN_QueryA g_origQueryA;
 static PFN_SetW g_origSetW;
 static PFN_SetA g_origSetA;
+static PFN_OpenExW g_origOpenExW;
+static thread_local bool t_hideXrImplicitLayers;
+
+void RegistrySetHideXrImplicitLayers(bool on) { t_hideXrImplicitLayers = on; }
+
+static bool IsXrImplicitLayersKey(LPCWSTR subKey)
+{
+    if (!subKey) return false;
+    // Match "...\OpenXR\1\ApiLayers\Implicit" or "...\ApiLayers\Implicit" (case-insensitive).
+    for (const wchar_t* p = subKey; *p; p++)
+        if (!_wcsnicmp(p, L"ApiLayers\\Implicit", 18)) return true;
+    return false;
+}
+
+static LSTATUS WINAPI HookOpenExW(HKEY k, LPCWSTR subKey, DWORD opts, REGSAM sam, PHKEY out)
+{
+    if (t_hideXrImplicitLayers && IsXrImplicitLayersKey(subKey)) return ERROR_FILE_NOT_FOUND;
+    return g_origOpenExW(k, subKey, opts, sam, out);
+}
 
 static bool Enabled() { return g_cfg.renderWidth > 0 && g_cfg.renderHeight > 0; }
 
@@ -67,11 +87,16 @@ static LSTATUS WINAPI HookSetA(HKEY k, LPCSTR name, DWORD r, DWORD type, const B
 // Called from DllMain: the game reads the value during startup, before our worker thread would run.
 void RegistryInstallHooks()
 {
-    if (!Enabled()) return;
     MH_Initialize();
-    MH_CreateHookApi(L"advapi32", "RegQueryValueExW", (void*)HookQueryW, (void**)&g_origQueryW);
-    MH_CreateHookApi(L"advapi32", "RegQueryValueExA", (void*)HookQueryA, (void**)&g_origQueryA);
-    MH_CreateHookApi(L"advapi32", "RegSetValueExW", (void*)HookSetW, (void**)&g_origSetW);
-    MH_CreateHookApi(L"advapi32", "RegSetValueExA", (void*)HookSetA, (void**)&g_origSetA);
+    // Hook kernelbase!RegOpenKeyExW first because advapi32!RegOpenKeyExW forwards there on Windows 10/11
+    // (catches openxr_loader.dll whether it imports advapi32, kernelbase, or api-ms-win-core-registry).
+    if (MH_CreateHookApi(L"kernelbase", "RegOpenKeyExW", (void*)HookOpenExW, (void**)&g_origOpenExW) != MH_OK)
+        MH_CreateHookApi(L"advapi32", "RegOpenKeyExW", (void*)HookOpenExW, (void**)&g_origOpenExW);
+    if (Enabled()) {
+        MH_CreateHookApi(L"advapi32", "RegQueryValueExW", (void*)HookQueryW, (void**)&g_origQueryW);
+        MH_CreateHookApi(L"advapi32", "RegQueryValueExA", (void*)HookQueryA, (void**)&g_origQueryA);
+        MH_CreateHookApi(L"advapi32", "RegSetValueExW", (void*)HookSetW, (void**)&g_origSetW);
+        MH_CreateHookApi(L"advapi32", "RegSetValueExA", (void*)HookSetA, (void**)&g_origSetA);
+    }
     MH_EnableHook(MH_ALL_HOOKS);
 }

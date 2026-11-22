@@ -10,8 +10,13 @@
 
 static HWND g_gameWnd;
 static WNDPROC g_origWndProc;
+static thread_local int t_inGameWndProc;
 typedef HWND(WINAPI* PFN_GetWnd)();
 static PFN_GetWnd g_origGetForeground, g_origGetActive, g_origGetFocus;
+typedef LONG(WINAPI* PFN_SetWindowLongW)(HWND, int, LONG);
+typedef LONG(WINAPI* PFN_SetWindowLongA)(HWND, int, LONG);
+static PFN_SetWindowLongW g_origSetWindowLongW;
+static PFN_SetWindowLongA g_origSetWindowLongA;
 
 static bool ForceSize() { return g_cfg.renderWidth > 0 && g_cfg.renderHeight > 0; }
 
@@ -29,6 +34,14 @@ static HWND WINAPI HookGetForegroundWindow() { return g_gameWnd ? g_gameWnd : g_
 static HWND WINAPI HookGetActiveWindow() { return OwnThreadOwnsGame() ? g_gameWnd : g_origGetActive(); }
 static HWND WINAPI HookGetFocus() { return OwnThreadOwnsGame() ? g_gameWnd : g_origGetFocus(); }
 
+bool FocusIsRealForeground()
+{
+    HWND fg = g_origGetForeground ? g_origGetForeground() : GetForegroundWindow();
+    DWORD pid = 0;
+    if (fg) GetWindowThreadProcessId(fg, &pid);
+    return pid == GetCurrentProcessId();
+}
+
 // Window size for a client area of RenderWidth x RenderHeight with the window's current styles.
 static SIZE WindowSizeFor(HWND h)
 {
@@ -39,28 +52,32 @@ static SIZE WindowSizeFor(HWND h)
 
 static LRESULT CALLBACK GameWndProc(HWND h, UINT msg, WPARAM w, LPARAM l)
 {
+    if (t_inGameWndProc > 8) return g_origWndProc ? CallWindowProcW(g_origWndProc, h, msg, w, l) : DefWindowProcW(h, msg, w, l);
+    t_inGameWndProc++;
+    LRESULT res = 0;
+    bool handled = false;
     switch (msg) {
     case WM_ACTIVATEAPP:
-        if (g_cfg.alwaysFocused && !w) return 0;
+        if (g_cfg.alwaysFocused && !w) { handled = true; res = 0; }
         break;
     case WM_ACTIVATE:
-        if (g_cfg.alwaysFocused && LOWORD(w) == WA_INACTIVE) return 0;
+        if (g_cfg.alwaysFocused && LOWORD(w) == WA_INACTIVE) { handled = true; res = 0; }
         break;
     case WM_KILLFOCUS:
-        if (g_cfg.alwaysFocused) return 0;
+        if (g_cfg.alwaysFocused) { handled = true; res = 0; }
         break;
     case WM_GETMINMAXINFO:
         if (ForceSize()) {
-            LRESULT r = CallWindowProcW(g_origWndProc, h, msg, w, l);
+            res = CallWindowProcW(g_origWndProc, h, msg, w, l);
             auto* mmi = (MINMAXINFO*)l;
             SIZE s = WindowSizeFor(h);
-            mmi->ptMaxTrackSize = { std::max<LONG>(mmi->ptMaxTrackSize.x, s.cx), std::max<LONG>(mmi->ptMaxTrackSize.y, s.cy) };
-            mmi->ptMaxSize = { std::max<LONG>(mmi->ptMaxSize.x, s.cx), std::max<LONG>(mmi->ptMaxSize.y, s.cy) };
-            return r;
+            mmi->ptMaxTrackSize = { std::max<LONG>(mmi->ptMaxTrackSize.x, s.cx + 64), std::max<LONG>(mmi->ptMaxTrackSize.y, s.cy + 64) };
+            mmi->ptMaxSize = { std::max<LONG>(mmi->ptMaxSize.x, s.cx + 64), std::max<LONG>(mmi->ptMaxSize.y, s.cy + 64) };
+            handled = true;
         }
         break;
     case WM_WINDOWPOSCHANGING:
-        if (ForceSize()) {
+        if (ForceSize() && !IsIconic(h)) {
             auto* wp = (WINDOWPOS*)l;
             if (!(wp->flags & SWP_NOSIZE)) {
                 SIZE s = WindowSizeFor(h);
@@ -70,14 +87,51 @@ static LRESULT CALLBACK GameWndProc(HWND h, UINT msg, WPARAM w, LPARAM l)
         }
         break;
     }
-    return CallWindowProcW(g_origWndProc, h, msg, w, l);
+    if (!handled) res = CallWindowProcW(g_origWndProc, h, msg, w, l);
+    t_inGameWndProc--;
+    return res;
+}
+
+static bool AddrInExe(void* p)
+{
+    HMODULE mod = nullptr;
+    if (!p || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)p, &mod))
+        return false;
+    return mod == GetModuleHandleW(nullptr);
+}
+
+// Keep GameWndProc installed when TWFC.exe (0x116BA764, or Steam equivalent) resets GWL_WNDPROC back to
+// its own WndProc (0x117FC7D0). Without this, Windows clamps the window height to the monitor work area
+// (e.g. ~1040 px on 1080p, 1520 px on 1600p), UE3 shrinks its viewport via WM_SIZE/GetClientRect, and the
+// bottom half of the square VR backbuffer renders solid black (issue #3). Non-exe subclasses (dgVoodoo/DXGI)
+// pass through normally on top of GameWndProc so no subclass cycle can ever form.
+static LONG WINAPI HookSetWindowLongW(HWND h, int idx, LONG val)
+{
+    if (h && h == g_gameWnd && idx == GWLP_WNDPROC && val && (WNDPROC)val != GameWndProc && AddrInExe((void*)val)) {
+        g_origWndProc = (WNDPROC)val;
+        Log("window: retained GameWndProc over game WndProc %p", (void*)val);
+        return g_origSetWindowLongW(h, idx, (LONG)GameWndProc);
+    }
+    return g_origSetWindowLongW(h, idx, val);
+}
+
+static LONG WINAPI HookSetWindowLongA(HWND h, int idx, LONG val)
+{
+    if (h && h == g_gameWnd && idx == GWLP_WNDPROC && val && (WNDPROC)val != GameWndProc && AddrInExe((void*)val)) {
+        g_origWndProc = (WNDPROC)val;
+        Log("window: retained GameWndProc over game WndProc %p", (void*)val);
+        return g_origSetWindowLongA(h, idx, (LONG)GameWndProc);
+    }
+    return g_origSetWindowLongA(h, idx, val);
 }
 
 static void AttachToGameWindow(HWND h)
 {
     if (g_gameWnd) return;
     g_gameWnd = h;
-    g_origWndProc = (WNDPROC)SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)GameWndProc);
+    g_origWndProc = g_origSetWindowLongW
+        ? (WNDPROC)g_origSetWindowLongW(h, GWLP_WNDPROC, (LONG)GameWndProc)
+        : (WNDPROC)SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)GameWndProc);
     if (ForceSize()) {
         SIZE s = WindowSizeFor(h);
         SetWindowPos(h, nullptr, 0, 0, s.cx, s.cy, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE);
@@ -150,6 +204,11 @@ static bool ForeignThread(HWND h)
 
 static BOOL WINAPI HookSetWindowPos(HWND h, HWND after, int x, int y, int cx, int cy, UINT flags)
 {
+    if (h && h == g_gameWnd && ForceSize() && !(flags & SWP_NOSIZE)) {
+        SIZE s = WindowSizeFor(h);
+        cx = s.cx;
+        cy = s.cy;
+    }
     if (ForeignThread(h)) flags |= SWP_ASYNCWINDOWPOS;
     return g_origSetWindowPos(h, after, x, y, cx, cy, flags);
 }
@@ -162,6 +221,11 @@ static BOOL WINAPI HookShowWindow(HWND h, int cmd)
 
 static BOOL WINAPI HookMoveWindow(HWND h, int x, int y, int w, int hgt, BOOL repaint)
 {
+    if (h && h == g_gameWnd && ForceSize()) {
+        SIZE s = WindowSizeFor(h);
+        w = s.cx;
+        hgt = s.cy;
+    }
     if (ForeignThread(h))
         return g_origSetWindowPos(h, nullptr, x, y, w, hgt, SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS | (repaint ? 0 : SWP_NOREDRAW));
     return g_origMoveWindow(h, x, y, w, hgt, repaint);
@@ -199,6 +263,8 @@ void WindowEarlyInit()
     if (ForceSize()) SetProcessDPIAware();
     MH_Initialize();
     MH_CreateHookApi(L"user32", "CreateWindowExW", (void*)HookCreateWindowExW, (void**)&g_origCreateWindowExW);
+    MH_CreateHookApi(L"user32", "SetWindowLongW", (void*)HookSetWindowLongW, (void**)&g_origSetWindowLongW);
+    MH_CreateHookApi(L"user32", "SetWindowLongA", (void*)HookSetWindowLongA, (void**)&g_origSetWindowLongA);
     MH_EnableHook(MH_ALL_HOOKS);
 }
 

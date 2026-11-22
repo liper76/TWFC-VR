@@ -289,11 +289,13 @@ float VRHudProjectScale();                  // the HUD's projected points spread
 
 // ---- registry.cpp / d3d9modes.cpp ----
 void RegistryInstallHooks();
+void RegistrySetHideXrImplicitLayers(bool on);   // scoped per-thread bypass for broken 32-bit OpenXR implicit API layers
 void D3D9ModesInstall();
 void D3D9Flush();                           // the game's D3D9 draws so far reach D3D11 now
 
 // ---- focus.cpp / inputblock.cpp ----
 void FocusStart();
+bool FocusIsRealForeground();               // true when the real (unhooked) foreground window belongs to this process
 void InputBlockInstall();
 
 // ---- hints.cpp ----

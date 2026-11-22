@@ -3,6 +3,7 @@
 // back buffer into an OpenXR swapchain and show it as a virtual screen (theater mode).
 #include "common.h"
 #include <d3d11.h>
+#include <d3d10.h>
 #include <dxgi1_2.h>
 #include <d3dcompiler.h>
 #define XR_USE_PLATFORM_WIN32
@@ -30,16 +31,31 @@ void VRGetPad(VRPadState& out)
 }
 
 // ---------------------------------------------------------------------------------------------
-// Blit: back buffer -> OpenXR swapchain image (handles format / size / gamma differences)
+// Blit: back buffer -> OpenXR swapchain image (handles format / size / gamma differences, and
+// exact tangent-space reprojection from UE3's levelled symmetric frustum to the headset's native
+// asymmetric eye FOV + head roll so OpenXR receives unmodified views[i].pose and views[i].fov).
+struct EyeReproj {
+    float tL, tR, tU, tD;              // headset's native eye FOV tangents (from xrLocateViews)
+    float cosRoll, sinRoll;            // roll removed by LevelOrientation
+    float invRenderTanH, invRenderTanV;// 1 / UE3 rendered symmetric half-tangents
+    float uvScale;                     // 1.0 for scene; hudScale for eye HUD markers
+};
+
 static const char* kBlitHLSL = R"(
 Texture2D src : register(t0);
 SamplerState smp : register(s0);
-cbuffer C : register(b0) { float linearize; float hud; float pad; float scope; float4 uvRect; };
+cbuffer C : register(b0) {
+    float4 mode;     // x=linearize, y=hud, z=reproj, w=scope (0 normal, 1 scope, 2 reticle crop)
+    float4 uvRect;   // scope/crop: (u0, v0, du, dv); reproj: (tL, tR, tU, tD)
+    float4 reprojA;  // (cosRoll, sinRoll, invRenderTanH, invRenderTanV)
+    float4 reprojB;  // (uvScale, 0, 0, 0)
+};
 void VS(uint id : SV_VertexID, out float4 pos : SV_Position, out float2 uv : TEXCOORD0) {
     uv = float2((id << 1) & 2, id & 2);
     pos = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
 }
 float4 PS(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+    float linearize = mode.x, hud = mode.y, reproj = mode.z, scope = mode.w;
     if (scope > 1.5) {   // a part of the HUD as it is (the crosshair layer's middle for the VR reticle: round)
         if (length(uv - 0.5) > 0.49) return float4(0, 0, 0, 0);
         uv = uvRect.xy + uv * uvRect.zw;
@@ -53,6 +69,16 @@ float4 PS(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         if ((min(d.x, d.y) < 0.004 && r > 0.03 && r < 0.42) || r > 0.47) c = 0;
         if (linearize > 0.5) c = pow(abs(c), 2.2);
         return float4(c, 1);
+    }
+    else if (reproj > 0.5) {
+        // Native-FOV + roll reprojection from UE3's levelled symmetric backbuffer into the eye's exact OpenXR frustum.
+        float tx = lerp(uvRect.x, uvRect.y, uv.x);
+        float ty = lerp(uvRect.z, uvRect.w, uv.y);
+        float xLvl = tx * reprojA.x - ty * reprojA.y;
+        float yLvl = tx * reprojA.y + ty * reprojA.x;
+        uv = float2(0.5 + 0.5 * xLvl * reprojA.z * reprojB.x, 0.5 - 0.5 * yLvl * reprojA.w * reprojB.x);
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
+            return hud > 0.5 ? float4(0, 0, 0, 0) : float4(0, 0, 0, 1);
     }
     float4 s = src.Sample(smp, uv);
     float3 c = s.rgb;
@@ -69,13 +95,14 @@ struct Blitter {
     ID3D11VertexShader* vs = nullptr;
     ID3D11PixelShader* ps = nullptr;
     ID3D11SamplerState* smp = nullptr;
-    ID3D11Buffer* cb = nullptr;   // {linearize, hud, pad, scope, uvRect}
+    ID3D11Buffer* cb = nullptr;   // 64 bytes: mode, uvRect, reprojA, reprojB
     ID3D11BlendState* over = nullptr;   // premultiplied "over" (the HUD drawn onto an eye image)
+    ID3D11DeviceContext* dc = nullptr;  // reused deferred context (avoids per-draw allocation churn on 32-bit VA)
 
     bool Init(ID3D11Device* dev)
     {
-        HMODULE dc = LoadLibraryW(L"d3dcompiler_47.dll");
-        auto compile = dc ? (pD3DCompile)GetProcAddress(dc, "D3DCompile") : nullptr;
+        HMODULE dcMod = LoadLibraryW(L"d3dcompiler_47.dll");
+        auto compile = dcMod ? (pD3DCompile)GetProcAddress(dcMod, "D3DCompile") : nullptr;
         if (!compile) { Log("vr: d3dcompiler_47.dll not available"); return false; }
         ID3DBlob *vsb = nullptr, *psb = nullptr, *err = nullptr;
         if (FAILED(compile(kBlitHLSL, strlen(kBlitHLSL), "blit", nullptr, nullptr, "VS", "vs_4_0", 0, 0, &vsb, &err)) ||
@@ -92,12 +119,14 @@ struct Blitter {
         sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
         sd.MaxLOD = D3D11_FLOAT32_MAX;
         dev->CreateSamplerState(&sd, &smp);
-        D3D11_BUFFER_DESC bd = { 32, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0 };
+        D3D11_BUFFER_DESC bd = { 64, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0 };
         dev->CreateBuffer(&bd, nullptr, &cb);
         D3D11_BLEND_DESC bl = {};
         bl.RenderTarget[0] = { TRUE, D3D11_BLEND_ONE, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_OP_ADD, D3D11_BLEND_ZERO, D3D11_BLEND_ONE,
                                D3D11_BLEND_OP_ADD, D3D11_COLOR_WRITE_ENABLE_ALL };
         dev->CreateBlendState(&bl, &over);
+        HRESULT hr = dev->CreateDeferredContext(0, &dc);
+        if (FAILED(hr)) Log("vr: CreateDeferredContext failed (%08lX)", (unsigned long)hr);
         return vs && ps && smp && cb;
     }
 
@@ -106,30 +135,56 @@ struct Blitter {
               UINT w, UINT h, bool linearize, bool hud = false, const float* scopeRect = nullptr,
               bool blend = false,   // a HUD layer drawn over the image there (an eye's)
               bool crop = false,    // scopeRect is a part of the HUD to show as it is (no lens)
-              float scale = 1.0f)   // drawn into a centred part of the target: this part of its width and height
+              float scale = 1.0f,   // drawn into a centred part of the target: this part of its width and height
+              const EyeReproj* reproj = nullptr)
     {
-        ID3D11DeviceContext* dc = nullptr;
-        if (FAILED(dev->CreateDeferredContext(0, &dc))) return;
-        float consts[8] = { linearize ? 1.0f : 0.0f, hud ? 1.0f : 0.0f, 0, crop ? 2.0f : scopeRect ? 1.0f : 0.0f, 0, 0, 1, 1 };
-        if (scopeRect) for (int i = 0; i < 4; i++) consts[4 + i] = scopeRect[i];
-        dc->UpdateSubresource(cb, 0, nullptr, consts, 0, 0);
+        if (!srv || !rtv) return;
+        ID3D11DeviceContext* ctx = dc;
+        bool tempCtx = false;
+        if (!ctx) {
+            if (FAILED(dev->CreateDeferredContext(0, &ctx)) || !ctx) {
+                static bool logged;
+                if (!logged) { Log("vr: Blitter::Draw: CreateDeferredContext failed"); logged = true; }
+                return;
+            }
+            tempCtx = true;
+        }
+        float consts[16] = {
+            linearize ? 1.0f : 0.0f, hud ? 1.0f : 0.0f, reproj ? 1.0f : 0.0f, crop ? 2.0f : scopeRect ? 1.0f : 0.0f,
+            0, 0, 1, 1,
+            1, 0, 1, 1,
+            1, 0, 0, 0
+        };
+        if (scopeRect) {
+            for (int i = 0; i < 4; i++) consts[4 + i] = scopeRect[i];
+        } else if (reproj) {
+            consts[4] = reproj->tL; consts[5] = reproj->tR; consts[6] = reproj->tU; consts[7] = reproj->tD;
+            consts[8] = reproj->cosRoll; consts[9] = reproj->sinRoll;
+            consts[10] = reproj->invRenderTanH; consts[11] = reproj->invRenderTanV;
+            consts[12] = reproj->uvScale;
+        }
+        ctx->UpdateSubresource(cb, 0, nullptr, consts, 0, 0);
         D3D11_VIEWPORT vp = { w * (1.0f - scale) * 0.5f, h * (1.0f - scale) * 0.5f, w * scale, h * scale, 0, 1 };
-        dc->RSSetViewports(1, &vp);
-        dc->OMSetRenderTargets(1, &rtv, nullptr);
-        if (blend) dc->OMSetBlendState(over, nullptr, 0xFFFFFFFF);
-        dc->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        dc->VSSetShader(vs, nullptr, 0);
-        dc->PSSetShader(ps, nullptr, 0);
-        dc->PSSetShaderResources(0, 1, &srv);
-        dc->PSSetSamplers(0, 1, &smp);
-        dc->PSSetConstantBuffers(0, 1, &cb);
-        dc->Draw(3, 0);
+        ctx->RSSetViewports(1, &vp);
+        ctx->OMSetRenderTargets(1, &rtv, nullptr);
+        if (blend) ctx->OMSetBlendState(over, nullptr, 0xFFFFFFFF);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->VSSetShader(vs, nullptr, 0);
+        ctx->PSSetShader(ps, nullptr, 0);
+        ctx->PSSetShaderResources(0, 1, &srv);
+        ctx->PSSetSamplers(0, 1, &smp);
+        ctx->PSSetConstantBuffers(0, 1, &cb);
+        ctx->Draw(3, 0);
         ID3D11CommandList* cl = nullptr;
-        if (SUCCEEDED(dc->FinishCommandList(FALSE, &cl))) {
+        HRESULT hr = ctx->FinishCommandList(FALSE, &cl);
+        if (SUCCEEDED(hr) && cl) {
             imm->ExecuteCommandList(cl, TRUE);
             cl->Release();
+        } else {
+            static bool logged;
+            if (!logged) { Log("vr: Blitter::Draw: FinishCommandList failed (%08lX)", (unsigned long)hr); logged = true; }
         }
-        dc->Release();
+        if (tempCtx) ctx->Release();
     }
 };
 
@@ -278,6 +333,25 @@ static bool InitInput()
         { xr.thumbTouch[0], "/user/hand/left/input/a/touch" }, { xr.thumbTouch[0], "/user/hand/left/input/b/touch" },
         { xr.thumbTouch[1], "/user/hand/right/input/thumbstick/touch" }, { xr.thumbTouch[1], "/user/hand/right/input/trackpad/touch" },
         { xr.thumbTouch[1], "/user/hand/right/input/a/touch" }, { xr.thumbTouch[1], "/user/hand/right/input/b/touch" },
+        { xr.aimPose[0], "/user/hand/left/input/aim/pose" }, { xr.aimPose[1], "/user/hand/right/input/aim/pose" },
+        { xr.gripPose[0], "/user/hand/left/input/grip/pose" }, { xr.gripPose[1], "/user/hand/right/input/grip/pose" },
+        { xr.haptic, "/user/hand/left/output/haptic" }, { xr.haptic, "/user/hand/right/output/haptic" },
+    });
+    SuggestBindings("/interaction_profiles/microsoft/motion_controller", {
+        { xr.stick[0], "/user/hand/left/input/thumbstick" }, { xr.stick[1], "/user/hand/right/input/thumbstick" },
+        { xr.trigger[0], "/user/hand/left/input/trigger/value" }, { xr.trigger[1], "/user/hand/right/input/trigger/value" },
+        { xr.grip[0], "/user/hand/left/input/squeeze/click" }, { xr.grip[1], "/user/hand/right/input/squeeze/click" },
+        { xr.btn[kA], "/user/hand/right/input/trackpad/click" }, { xr.btn[kB], "/user/hand/right/input/menu/click" },
+        { xr.btn[kX], "/user/hand/left/input/trackpad/click" }, { xr.btn[kY], "/user/hand/left/input/thumbstick/click" },
+        { xr.btn[kLClick], "/user/hand/left/input/thumbstick/click" }, { xr.btn[kRClick], "/user/hand/right/input/thumbstick/click" },
+        { xr.btn[kMenu], "/user/hand/left/input/menu/click" },
+        { xr.aimPose[0], "/user/hand/left/input/aim/pose" }, { xr.aimPose[1], "/user/hand/right/input/aim/pose" },
+        { xr.gripPose[0], "/user/hand/left/input/grip/pose" }, { xr.gripPose[1], "/user/hand/right/grip/pose" },
+        { xr.haptic, "/user/hand/left/output/haptic" }, { xr.haptic, "/user/hand/right/output/haptic" },
+    });
+    SuggestBindings("/interaction_profiles/khr/simple_controller", {
+        { xr.trigger[0], "/user/hand/left/input/select/click" }, { xr.trigger[1], "/user/hand/right/input/select/click" },
+        { xr.btn[kMenu], "/user/hand/left/input/menu/click" },
         { xr.aimPose[0], "/user/hand/left/input/aim/pose" }, { xr.aimPose[1], "/user/hand/right/input/aim/pose" },
         { xr.gripPose[0], "/user/hand/left/input/grip/pose" }, { xr.gripPose[1], "/user/hand/right/input/grip/pose" },
         { xr.haptic, "/user/hand/left/output/haptic" }, { xr.haptic, "/user/hand/right/output/haptic" },
@@ -1188,23 +1262,47 @@ static void UpdateInput()
     }
 
     // Keyboard, for controllers whose menu button the runtime does not bind (PSVR2 in SteamVR, issue #2): F2 = the VR
-    // settings (in gameplay), Esc = pause (Start) or out of the settings. Only while the game's window has the focus
-    // (the game itself gets no keyboard while the headset is on - inputblock.cpp). (Not F10: Windows opens the
-    // window's system menu with it.)
+    // settings (in gameplay), Esc = pause (Start) or out of the settings. Use the real (unhooked) foreground check or
+    // focused XR session so F2 works while wearing the headset and Esc does not fire when alt-tabbed outside VR.
     {
         static bool f2Was, escWas;
-        DWORD fgPid = 0;
-        GetWindowThreadProcessId(GetForegroundWindow(), &fgPid);
-        bool focused = fgPid == GetCurrentProcessId();
-        bool f2 = focused && (GetAsyncKeyState(VK_F2) & 0x8000);
-        bool esc = focused && (GetAsyncKeyState(VK_ESCAPE) & 0x8000);
+        bool realFg = FocusIsRealForeground();
+        bool xrFocused = xr.state == XR_SESSION_STATE_FOCUSED;
+        bool f2 = (realFg || xrFocused) && (GetAsyncKeyState(VK_F2) & 0x8000);
+        bool esc = (realFg || xrFocused) && (GetAsyncKeyState(VK_ESCAPE) & 0x8000);
         if (f2 && !f2Was && (gameplay || g_setup.active)) { Log("vr: F2 -> VR settings"); SetupToggle(); }
         if (esc && !escWas) {
             if (g_setup.active) SetupToggle();
-            else if (g_cfg.blockMouseKeyboard) xr.startPulse = 8;   // (else the game gets the Esc itself)
+            else if (g_cfg.blockMouseKeyboard || !realFg) xr.startPulse = 8;   // (else the game gets the Esc itself)
         }
         f2Was = f2;
         escWas = esc;
+    }
+
+    // Controller-only fallback for VR settings (PSVR2 / Index / any controller where the menu button is unbound):
+    // hold both thumbstick clicks together for 0.8 s in gameplay (or click both together to close the settings menu).
+    {
+        static DWORD bothDownAt;
+        static bool bothFired;
+        bool both = GetBool(xr.btn[kLClick]) && GetBool(xr.btn[kRClick]);
+        if (both) {
+            if (!bothDownAt) { bothDownAt = now ? now : 1; bothFired = false; }
+            if (g_setup.active && !bothFired) {
+                Log("vr: LClick+RClick -> close VR settings");
+                SetupToggle();
+                bothFired = true;
+            } else if (!g_setup.active && gameplay && !bothFired && now - bothDownAt > 800) {
+                Log("vr: LClick+RClick held -> VR settings");
+                SetupToggle();
+                bothFired = true;
+            }
+            // Don't transform or trigger ability while intentionally holding both sticks together.
+            if (gameplay || g_setup.active)
+                p.wButtons &= ~(XINPUT_GAMEPAD_LEFT_THUMB | XINPUT_GAMEPAD_RIGHT_THUMB | XINPUT_GAMEPAD_LEFT_SHOULDER);
+        } else {
+            bothDownAt = 0;
+            bothFired = false;
+        }
     }
 
     // Menu button: short press = Start (pause). In gameplay, held 1.5 s = adjust how the gun sits in the hand;
@@ -1250,9 +1348,42 @@ static void UpdateInput()
 
 static bool g_retryLater;   // headset not available yet: try again in a few seconds
 
-static XrResult CreateXrInstance()
+// Scoped capture of openxr_loader.dll's OutputDebugStringA output during failed xrCreateInstance calls
+// so twfcvr.log records the exact loader reason (broken implicit API layer, missing DLL, etc.).
+typedef VOID(WINAPI* PFN_OutputDebugStringA)(LPCSTR);
+static PFN_OutputDebugStringA g_origOutputDebugStringA;
+static thread_local std::vector<std::string>* t_xrDbgLines;
+
+static VOID WINAPI HookOutputDebugStringA(LPCSTR s)
+{
+    if (t_xrDbgLines && s && *s && t_xrDbgLines->size() < 24) {
+        std::string line(s);
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
+        if (!line.empty()) t_xrDbgLines->push_back(std::move(line));
+    }
+    if (g_origOutputDebugStringA) g_origOutputDebugStringA(s);
+}
+
+static void EnsureXrLoaderDebugCapture()
+{
+    static bool done;
+    if (done) return;
+    done = true;
+    // openxr_loader's LoaderLogger reads XR_LOADER_DEBUG once on first initialization.
+    // Set "warn" (if user didn't already set it) so errors/warnings reach OutputDebugStringA.
+    wchar_t cur[32] = {};
+    if (!GetEnvironmentVariableW(L"XR_LOADER_DEBUG", cur, 32))
+        SetEnvironmentVariableW(L"XR_LOADER_DEBUG", L"warn");
+    MH_Initialize();
+    if (MH_CreateHookApi(L"kernelbase", "OutputDebugStringA", (void*)HookOutputDebugStringA, (void**)&g_origOutputDebugStringA) == MH_OK ||
+        MH_CreateHookApi(L"kernel32", "OutputDebugStringA", (void*)HookOutputDebugStringA, (void**)&g_origOutputDebugStringA) == MH_OK)
+        MH_EnableHook(MH_ALL_HOOKS);
+}
+
+static XrResult CreateXrInstance(bool logDiagnostics = false)
 {
     if (xr.instance) return XR_SUCCESS;
+    EnsureXrLoaderDebugCapture();
     const char* exts[] = { XR_KHR_D3D11_ENABLE_EXTENSION_NAME };
     XrInstanceCreateInfo ici = { XR_TYPE_INSTANCE_CREATE_INFO };
     strcpy_s(ici.applicationInfo.applicationName, "TWFC VR");
@@ -1260,9 +1391,14 @@ static XrResult CreateXrInstance()
     ici.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
     ici.enabledExtensionCount = 1;
     ici.enabledExtensionNames = exts;
+    std::vector<std::string> dbg;
+    if (logDiagnostics) t_xrDbgLines = &dbg;
     XrResult r = xrCreateInstance(&ici, &xr.instance);
+    t_xrDbgLines = nullptr;
     if (XR_FAILED(r)) {
         xr.instance = XR_NULL_HANDLE;
+        if (logDiagnostics)
+            for (const std::string& l : dbg) Log("vr:   loader: %s", l.c_str());
         return r;
     }
     XrInstanceProperties ip = { XR_TYPE_INSTANCE_PROPERTIES };
@@ -1338,7 +1474,24 @@ static bool ParseHeadsetLine(const std::string& s, HeadsetLine& h)
                     &a[4], &a[5], &a[6], &a[7]) == 10 && h.rec[0] > 0 && h.rec[1] > 0;
 }
 
-static int MaxRenderSide() { return g_cfg.maxRenderSize > 0 ? std::max(g_cfg.maxRenderSize, 640) : 8192; }
+static bool IsLowVirtualMemory()
+{
+    static int low = -1;
+    if (low < 0) {
+        MEMORYSTATUSEX ms = { sizeof(ms) };
+        GlobalMemoryStatusEx(&ms);
+        low = ms.ullTotalVirtual <= (2560ULL << 20) ? 1 : 0;   // 2 GB non-LAA process (e.g. Steam DRM exe)
+    }
+    return low != 0;
+}
+
+static int MaxRenderSide()
+{
+    int cap = g_cfg.maxRenderSize > 0 ? std::max(g_cfg.maxRenderSize, 640) : 8192;
+    // Steam's DRM-wrapped TWFC.exe cannot be patched with LAA (2 GB VA limit): 2560x2560 pushes 3D startup past 2 GB.
+    if (IsLowVirtualMemory() && cap > 1800) cap = 1800;
+    return cap;
+}
 
 // The square back buffer's side for a headset: its recommended pixels per tangent area over the frustum LocateEyes
 // draws (both eyes' FOV, symmetric, square; FovScale), times RenderScale, at most MaxRenderSize. (Per area: the
@@ -1512,6 +1665,70 @@ static bool SamePath(const std::wstring& a, const std::wstring& b) { return _wcs
 static std::vector<std::wstring> g_rt;
 static bool g_rtUser;    // XR_RUNTIME_JSON set by the user: left alone
 static bool g_rtLogged;  // the first round's failures are logged
+static bool g_bypassApiLayers;   // broken 32-bit implicit API layer detected: bypass for this process
+static std::vector<std::wstring> g_layerDisableEnvs;
+
+static std::wstring JsonStringField(const std::string& text, const char* field)
+{
+    std::string key = std::string("\"") + field + "\"";
+    size_t p = text.find(key);
+    if (p == std::string::npos || (p = text.find(':', p + key.size())) == std::string::npos || (p = text.find('"', p)) == std::string::npos)
+        return L"";
+    std::string val;
+    for (p++; p < text.size() && text[p] != '"'; p++) {
+        if (text[p] == '\\' && p + 1 < text.size()) p++;
+        val += text[p];
+    }
+    if (val.empty()) return L"";
+    int wn = MultiByteToWideChar(CP_UTF8, 0, val.c_str(), -1, nullptr, 0);
+    std::wstring w(wn, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, val.c_str(), -1, &w[0], wn);
+    w.resize(wcslen(w.c_str()));
+    return w;
+}
+
+// Inspects enabled 32-bit OpenXR implicit API layers (HKLM/HKCU WOW6432Node). A single broken, deleted, or
+// 64-bit implicit layer makes openxr_loader abort xrCreateInstance with -32 (XR_ERROR_FILE_ACCESS_ERROR)
+// for EVERY runtime (issue #1). Records their disable_environment names and logs their status.
+static void InspectImplicitApiLayers()
+{
+    g_layerDisableEnvs.clear();
+    const struct { HKEY root; const char* tag; } hives[] = {
+        { HKEY_LOCAL_MACHINE, "HKLM" }, { HKEY_CURRENT_USER, "HKCU" }
+    };
+    int count = 0;
+    for (const auto& h : hives) {
+        HKEY k = nullptr;
+        if (RegOpenKeyExW(h.root, L"SOFTWARE\\Khronos\\OpenXR\\1\\ApiLayers\\Implicit", 0, KEY_READ | KEY_WOW64_32KEY, &k) != ERROR_SUCCESS)
+            continue;
+        wchar_t name[MAX_PATH * 2];
+        for (DWORD i = 0;; i++) {
+            DWORD nlen = MAX_PATH * 2, type = 0, val = 1, vlen = sizeof(val);
+            if (RegEnumValueW(k, i, name, &nlen, nullptr, &type, (BYTE*)&val, &vlen) != ERROR_SUCCESS) break;
+            if (type != REG_DWORD || val != 0) continue;   // 0 = enabled
+            count++;
+            std::wstring json(name);
+            FILE* f = _wfopen(json.c_str(), L"rb");
+            if (!f) {
+                Log("vr: 32-bit implicit API layer (%s): '%ls' (MISSING JSON - causes xrCreateInstance -32)", h.tag, json.c_str());
+                continue;
+            }
+            std::string text;
+            char buf[4096];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), f)) > 0 && text.size() < 65536) text.append(buf, n);
+            fclose(f);
+            bool ok32 = Is32BitRuntimeManifest(json);
+            std::wstring dis = JsonStringField(text, "disable_environment");
+            if (!dis.empty()) g_layerDisableEnvs.push_back(dis);
+            Log("vr: 32-bit implicit API layer (%s): '%ls' (%s%s%ls)", h.tag, json.c_str(),
+                ok32 ? "ok 32-bit" : "BROKEN/non-32-bit DLL - may cause xrCreateInstance -32",
+                dis.empty() ? "" : ", disable=", dis.c_str());
+        }
+        RegCloseKey(k);
+    }
+    if (!count) Log("vr: 32-bit implicit API layers: none");
+}
 
 static void RuntimeAdd(const std::wstring& json)
 {
@@ -1541,6 +1758,7 @@ static void RuntimePrepare()
     static bool done;
     if (done) return;
     done = true;
+    InspectImplicitApiLayers();
     wchar_t env[MAX_PATH * 2] = {};
     if (GetEnvironmentVariableW(L"XR_RUNTIME_JSON", env, MAX_PATH * 2)) {
         g_rtUser = true;
@@ -1583,6 +1801,7 @@ static void RuntimePrepare()
     wchar_t pf[MAX_PATH] = {};
     if (GetEnvironmentVariableW(L"ProgramW6432", pf, MAX_PATH) || GetEnvironmentVariableW(L"ProgramFiles", pf, MAX_PATH)) {
         RuntimeAdd(std::wstring(pf) + L"\\Virtual Desktop Streamer\\OpenXR\\virtualdesktop-openxr-32.json");
+        RuntimeAdd(std::wstring(pf) + L"\\Meta Horizon\\Support\\oculus-runtime\\oculus_openxr_32.json");
         RuntimeAdd(std::wstring(pf) + L"\\Oculus\\Support\\oculus-runtime\\oculus_openxr_32.json");
     }
     if (GetEnvironmentVariableW(L"ProgramFiles(x86)", pf, MAX_PATH))
@@ -1598,29 +1817,90 @@ static void RuntimePrepare()
             "start it without admin rights");
 }
 
+static bool IsLikelyApiLayerError(XrResult r)
+{
+    return r == XR_ERROR_FILE_ACCESS_ERROR || r == XR_ERROR_FILE_CONTENTS_INVALID ||
+           r == XR_ERROR_API_LAYER_NOT_PRESENT || r == XR_ERROR_RUNTIME_FAILURE ||
+           r == XR_ERROR_VALIDATION_FAILURE || r == XR_ERROR_INITIALIZATION_FAILED;
+}
+
+static XrResult TryRuntimePass(bool bypassLayers, bool logDiag, bool& anyLayerError)
+{
+    anyLayerError = false;
+    std::wstring savedLayerPath, savedEnableLayers;
+    bool hadLayerPath = false, hadEnableLayers = false;
+    if (bypassLayers) {
+        for (const std::wstring& env : g_layerDisableEnvs) SetEnvironmentVariableW(env.c_str(), L"1");
+        wchar_t lp[MAX_PATH * 4] = {};
+        if (GetEnvironmentVariableW(L"XR_API_LAYER_PATH", lp, MAX_PATH * 4)) {
+            savedLayerPath = lp;
+            hadLayerPath = true;
+            SetEnvironmentVariableW(L"XR_API_LAYER_PATH", nullptr);
+        }
+        if (GetEnvironmentVariableW(L"XR_ENABLE_API_LAYERS", lp, MAX_PATH * 4)) {
+            savedEnableLayers = lp;
+            hadEnableLayers = true;
+            SetEnvironmentVariableW(L"XR_ENABLE_API_LAYERS", nullptr);
+        }
+        RegistrySetHideXrImplicitLayers(true);
+    }
+    auto restoreBypass = [&]() {
+        if (bypassLayers) {
+            RegistrySetHideXrImplicitLayers(false);
+            if (hadLayerPath) SetEnvironmentVariableW(L"XR_API_LAYER_PATH", savedLayerPath.c_str());
+            if (hadEnableLayers) SetEnvironmentVariableW(L"XR_ENABLE_API_LAYERS", savedEnableLayers.c_str());
+        }
+    };
+    XrResult first = XR_SUCCESS;
+    if (g_rtUser) {
+        first = CreateXrInstance(logDiag);
+        if (XR_FAILED(first) && IsLikelyApiLayerError(first)) anyLayerError = true;
+    } else {
+        for (size_t i = 0; i < g_rt.size(); i++) {
+            SetEnvironmentVariableW(L"XR_RUNTIME_JSON", g_rt[i].empty() ? nullptr : g_rt[i].c_str());
+            XrResult r = CreateXrInstance(logDiag);
+            if (XR_SUCCEEDED(r)) {
+                Log("vr: OpenXR instance from runtime choice %u%s", (unsigned)i + 1,
+                    bypassLayers ? " (32-bit implicit API layers bypassed)" : "");
+                if (i > 0) std::rotate(g_rt.begin(), g_rt.begin() + i, g_rt.begin() + i + 1);   // (this one first next time)
+                restoreBypass();
+                return r;
+            }
+            if (logDiag) Log("vr: runtime choice %u%s: xrCreateInstance %d", (unsigned)i + 1,
+                             bypassLayers ? " (layers bypassed)" : "", (int)r);
+            if (IsLikelyApiLayerError(r)) anyLayerError = true;
+            if (i == 0) first = r;
+        }
+        SetEnvironmentVariableW(L"XR_RUNTIME_JSON", g_rt[0].empty() ? nullptr : g_rt[0].c_str());
+    }
+    restoreBypass();
+    return first;
+}
+
 // Each try: the choices in order until one makes an instance (a runtime that is not running yet fails them all -
-// tried again later from the first).
+// tried again later from the first). If all runtimes fail with a layer/file access error (-32 etc.), retry once
+// with 32-bit implicit OpenXR API layers bypassed for this process (never modifying the user's registry).
 static XrResult CreateXrInstanceAnyRuntime()
 {
     if (xr.instance) return XR_SUCCESS;
     RuntimePrepare();
-    if (g_rtUser) return CreateXrInstance();
-    XrResult first = XR_SUCCESS;
-    for (size_t i = 0; i < g_rt.size(); i++) {
-        SetEnvironmentVariableW(L"XR_RUNTIME_JSON", g_rt[i].empty() ? nullptr : g_rt[i].c_str());
-        XrResult r = CreateXrInstance();
-        if (XR_SUCCEEDED(r)) {
-            Log("vr: OpenXR instance from runtime choice %u", (unsigned)i + 1);
+    bool anyLayerError = false;
+    XrResult r = TryRuntimePass(g_bypassApiLayers, !g_rtLogged, anyLayerError);
+    if (XR_SUCCEEDED(r)) { g_rtLogged = true; return r; }
+    if (!g_bypassApiLayers && anyLayerError) {
+        if (!g_rtLogged)
+            Log("vr: all runtimes failed (%d) - retrying with 32-bit implicit OpenXR API layers bypassed for this process", (int)r);
+        bool dummy = false;
+        XrResult r2 = TryRuntimePass(true, !g_rtLogged, dummy);
+        if (XR_SUCCEEDED(r2)) {
+            g_bypassApiLayers = true;
             g_rtLogged = true;
-            if (i > 0) std::rotate(g_rt.begin(), g_rt.begin() + i, g_rt.begin() + i + 1);   // (this one first next time)
-            return r;
+            return r2;
         }
-        if (!g_rtLogged) Log("vr: runtime choice %u: xrCreateInstance %d", (unsigned)i + 1, (int)r);
-        if (i == 0) first = r;
+        r = r2;
     }
     g_rtLogged = true;
-    SetEnvironmentVariableW(L"XR_RUNTIME_JSON", g_rt[0].empty() ? nullptr : g_rt[0].c_str());
-    return first;
+    return r;
 }
 
 static bool InitXR(ID3D11Device* dev)
@@ -1661,7 +1941,31 @@ static bool InitXR(ID3D11Device* dev)
         adapter->GetDesc(&ad);
     SafeRelease(adapter); SafeRelease(dxgiDev);
     if (memcmp(&ad.AdapterLuid, &req.adapterLuid, sizeof(LUID)) != 0)
-        Log("vr: WARNING game GPU (%ls) is not the headset GPU", ad.Description);
+        Log("vr: WARNING game GPU (%ls, LUID %08X:%08X) is not the headset GPU (LUID %08X:%08X)", ad.Description,
+            (unsigned)ad.AdapterLuid.HighPart, (unsigned)ad.AdapterLuid.LowPart,
+            (unsigned)req.adapterLuid.HighPart, (unsigned)req.adapterLuid.LowPart);
+
+    // Enable D3D11 multithread protection before xrCreateSession: Meta Quest Link (LibOVRRT32_1) accesses the
+    // graphics device/context from its compositor threads and crashes if multithread protection is disabled.
+    UINT devFlags = dev->GetCreationFlags();
+    D3D_FEATURE_LEVEL fl = dev->GetFeatureLevel();
+    BOOL mtPrev = FALSE;
+    ID3D10Multithread* mt = nullptr;
+    if (SUCCEEDED(dev->QueryInterface(__uuidof(ID3D10Multithread), (void**)&mt)) && mt) {
+        mtPrev = mt->SetMultithreadProtected(TRUE);
+        mt->Release();
+    }
+    ID3D11DeviceContext* imm = nullptr;
+    dev->GetImmediateContext(&imm);
+    if (imm) {
+        ID3D10Multithread* cmt = nullptr;
+        if (SUCCEEDED(imm->QueryInterface(__uuidof(ID3D10Multithread), (void**)&cmt)) && cmt) {
+            cmt->SetMultithreadProtected(TRUE);
+            cmt->Release();
+        }
+        imm->Release();
+    }
+    Log("vr: D3D11 device fl 0x%X flags 0x%X multithread %d -> 1", (unsigned)fl, devFlags, (int)mtPrev);
 
     XrGraphicsBindingD3D11KHR gb = { XR_TYPE_GRAPHICS_BINDING_D3D11_KHR };
     gb.device = dev;
@@ -1746,11 +2050,20 @@ static bool CreateChain(Chain& c, UINT w, UINT h)
         rd.Format = unorm;
         rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
         ID3D11RenderTargetView* rtv = nullptr;
-        if (FAILED(xr.device->CreateRenderTargetView(img.texture, &rd, &rtv))) {
+        HRESULT hr = xr.device->CreateRenderTargetView(img.texture, &rd, &rtv);
+        if (FAILED(hr) || !rtv) {
             // Texture is not typeless: write through the sRGB view and linearise in the shader instead.
             rd.Format = (DXGI_FORMAT)xr.format;
             xr.linearize = true;
-            xr.device->CreateRenderTargetView(img.texture, &rd, &rtv);
+            hr = xr.device->CreateRenderTargetView(img.texture, &rd, &rtv);
+        }
+        if (FAILED(hr) || !rtv) {
+            D3D11_TEXTURE2D_DESC td = {};
+            if (img.texture) img.texture->GetDesc(&td);
+            Log("vr: CreateRenderTargetView failed (%08lX) for swapchain tex %ux%u fmt %d bind 0x%X",
+                (unsigned long)hr, td.Width, td.Height, (int)td.Format, td.BindFlags);
+            DestroyChain(c);
+            return false;
         }
         c.rtvs.push_back(rtv);
     }
@@ -1764,7 +2077,7 @@ static void DrawSetupCubes(ID3D11DeviceContext* imm, ID3D11RenderTargetView* rtv
 static const XrPosef* g_overlayPose;   // set while an eye image is copied: things drawn into it (setup cubes)
 static XrFovf g_overlayFov;
 static ID3D11ShaderResourceView* g_overlayHud;   // this frame's HUD layer for the eyes (markers, names) or null
-static float g_overlayHudShrink = 1.0f;           // ... drawn shrunk about the centre by this (EyeFrame::hudScale)
+static float g_overlayHudScale = 1.0f;           // EyeFrame::hudScale (Canvas::Project spread factor)
 
 // The format to read a texture through (dgVoodoo's D3D9 backbuffer texture is typeless).
 static DXGI_FORMAT ReadFormat(DXGI_FORMAT f)
@@ -1779,8 +2092,9 @@ static DXGI_FORMAT ReadFormat(DXGI_FORMAT f)
 }
 
 // Copies the game's back buffer into the next image of a swapchain (or, with scopeRect, a part of it into a
-// size x size round scope image).
-static bool CopyToChain(Chain& c, ID3D11Texture2D* bb, const float* scopeRect = nullptr, UINT size = 0)
+// size x size round scope image; with reproj, reprojects UE3's levelled symmetric frustum into the eye's exact
+// native OpenXR frustum and head roll).
+static bool CopyToChain(Chain& c, ID3D11Texture2D* bb, const float* scopeRect = nullptr, UINT size = 0, const EyeReproj* reproj = nullptr)
 {
     D3D11_TEXTURE2D_DESC bd;
     bb->GetDesc(&bd);
@@ -1827,13 +2141,21 @@ static bool CopyToChain(Chain& c, ID3D11Texture2D* bb, const float* scopeRect = 
             xr.device->CreateShaderResourceView(copy, &sd, &srv);
         }
     }
-    if (srv) xr.blit.Draw(xr.device, imm, srv, c.rtvs[idx], c.width, c.height, xr.linearize, false, scopeRect);
+    if (srv) xr.blit.Draw(xr.device, imm, srv, c.rtvs[idx], c.width, c.height, xr.linearize, false, scopeRect, false, false, 1.0f, reproj);
     if (g_overlayPose && !scopeRect) {
         // the HUD's moving parts (waypoints, names over teammates, lock-on marks): drawn by the game for this eye's
         // view, so they sit at their place in depth - into the eye image, not onto the panel
-        if (g_overlayHud)
-            xr.blit.Draw(xr.device, imm, g_overlayHud, c.rtvs[idx], c.width, c.height, xr.linearize, true, nullptr, true, false,
-                         g_overlayHudShrink);
+        if (g_overlayHud) {
+            if (reproj) {
+                EyeReproj hudReproj = *reproj;
+                hudReproj.uvScale = g_overlayHudScale;
+                xr.blit.Draw(xr.device, imm, g_overlayHud, c.rtvs[idx], c.width, c.height, xr.linearize, true, nullptr, true, false,
+                             1.0f, &hudReproj);
+            } else {
+                xr.blit.Draw(xr.device, imm, g_overlayHud, c.rtvs[idx], c.width, c.height, xr.linearize, true, nullptr, true, false,
+                             1.0f / std::max(g_overlayHudScale, 0.01f));
+            }
+        }
         // (the setup's zone marks are compositor quads now - BuildZoneMark: drawing them into the eye image here
         // stopped the frames on the real runtime, black screen)
     }
@@ -3357,9 +3679,14 @@ static void PollEvents()
 struct EyeFrame {
     int eye;
     XrPosef pose;            // the pose the game draws the eye with (LevelView: without the head's roll)
-    XrQuaternionf real;      // the head's real orientation
-    XrFovf fov;
-    XrTime time;   // display time the pose (and the hands the game aimed with) was predicted for
+    XrPosef submitPose;      // the headset's exact unmodified pose from xrLocateViews (submitted to xrEndFrame)
+    XrQuaternionf real;      // the head's real orientation (same as submitPose.orientation)
+    XrFovf fov;              // UE3's rendered symmetric frustum (used by helpers/debug)
+    XrFovf submitFov;        // the headset's exact unmodified eye FOV from xrLocateViews (submitted to xrEndFrame)
+    float renderTanH = 1.0f; // tan(half horizontal FOV) rendered by UE3
+    float renderTanV = 1.0f; // tan(half vertical FOV) rendered by UE3
+    float roll = 0.0f;       // roll removed by LevelOrientation (radians)
+    XrTime time;             // display time the pose (and the hands the game aimed with) was predicted for
     float hudScale = 1.0f;   // the frustum's width over the one without the roll (VRHudProjectScale)
 };
 static std::mutex g_stereoMutex;
@@ -3468,11 +3795,13 @@ static bool LocateEyes(const int* eyes, int count, VREyeView* out)
     float aspect = g_aspect.load();
     float tanH = 0.0f, tanV = 0.0f;
     XrQuaternionf level[2];
+    float rolls[2] = {};
     float maxRoll = 0.0f;
     for (int e = 0; e < 2; e++) {
         const XrView& v = views[e];
         float roll = 0.0f;
         level[e] = g_cfg.levelView ? LevelOrientation(v.pose.orientation, roll) : v.pose.orientation;
+        rolls[e] = roll;
         maxRoll = std::max(maxRoll, fabsf(roll));
         float c = cosf(roll), sn = sinf(roll);
         float xs[2] = { tanf(v.fov.angleLeft), tanf(v.fov.angleRight) }, ys[2] = { tanf(v.fov.angleDown), tanf(v.fov.angleUp) };
@@ -3526,9 +3855,14 @@ static bool LocateEyes(const int* eyes, int count, VREyeView* out)
         int eye = eyes[i];
         EyeFrame f;
         f.eye = eye;
+        f.submitPose = views[eye].pose;
         f.pose = views[eye].pose;
         f.real = f.pose.orientation;
         f.pose.orientation = level[eye];
+        f.submitFov = views[eye].fov;
+        f.renderTanH = tanH;
+        f.renderTanV = tanH / aspect;
+        f.roll = rolls[eye];
         f.time = li.displayTime;
         f.hudScale = hudScale;
         f.fov.angleLeft = -half;
@@ -3894,7 +4228,7 @@ static bool BuildReticle(XrTime t, XrCompositionLayerQuad& q)
     q.pose.position = { hand.position.x + fx * d, hand.position.y + fy * d, hand.position.z + fz * d };
     float size = d * 0.05f * g_cfg.reticleSize;   // ~3 degrees x ReticleSize
     q.size = { size, size };
-    if (game) q.size.width = q.size.height = d * kReticleCut * 2.0f * tanf(g_eyeDone[0].fov.angleRight) * g_cfg.reticleSize;
+    if (game) q.size.width = q.size.height = d * kReticleCut * 2.0f * g_eyeDone[0].renderTanH * g_cfg.reticleSize;
     return true;
 }
 
@@ -3943,7 +4277,7 @@ static void UpdateScope(ID3D11Texture2D* bb, const EyeFrame& f)
     const XrQuaternionf& o = f.pose.orientation;
     XrVector3f e = Rotate({ -o.x, -o.y, -o.z, o.w }, dir);   // into eye space (forward = -Z)
     if (e.z > -0.1f * sqrtf(e.x * e.x + e.y * e.y + e.z * e.z)) return;
-    float tanR = tanf(f.fov.angleRight), tanU = tanf(f.fov.angleUp);
+    float tanR = f.renderTanH, tanU = f.renderTanV;
     float u = 0.5f + 0.5f * (e.x / -e.z) / tanR, v = 0.5f - 0.5f * (e.y / -e.z) / tanU;
     float s = tanf(ScopeFovDeg() * 0.5f * 0.0174533f);
     float rect[4] = { 0, 0, s / tanR, s / tanU };
@@ -4001,8 +4335,15 @@ static void PresentStereo(ID3D11Texture2D* bb, const EyeFrame& f)
     g_overlayPose = &f.pose;
     g_overlayFov = f.fov;
     g_overlayHud = g_cfg.hudMarkersInEyes && CameraPlayerView() ? g_frameHud[kHudEyes] : nullptr;
-    g_overlayHudShrink = 1.0f / f.hudScale;
-    bool copied = CopyToChain(g_eyes[f.eye], bb);
+    g_overlayHudScale = f.hudScale;
+    EyeReproj reproj = {
+        tanf(f.submitFov.angleLeft), tanf(f.submitFov.angleRight),
+        tanf(f.submitFov.angleUp), tanf(f.submitFov.angleDown),
+        cosf(f.roll), sinf(f.roll),
+        1.0f / std::max(f.renderTanH, 0.01f), 1.0f / std::max(f.renderTanV, 0.01f),
+        1.0f
+    };
+    bool copied = CopyToChain(g_eyes[f.eye], bb, nullptr, 0, &reproj);
     g_overlayPose = nullptr;
     if (!copied) return;
     if (f.eye == 1) UpdateScope(bb, f);
@@ -4017,12 +4358,23 @@ static void PresentStereo(ID3D11Texture2D* bb, const EyeFrame& f)
     if (f.eye != 1 || !g_eyeHave[0]) return;   // submit after each left+right pair
     g_eyeHave[0] = g_eyeHave[1] = false;
 
+    static bool stereoDiagLogged;
+    if (!stereoDiagLogged) {
+        stereoDiagLogged = true;
+        Log("vr: stereo frustum: eye %ux%u aspect %.3f renderTan %.3fx%.3f; L fov [%.1f %.1f %.1f %.1f] R fov [%.1f %.1f %.1f %.1f]",
+            g_eyes[0].width, g_eyes[0].height, g_aspect.load(), g_eyeDone[0].renderTanH, g_eyeDone[0].renderTanV,
+            g_eyeDone[0].submitFov.angleLeft * 57.29578f, g_eyeDone[0].submitFov.angleRight * 57.29578f,
+            g_eyeDone[0].submitFov.angleUp * 57.29578f, g_eyeDone[0].submitFov.angleDown * 57.29578f,
+            g_eyeDone[1].submitFov.angleLeft * 57.29578f, g_eyeDone[1].submitFov.angleRight * 57.29578f,
+            g_eyeDone[1].submitFov.angleUp * 57.29578f, g_eyeDone[1].submitFov.angleDown * 57.29578f);
+    }
+
     XrFrameState fs;
     if (!ConsumeOrWaitFrame(fs)) return;
     XrCompositionLayerProjectionView pv[2] = { { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW }, { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW } };
     for (int i = 0; i < 2; i++) {
-        pv[i].pose = g_eyeDone[i].pose;
-        pv[i].fov = g_eyeDone[i].fov;
+        pv[i].pose = g_eyeDone[i].submitPose;
+        pv[i].fov = g_eyeDone[i].submitFov;
         pv[i].subImage.swapchain = g_eyes[i].sc;
         pv[i].subImage.imageRect = { { 0, 0 }, { (int32_t)g_eyes[i].width, (int32_t)g_eyes[i].height } };
         g_lastProjViews[i] = pv[i];
@@ -4113,15 +4465,24 @@ static void VRFrame(IDXGISwapChain* sc, ID3D11Resource* gameBB)
     if (gameBB && SUCCEEDED(gameBB->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&gt))) {
         D3D11_TEXTURE2D_DESC gd;
         gt->GetDesc(&gd);
-        bool use = (gd.Width != bd.Width || gd.Height != bd.Height) && gd.SampleDesc.Count == 1;
+        bool use = (gd.Width != bd.Width || gd.Height != bd.Height);
         static bool used;
         if (use != used) {
             used = use;
-            if (use) Log("vr: picture from the game's backbuffer %ux%u (the window's swapchain is %ux%u)", gd.Width, gd.Height, bd.Width, bd.Height);
+            if (use) Log("vr: picture from the game's backbuffer %ux%u msaa %u (the window's swapchain is %ux%u)",
+                         gd.Width, gd.Height, gd.SampleDesc.Count, bd.Width, bd.Height);
             else Log("vr: picture from the window's swapchain %ux%u", bd.Width, bd.Height);
         }
         if (use) { bb->Release(); bb = gt; bd = gd; gt = nullptr; }
         SafeRelease(gt);
+    } else if (!gameBB && g_cfg.renderWidth > 0 && g_cfg.renderHeight > 0 &&
+               (bd.Width != (UINT)g_cfg.renderWidth || bd.Height != (UINT)g_cfg.renderHeight)) {
+        static bool warnedMiss;
+        if (!warnedMiss) {
+            warnedMiss = true;
+            Log("vr: WARNING window swapchain %ux%u differs from RenderSize %dx%d and game backbuffer was not captured yet",
+                bd.Width, bd.Height, g_cfg.renderWidth, g_cfg.renderHeight);
+        }
     }
     g_aspect = (float)bd.Width / (float)bd.Height;
 
@@ -4199,7 +4560,9 @@ static void OnPresent(IDXGISwapChain* sc, UINT flags)
 {
     if (flags & DXGI_PRESENT_TEST) return;
     ID3D11Resource* gameBB = nullptr;
-    if (g_cfg.debugAutomation || g_cfg.vrHud) {
+    {
+        // Always install D3D context trace so dgVoodoo's full-size D3D9 backbuffer is recovered even when
+        // FloatingHud=0 (otherwise smaller monitors truncate the window swapchain and corrupt stereo FOV/aspect).
         ID3D11Device* dev = nullptr;
         if (SUCCEEDED(sc->GetDevice(__uuidof(ID3D11Device), (void**)&dev))) { TraceInstall(dev); dev->Release(); }
         TraceEndFrame(g_frameHud, &gameBB);
@@ -4315,5 +4678,7 @@ static DWORD WINAPI VRThread(LPVOID)
 
 void VRStart()
 {
+    if (g_cfg.renderWidth > 0 && g_cfg.renderHeight > 0)
+        g_aspect = (float)g_cfg.renderWidth / (float)g_cfg.renderHeight;
     CloseHandle(CreateThread(nullptr, 0, VRThread, nullptr, 0, nullptr));
 }

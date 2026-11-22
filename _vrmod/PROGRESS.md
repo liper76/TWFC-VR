@@ -1262,3 +1262,61 @@ $env:XR_RUNTIME_JSON="...\_vrmod\tools\mockxr\mockxr.json"; Start-Process Binari
   powershell.exe», окно появилось, сторож молчит. Сохранения не изменились (md5).
 - **Не проверено:** настоящая Steam-сборка (уйдёт ли перезапуск), PSVR2 без 32-битного ключа, вывод стека
   сторожа (окно всегда появлялось), клавиши F2/Esc, всё в шлеме.
+
+## 2026-11-22 — фиксы по GitHub issues #1, #2, #3 и отзывам из Discord
+- **Issue #1 (`xrCreateInstance -32` на всех 3 рантаймах в v1.0.3):** причина — сломанные/устаревшие 32-битные
+  неявные OpenXR API-слои в `WOW6432Node\Khronos\OpenXR\1\ApiLayers\Implicit`, из-за которых `ApiLayerInterface::LoadApiLayers()`
+  валит `xrCreateInstance` с `XR_ERROR_FILE_ACCESS_ERROR (-32)` до загрузки любого рантайма.
+  - `vr.cpp` (`InspectImplicitApiLayers`, `CreateXrInstance`, `TryRuntimePass`, `CreateXrInstanceAnyRuntime`):
+    перехватываем `OutputDebugStringA` при `XR_LOADER_DEBUG=warn`, логируем все 32-битные implicit-слои; если все
+    рантаймы упали с ошибкой слоя (`-32/-33/-36/-2/-1`), автоматически повторяем попытку с отключением `disable_environment`,
+    очисткой `XR_API_LAYER_PATH`/`XR_ENABLE_API_LAYERS` и per-thread фильтром `RegOpenKeyExW` (`registry.cpp`: хук на
+    `kernelbase!RegOpenKeyExW` скрывает `ApiLayers\Implicit` только в момент этого вызова, реестр Windows не трогается).
+  - Добавлен путь `Meta Horizon\Support\oculus-runtime\oculus_openxr_32.json` в `RuntimePrepare()`.
+- **Issue #3 часть 1 (вылет Steam-версии на старте с Meta Quest Link):**
+  - `d3dtrace.cpp`: все хуки контекста (`BeforeDraw`, `HSetRT`, `HClear`, `HDraw`, `HDrawIdx`, `HCopy`, `HCopySub`, `HResolveSub`)
+    защищены `g_d3dOwnCalls`, добавлена проверка `if (r) r->Release()`.
+  - `d3dtrace.cpp` + `vr.cpp`: включена многопоточная защита `ID3D10Multithread::SetMultithreadProtected(TRUE)`.
+    На MockXR выявлено, что `d3d11.dll` перезаписывает слоты встроенной vtable `CContext` на месте через 4 состояния
+    (`T0` начальная → `T1` ленивая MT → `T2` активная залоченная MT после первого вызова → `T3` при выключении MT),
+    из-за чего вызов `SetMultithreadProtected(TRUE)` со стороны SteamVR/Oculus/мода бесшумно отключал хуки `d3dtrace.cpp`.
+    Теперь `TraceInstall()` динамически проверяет 9 слотов `*(void***)g_imm` и дохукивает любые новые адреса функций
+    (`+9/+9/+1`, затем `+8 slots` на 2-м кадре), с защитой от рекурсии `t_hookDepth` и вызовом активного слота в `Orig*`.
+  - `vr.cpp` (`Blitter`): переиспользуемый deferred context вместо создания/удаления сотни раз в секунду; проверка RTV в `CreateChain()`.
+  - `vr.cpp` (`IsLowVirtualMemory`, `MaxRenderSide`) + `game.cpp` (`PatchThread`): на 2 ГБ процессе без LAA (Steam `.bind`)
+    автоматически ограничиваем рендер до `1800x1800` и пул текстур до `384 МБ` (на 2560x2560 первый 3D-кадр ел 2003 МБ VA -> гарантированный OOM).
+- **Issue #3 часть 2 (половина VR-обзора чёрная в миссии под SteamVR на Quest 3S) + Discord (искажение мира при движении, прицел ниже попаданий):**
+  - **Главная найденная первопричина (`focus.cpp`):** на прогоне MockXR (`2392x2392` на 1600p экране) воспроизвели вживую
+    чёрную нижнюю полосу (`y = 1520..2392` в `eye0.bmp`!). Причина в `TWFC.exe` (`0x116BA764`): при инициализации игра
+    вызывает `SetWindowLongW(hwnd, GWL_WNDPROC, 0x117FC7D0)`, снося наш `GameWndProc` (`WM_GETMINMAXINFO` / `WM_WINDOWPOSCHANGING`),
+    и сразу вызывает `SetWindowPlacement` (`0x116BA7E5`). Windows клампит окно по высоте рабочей области монитора (~1040 px на 1080p,
+    1520 px на 1600p), `UE3` через `WM_SIZE`/`GetClientRect` (`0x117F4E6F`) урезает свой `Viewport` (`Viewport->Resize`), и рисует
+    3D-сцену только в верхнюю часть квадратного бэкбуфера — нижняя половина остаётся сплошной чёрной, центр проекции уезжает вверх
+    («смотрю снизу», мир искажается, прицел ниже попаданий).
+    Фикс: хуки `SetWindowLongW/A` в `focus.cpp` сохраняют `GameWndProc` сверху, если новый `WndProc` лежит в `TWFC.exe`
+    (работает на любой сборке без хардкода адреса, не ломая сабклассы dgVoodoo/DXGI); `HookSetWindowPos`/`HookMoveWindow`
+    также удерживают размер `WindowSizeFor(h)`.
+  - `vr.cpp` (`kBlitHLSL`, `EyeReproj`, `LocateEyes`, `CopyToChain`, `PresentStereo`, `BuildReticle`, `UpdateScope`):
+    в `xrEndFrame` теперь передаются ТОЧНЫЕ немодифицированные `views[i].pose` и `views[i].fov` от `xrLocateViews`, а
+    шейдер `Blitter::Draw` делает точную 2D-репроекцию в пространстве тангенсов из выровненного симметричного фрустума
+    UE3 в нативный асимметричный FOV + крен головы (включая `g_overlayHud` с `hudScale`).
+  - `d3dtrace.cpp` + `vr.cpp` (`OnPresent`, `VRFrame`, `VRStart`): `TraceInstall`/`TraceEndFrame` работают всегда (не только
+    при `FloatingHud=1`), расширен `g_drawnRTs[16 -> 256]`, добавлен хук `ResolveSubresource`, убрано ограничение
+    `SampleDesc.Count == 1` в `VRFrame`, `NoteCopy` выбирает последний RT формата дисплея с точным размером `RenderWidth x RenderHeight`,
+    `g_aspect` инициализируется в `VRStart()`.
+  - `game.cpp` (`HookDrawViewport`): сброс `bLockedFOV | bConstrainAspectRatio` теперь работает и в AFR (`StereoPerFrame=0`).
+- **Issue #2 (PSVR2 / SteamVR меню настроек VR):**
+  - `focus.cpp` (`FocusIsRealForeground`) + `vr.cpp` (`UpdateInput`): `F2`/`Esc` проверяют реальный (не хукнутый) фокус
+    окна ИЛИ `XR_SESSION_STATE_FOCUSED`.
+  - `vr.cpp`: добавлена контроллерная комбинация без кнопки меню — удержание **обоих кликов стиков (`LClick + RClick`, 0.8 с)**
+    в бою открывает/закрывает меню настроек VR; добавлены профили `/interaction_profiles/microsoft/motion_controller` и `khr/simple_controller`.
+- **Установщик 1.0.4 (`_vrmod\installer\Installer.cs`):** версия поднята до `1.0.4` / `1.0.4 Steam`.
+- **Проверено:**
+  - Чистая сборка `xinput1_3.dll` (`BUILD OK`, 0 ошибок/предупреждений) и установщиков `TWFC-VR-Setup.exe` / `TWFC-VR-Setup-Steam.exe` (`SETUP OK`, версия `1.0.4.0`).
+  - Финальный прогон MockXR в миссии: подтверждены `window: retained GameWndProc over game WndProc 117FC7D0`, удержание
+    полного `2392x2392` окна на 1600p мониторе (чистый 1:1 `CopyResource 2392x2392 <- 2392x2392`, 2833 draws in all),
+    динамические хуки `d3d11` (`+9/+9/+1`, затем `+8 slots`, `multithread 0 -> 1`), отсутствие чёрной нижней половины на
+    `eye0.bmp` (полная 3D-картинка от верхнего до нижнего пикселя), нативные FOV/позы глаз (`L-0.87 R0.79 U0.84 D-0.91`),
+    репроекция крена 25°, открытие панели настроек VR по удержанию `LClick+RClick` (`overlay quad 640x520`).
+  - Сохранения в обеих папках проверены по SHA-256 (все хэши 1:1 с базовыми).
+- **Не проверено:** реальная Steam-сборка / Meta Quest Link / Quest 3S SteamVR / PSVR2 в шлеме.

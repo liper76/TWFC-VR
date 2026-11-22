@@ -231,9 +231,20 @@ static DWORD WINAPI PatchThread(LPVOID)
             last = want;
         }
         // A bigger texture budget: at high resolutions every texture wants its top mips, the game's 250 MB runs out
-        // and models drop to blurry mips
+        // and models drop to blurry mips. On a 2 GB process (Steam DRM exe without the 4 GB LAA flag) cap at 384 MB
+        // so textures + VR swapchains + runtime DLLs do not exhaust 32-bit virtual address space.
+        static float poolCapMB = -1.0f;
+        if (poolCapMB < 0.0f) {
+            MEMORYSTATUSEX ms = { sizeof(ms) };
+            GlobalMemoryStatusEx(&ms);
+            bool lowVA = ms.ullTotalVirtual <= (2560ULL << 20);
+            poolCapMB = lowVA ? 384.0f : 2048.0f;
+            if (lowVA && g_cfg.texturePoolMB > poolCapMB)
+                Log("game: 2 GB process address space (no 4 GB flag) - capping texture budget from %.0f to %.0f MB",
+                    g_cfg.texturePoolMB, poolCapMB);
+        }
         volatile uint32_t* pool = (volatile uint32_t*)addr::kTexturePool;
-        uint32_t poolWant = (uint32_t)std::min(std::max(g_cfg.texturePoolMB, 0.0f), 2048.0f) << 20;
+        uint32_t poolWant = (uint32_t)std::min(std::max(g_cfg.texturePoolMB, 0.0f), poolCapMB) << 20;
         if (poolWant && *pool != poolWant) {
             Log("game: texture budget %u -> %u MB", *pool >> 20, poolWant >> 20);
             *pool = poolWant;
@@ -534,7 +545,24 @@ static void __stdcall HookDrawViewport(void* viewport)
         g_occTests[0] = g_occTests[1] = g_occHidden[0] = g_occHidden[1] = 0;
         t0 = GetTickCount();
     }
-    if (!twice) { g_origDrawViewport(viewport); return; }
+    if (!twice) {
+        // Also clear bLockedFOV | bConstrainAspectRatio in single-pass (AFR) gameplay so square VR buffers are never letterboxed.
+        if (g_frameView && CameraInGameplay() && VRIsRunningOrFake()) {
+            uint8_t* cam = (uint8_t*)g_frameView - 0x324;
+            uint32_t savedFlags = 0;
+            bool cleared = false;
+            __try {
+                savedFlags = *(uint32_t*)(cam + 0x1D4);
+                *(uint32_t*)(cam + 0x1D4) = savedFlags & ~3u;
+                cleared = true;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            g_origDrawViewport(viewport);
+            if (cleared) __try { *(uint32_t*)(cam + 0x1D4) = savedFlags; } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            return;
+        }
+        g_origDrawViewport(viewport);
+        return;
+    }
 
     TPOV left = *g_frameView;
     TPOV right = g_rightPov;
