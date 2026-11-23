@@ -231,17 +231,40 @@ static DWORD WINAPI PatchThread(LPVOID)
             last = want;
         }
         // A bigger texture budget: at high resolutions every texture wants its top mips, the game's 250 MB runs out
-        // and models drop to blurry mips. On a 2 GB process (Steam DRM exe without the 4 GB LAA flag) cap at 384 MB
-        // so textures + VR swapchains + runtime DLLs do not exhaust 32-bit virtual address space.
-        static float poolCapMB = -1.0f;
-        if (poolCapMB < 0.0f) {
-            MEMORYSTATUSEX ms = { sizeof(ms) };
-            GlobalMemoryStatusEx(&ms);
-            bool lowVA = ms.ullTotalVirtual <= (2560ULL << 20);
-            poolCapMB = lowVA ? 384.0f : 2048.0f;
-            if (lowVA && g_cfg.texturePoolMB > poolCapMB)
-                Log("game: 2 GB process address space (no 4 GB flag) - capping texture budget from %.0f to %.0f MB",
-                    g_cfg.texturePoolMB, poolCapMB);
+        // and models drop to blurry mips. On a 2 GB process (Steam DRM exe without the 4 GB LAA flag), keep the pool
+        // below stock (180 MB) and tighten dynamically if free 32-bit virtual address space gets low so long sessions
+        // cannot exhaust VA and trigger UE3's "You ran out of memory" crash.
+        static int lowVAFlag = -1;
+        static int vaTier = 0;   // 0 = normal (180 MB), 1 = tight (128 MB), 2 = emergency (96 MB)
+        static DWORD lastMemLog = 0;
+        MEMORYSTATUSEX ms = { sizeof(ms) };
+        GlobalMemoryStatusEx(&ms);
+        if (lowVAFlag < 0) {
+            lowVAFlag = ms.ullTotalVirtual <= (2560ULL << 20) ? 1 : 0;
+            if (lowVAFlag && g_cfg.texturePoolMB > 180.0f)
+                Log("game: 2 GB process address space (no 4 GB flag) - capping texture budget from %.0f to 180 MB",
+                    g_cfg.texturePoolMB);
+            lastMemLog = GetTickCount();
+        }
+        float poolCapMB = 2048.0f;
+        if (lowVAFlag) {
+            unsigned availMB = (unsigned)(ms.ullAvailVirtual >> 20);
+            int prevTier = vaTier;
+            if (availMB < 256) vaTier = 2;
+            else if (availMB < 384) vaTier = (vaTier == 2 && availMB < 320) ? 2 : 1;
+            else if (availMB >= 448) vaTier = 0;
+            else if (vaTier == 2) vaTier = 1;
+            poolCapMB = vaTier == 2 ? 96.0f : vaTier == 1 ? 128.0f : 180.0f;
+            if (vaTier != prevTier) {
+                Log("game: 2 GB VA %s (%u MB free) - texture budget cap %.0f MB",
+                    vaTier > prevTier ? "low" : "recovered", availMB, poolCapMB);
+                LogMemory(vaTier > prevTier ? "low VA" : "VA recovered");
+            }
+            DWORD now = GetTickCount();
+            if (now - lastMemLog >= 120000) {
+                lastMemLog = now;
+                LogMemory("periodic");
+            }
         }
         volatile uint32_t* pool = (volatile uint32_t*)addr::kTexturePool;
         uint32_t poolWant = (uint32_t)std::min(std::max(g_cfg.texturePoolMB, 0.0f), poolCapMB) << 20;
@@ -735,20 +758,134 @@ bool GameMoviePlaying() { return GetTickCount() - g_movieTick < 300; }
 // in "mov [GUseThreadedRendering], eax; jmp StartRenderingThread", replaced by a ret. Called from DllMain.
 namespace addr {
     const uintptr_t kStartRenderThreadTail = 0x11002BB2;
+    // NxCreatePhysicsSDK setup in InitGameRBPhys: mov dword ptr [esp+3Ch], 80000000h (NxPhysicsSDKDesc::flags).
+    // Setting bit 0 (NX_SDKF_NO_HARDWARE) forces CPU PhysX and prevents PhysXCore from loading PhysXDevice
+    // and reserving a 128+ MB CUDA GPU heap inside the 32-bit virtual address space.
+    const uintptr_t kPhysXDescFlagsImm = 0x115D2EBB;
+    // One-time startup VRAM probe via ddraw.dll (DirectDrawCreateEx -> GetAvailableVidMem) that writes local/total
+    // VRAM MB to [sysInfo+0xC28] and [sysInfo+0xC2C]. Loading ddraw.dll pins NVIDIA's 44 MB nvd3dum.dll D3D9 driver
+    // into 32-bit VA forever even though the mod renders via dgVoodoo2 (D3D11).
+    const uintptr_t kDDrawVidMemProbe = 0x117F4280;
+}
+
+static void* g_origNxCreatePhysicsSDK;
+typedef int(__stdcall* PFN_CudaGetDeviceCount)(int*);
+static PFN_CudaGetDeviceCount g_origCudaGetDeviceCount;
+typedef void(__stdcall* PFN_DDrawVidMemProbe)(uint8_t*);
+static PFN_DDrawVidMemProbe g_origDDrawVidMemProbe;
+
+static int __stdcall HookCudaGetDeviceCount(int* count)
+{
+    if (count) *count = 0;
+    static bool logged;
+    if (!logged) {
+        logged = true;
+        Log("game: blocked unused cudart/nvtt CUDA probe (saves ~76 MB of 32-bit VA)");
+    }
+    return 38;   // cudaErrorNoDevice
+}
+
+static void __stdcall HookDDrawVidMemProbe(uint8_t* sysInfo)
+{
+    if (sysInfo) {
+        *(uint32_t*)(sysInfo + 0xC28) = 2048;   // dedicated VRAM MB
+        *(uint32_t*)(sysInfo + 0xC2C) = 2048;   // total VRAM MB
+    }
+    static bool logged;
+    if (!logged) {
+        logged = true;
+        Log("game: skipped unused ddraw.dll VRAM probe (avoids ~44 MB D3D9 driver DLL in 32-bit VA)");
+    }
+}
+
+static void __cdecl ForcePhysXNoHardware(void* desc)
+{
+    if (!desc) return;
+    __try {
+        uint32_t* flags = (uint32_t*)((uint8_t*)desc + 0x10);
+        uint32_t old = *flags;
+        if (!(old & 1u)) {
+            *flags = old | 1u;   // NX_SDKF_NO_HARDWARE
+            Log("game: PhysX GPU hardware support disabled via hook (flags %08X -> %08X)", old, *flags);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+__declspec(naked) static void HookNxCreatePhysicsSDK()
+{
+    __asm {
+        push eax
+        push ecx
+        push edx
+        push dword ptr [esp + 28]   // __cdecl arg 4 (&NxPhysicsSDKDesc): 12 bytes pushed + 16
+        call ForcePhysXNoHardware
+        add esp, 4
+        pop edx
+        pop ecx
+        pop eax
+        jmp dword ptr [g_origNxCreatePhysicsSDK]
+    }
+}
+
+static void DisablePhysXHardware(bool supported)
+{
+    if (!g_cfg.disablePhysXHardware) return;
+    // Block unused nvtt.dll -> cudart.dll CUDA initialization (~76 MB: nvcuda32 + nvptxJitCompiler32 + nvapi_impl).
+    MH_Initialize();
+    void* target = nullptr;
+    if (!g_origCudaGetDeviceCount &&
+        MH_CreateHookApiEx(L"cudart", "cudaGetDeviceCount", (void*)HookCudaGetDeviceCount,
+                           (void**)&g_origCudaGetDeviceCount, &target) == MH_OK) {
+        MH_EnableHook(target);
+    }
+    // Skip unused ddraw.dll VRAM probe (~44 MB: nvd3dum.dll pinned forever in 32-bit VA).
+    if (supported && !g_origDDrawVidMemProbe) {
+        static const uint8_t ddrawExpect[] = { 0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF8, 0x83, 0xEC, 0x24 };
+        if (memcmp((void*)addr::kDDrawVidMemProbe, ddrawExpect, sizeof(ddrawExpect)) == 0 &&
+            MH_CreateHook((void*)addr::kDDrawVidMemProbe, (void*)HookDDrawVidMemProbe, (void**)&g_origDDrawVidMemProbe) == MH_OK) {
+            MH_EnableHook((void*)addr::kDDrawVidMemProbe);
+        }
+    }
+    if (supported) {
+        uint8_t* p = (uint8_t*)addr::kPhysXDescFlagsImm;
+        static const uint8_t expect[] = { 0xC7, 0x44, 0x24, 0x3C, 0x00, 0x00, 0x00, 0x80 };
+        if (memcmp(p, expect, sizeof(expect)) == 0) {
+            DWORD old;
+            VirtualProtect(p + 4, 4, PAGE_EXECUTE_READWRITE, &old);
+            p[4] = 0x01;   // 0x80000001: NX_SDKF_NO_HARDWARE
+            VirtualProtect(p + 4, 4, old, &old);
+            FlushInstructionCache(GetCurrentProcess(), p + 4, 4);
+            Log("game: PhysX GPU hardware support disabled (CPU PhysX)");
+            return;
+        }
+        Log("game: PhysX flags patch: unexpected code - falling back to PhysXLoader hook");
+    }
+    target = nullptr;
+    if (MH_CreateHookApiEx(L"PhysXLoader", "NxCreatePhysicsSDK", (void*)HookNxCreatePhysicsSDK,
+                           &g_origNxCreatePhysicsSDK, &target) == MH_OK &&
+        MH_EnableHook(target) == MH_OK)
+        Log("game: PhysXLoader!NxCreatePhysicsSDK hook installed (CPU PhysX)");
 }
 
 void GameEarlyPatches()
 {
-    if (!g_cfg.singleThreadRender || !GameIsSupportedBuild()) return;
-    uint8_t* p = (uint8_t*)addr::kStartRenderThreadTail;
-    static const uint8_t expect[] = { 0xA3, 0x44, 0x0C, 0xB1, 0x12, 0xE9 };
-    if (memcmp(p, expect, sizeof(expect)) != 0) { Log("game: render thread patch: unexpected code"); return; }
-    DWORD old;
-    VirtualProtect(p, 1, PAGE_EXECUTE_READWRITE, &old);
-    *p = 0xC3;
-    VirtualProtect(p, 1, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), p, 1);
-    Log("game: rendering on the game thread (no render thread)");
+    bool supported = GameIsSupportedBuild();
+    if (supported && g_cfg.singleThreadRender) {
+        uint8_t* p = (uint8_t*)addr::kStartRenderThreadTail;
+        static const uint8_t expect[] = { 0xA3, 0x44, 0x0C, 0xB1, 0x12, 0xE9 };
+        if (memcmp(p, expect, sizeof(expect)) != 0) {
+            Log("game: render thread patch: unexpected code");
+        } else {
+            DWORD old;
+            VirtualProtect(p, 1, PAGE_EXECUTE_READWRITE, &old);
+            *p = 0xC3;
+            VirtualProtect(p, 1, old, &old);
+            FlushInstructionCache(GetCurrentProcess(), p, 1);
+            Log("game: rendering on the game thread (no render thread)");
+        }
+    }
+    DisablePhysXHardware(supported);
 }
 
 bool GameSingleThreadRender() { return g_cfg.singleThreadRender && *(volatile int*)0x12B10C44 == 0; }

@@ -1488,8 +1488,9 @@ static bool IsLowVirtualMemory()
 static int MaxRenderSide()
 {
     int cap = g_cfg.maxRenderSize > 0 ? std::max(g_cfg.maxRenderSize, 640) : 8192;
-    // Steam's DRM-wrapped TWFC.exe cannot be patched with LAA (2 GB VA limit): 2560x2560 pushes 3D startup past 2 GB.
-    if (IsLowVirtualMemory() && cap > 1800) cap = 1800;
+    // Steam's DRM-wrapped TWFC.exe cannot be patched with LAA (2 GB VA limit): cap render side at 1600
+    // to leave generous 32-bit virtual address space headroom for long sessions and mission streaming.
+    if (IsLowVirtualMemory() && cap > 1600) cap = 1600;
     return cap;
 }
 
@@ -1514,7 +1515,20 @@ static int RenderSideFor(const int rec[2], const float* tan)
 // Called from DllMain, before the game reads its resolution: the last headset's size (the file's first line).
 void VRRenderSizeStart()
 {
-    if (!g_cfg.vrEnabled || g_cfg.fakeHmd || g_cfg.renderScale <= 0.0f) return;
+    if (!g_cfg.vrEnabled || g_cfg.fakeHmd) return;
+    if (g_cfg.renderScale <= 0.0f) {
+        if (IsLowVirtualMemory()) {
+            int cap = MaxRenderSide();
+            if (g_cfg.renderWidth > cap || g_cfg.renderHeight > cap) {
+                int nw = std::min(g_cfg.renderWidth, cap), nh = std::min(g_cfg.renderHeight, cap);
+                Log("vr: 2 GB process address space - clamping RenderWidth/Height %dx%d to %dx%d",
+                    g_cfg.renderWidth, g_cfg.renderHeight, nw, nh);
+                g_cfg.renderWidth = nw;
+                g_cfg.renderHeight = nh;
+            }
+        }
+        return;
+    }
     HeadsetLine h;
     for (const std::string& l : ReadHeadsetFile())
         if (ParseHeadsetLine(l, h)) {
@@ -1523,6 +1537,11 @@ void VRRenderSizeStart()
                 g_cfg.renderWidth, g_cfg.renderHeight, h.name.c_str(), h.rec[0], h.rec[1], g_cfg.renderScale, MaxRenderSide());
             return;
         }
+    if (IsLowVirtualMemory()) {
+        int cap = MaxRenderSide();
+        if (g_cfg.renderWidth > cap) g_cfg.renderWidth = cap;
+        if (g_cfg.renderHeight > cap) g_cfg.renderHeight = cap;
+    }
     Log("vr: render size: no headset seen yet - %dx%d from the ini, the headset's from the next start", g_cfg.renderWidth,
         g_cfg.renderHeight);
 }
@@ -2091,14 +2110,67 @@ static DXGI_FORMAT ReadFormat(DXGI_FORMAT f)
     }
 }
 
+// Persistent scratch texture + SRV used when the source backbuffer is MSAA or not directly bindable as an SRV
+// (such as DXGI's swapchain backbuffer). Reusing one texture avoids creating/destroying a ~13 MB Texture2D 180x/s
+// (which causes driver deferred-free stutter and 32-bit VA fragmentation over long sessions), without ever holding
+// a COM reference to the swapchain's own buffer across Present.
+static struct ScratchCopy {
+    ID3D11Texture2D* tex = nullptr;
+    ID3D11ShaderResourceView* srv = nullptr;
+    UINT w = 0, h = 0;
+    DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
+
+    void Reset() { SafeRelease(srv); SafeRelease(tex); w = h = 0; fmt = DXGI_FORMAT_UNKNOWN; }
+
+    bool Ensure(ID3D11Device* dev, UINT width, UINT height, DXGI_FORMAT format)
+    {
+        if (tex && srv && w == width && h == height && fmt == format) return true;
+        Reset();
+        D3D11_TEXTURE2D_DESC cd = {};
+        cd.Width = width;
+        cd.Height = height;
+        cd.MipLevels = 1;
+        cd.ArraySize = 1;
+        cd.Format = format;
+        cd.SampleDesc = { 1, 0 };
+        cd.Usage = D3D11_USAGE_DEFAULT;
+        cd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(dev->CreateTexture2D(&cd, nullptr, &tex)) || !tex) { Reset(); return false; }
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
+        sd.Format = ReadFormat(format);
+        sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MipLevels = 1;
+        if (FAILED(dev->CreateShaderResourceView(tex, &sd, &srv)) || !srv) { Reset(); return false; }
+        w = width;
+        h = height;
+        fmt = format;
+        Log("vr: reusable blit copy texture %ux%u fmt %d", w, h, (int)fmt);
+        return true;
+    }
+} g_copyScratch;
+
 // Copies the game's back buffer into the next image of a swapchain (or, with scopeRect, a part of it into a
-// size x size round scope image; with reproj, reprojects UE3's levelled symmetric frustum into the eye's exact
+// size x size round scope image; with scopeRect == nullptr and size > 0, caps the swapchain's longest side to
+// `size` preserving aspect ratio; with reproj, reprojects UE3's levelled symmetric frustum into the eye's exact
 // native OpenXR frustum and head roll).
 static bool CopyToChain(Chain& c, ID3D11Texture2D* bb, const float* scopeRect = nullptr, UINT size = 0, const EyeReproj* reproj = nullptr)
 {
     D3D11_TEXTURE2D_DESC bd;
     bb->GetDesc(&bd);
-    UINT cw = size ? size : bd.Width, ch = size ? size : bd.Height;
+    UINT cw = bd.Width, ch = bd.Height;
+    if (size) {
+        if (scopeRect) {
+            cw = ch = size;
+        } else if (cw > size || ch > size) {
+            if (cw >= ch) {
+                ch = std::max(4u, (UINT)((uint64_t)bd.Height * size / bd.Width) & ~3u);
+                cw = size;
+            } else {
+                cw = std::max(4u, (UINT)((uint64_t)bd.Width * size / bd.Height) & ~3u);
+                ch = size;
+            }
+        }
+    }
     if (!c.sc || c.width != cw || c.height != ch)
         if (!CreateChain(c, cw, ch)) return false;
 
@@ -2111,34 +2183,26 @@ static bool CopyToChain(Chain& c, ID3D11Texture2D* bb, const float* scopeRect = 
 
     ID3D11DeviceContext* imm = nullptr;
     xr.device->GetImmediateContext(&imm);
-    ID3D11Texture2D* src = bb;
-    ID3D11Texture2D* resolved = nullptr;
-    if (bd.SampleDesc.Count > 1) {
-        D3D11_TEXTURE2D_DESC rd = bd;
-        rd.SampleDesc = { 1, 0 };
-        rd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        rd.MiscFlags = 0;
-        if (SUCCEEDED(xr.device->CreateTexture2D(&rd, nullptr, &resolved))) {
-            imm->ResolveSubresource(resolved, 0, bb, 0, ReadFormat(bd.Format));
-            src = resolved;
-        }
-    }
     ID3D11ShaderResourceView* srv = nullptr;
-    ID3D11Texture2D* copy = nullptr;
-    D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
-    sd.Format = ReadFormat(bd.Format);
-    sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-    sd.Texture2D.MipLevels = 1;
-    if (FAILED(xr.device->CreateShaderResourceView(src, &sd, &srv))) {
-        // Back buffer not bindable as SRV: copy it into a sampleable texture first.
-        D3D11_TEXTURE2D_DESC cd = bd;
-        cd.SampleDesc = { 1, 0 };
-        cd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        cd.MiscFlags = 0;
-        cd.Usage = D3D11_USAGE_DEFAULT;
-        if (SUCCEEDED(xr.device->CreateTexture2D(&cd, nullptr, &copy))) {
-            imm->CopyResource(copy, src);
-            xr.device->CreateShaderResourceView(copy, &sd, &srv);
+    ID3D11ShaderResourceView* ownedSrv = nullptr;
+    if (bd.SampleDesc.Count > 1) {
+        DXGI_FORMAT rf = ReadFormat(bd.Format);
+        if (g_copyScratch.Ensure(xr.device, bd.Width, bd.Height, rf)) {
+            imm->ResolveSubresource(g_copyScratch.tex, 0, bb, 0, rf);
+            srv = g_copyScratch.srv;
+        }
+    } else {
+        if (bd.BindFlags & D3D11_BIND_SHADER_RESOURCE) {
+            D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
+            sd.Format = ReadFormat(bd.Format);
+            sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            sd.Texture2D.MipLevels = 1;
+            if (SUCCEEDED(xr.device->CreateShaderResourceView(bb, &sd, &ownedSrv)))
+                srv = ownedSrv;
+        }
+        if (!srv && g_copyScratch.Ensure(xr.device, bd.Width, bd.Height, bd.Format)) {
+            imm->CopyResource(g_copyScratch.tex, bb);
+            srv = g_copyScratch.srv;
         }
     }
     if (srv) xr.blit.Draw(xr.device, imm, srv, c.rtvs[idx], c.width, c.height, xr.linearize, false, scopeRect, false, false, 1.0f, reproj);
@@ -2159,7 +2223,7 @@ static bool CopyToChain(Chain& c, ID3D11Texture2D* bb, const float* scopeRect = 
         // (the setup's zone marks are compositor quads now - BuildZoneMark: drawing them into the eye image here
         // stopped the frames on the real runtime, black screen)
     }
-    SafeRelease(srv); SafeRelease(copy); SafeRelease(resolved); SafeRelease(imm);
+    SafeRelease(ownedSrv); SafeRelease(imm);
     XrSwapchainImageReleaseInfo ri = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
     xrReleaseSwapchainImage(c.sc, &ri);
     return true;
@@ -3659,11 +3723,13 @@ static void PollEvents()
             } else if (s->state == XR_SESSION_STATE_EXITING || s->state == XR_SESSION_STATE_LOSS_PENDING) {
                 xr.running = false;
                 xr.failed = true;   // keep the game running flat
+                g_copyScratch.Reset();
                 ResetFrameLifecycle();
             }
         } else if (ev.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING) {
             xr.running = false;
             xr.failed = true;
+            g_copyScratch.Reset();
             ResetFrameLifecycle();
         }
         ev = { XR_TYPE_EVENT_DATA_BUFFER };
@@ -4038,8 +4104,18 @@ static bool CopyHud(ID3D11ShaderResourceView* srv)
     }
     SafeRelease(r);
     if (!w) return false;
-    if (!g_hudChain.sc || g_hudChain.width != w || g_hudChain.height != h)
-        if (!CreateChain(g_hudChain, w, h)) return false;
+    UINT cw = w, ch = h;
+    if (IsLowVirtualMemory() && (cw > 1024 || ch > 1024)) {
+        if (cw >= ch) {
+            ch = std::max(4u, (UINT)((uint64_t)h * 1024 / w) & ~3u);
+            cw = 1024;
+        } else {
+            cw = std::max(4u, (UINT)((uint64_t)w * 1024 / h) & ~3u);
+            ch = 1024;
+        }
+    }
+    if (!g_hudChain.sc || g_hudChain.width != cw || g_hudChain.height != ch)
+        if (!CreateChain(g_hudChain, cw, ch)) return false;
     uint32_t idx = 0;
     XrSwapchainImageAcquireInfo ai = { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
     XrSwapchainImageWaitInfo wi = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
@@ -4048,7 +4124,7 @@ static bool CopyHud(ID3D11ShaderResourceView* srv)
     xrWaitSwapchainImage(g_hudChain.sc, &wi);
     ID3D11DeviceContext* imm = nullptr;
     xr.device->GetImmediateContext(&imm);
-    xr.blit.Draw(xr.device, imm, srv, g_hudChain.rtvs[idx], w, h, xr.linearize, true);
+    xr.blit.Draw(xr.device, imm, srv, g_hudChain.rtvs[idx], cw, ch, xr.linearize, true);
     imm->Release();
     XrSwapchainImageReleaseInfo ri = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
     xrReleaseSwapchainImage(g_hudChain.sc, &ri);
@@ -4145,7 +4221,7 @@ static const float kReticleCut = 0.6f;   // the game's crosshair: this part of t
 static void UpdateGameReticle(ID3D11ShaderResourceView* hud)
 {
     if (!hud || g_cfg.reticleStyle != 1) return;
-    const UINT S = 768;   // (~0.7 of the HUD's pixels: its thin lines stay)
+    const UINT S = IsLowVirtualMemory() ? 512 : 768;   // (~0.7 of the HUD's pixels: its thin lines stay)
     if (!g_reticleGame.sc && !CreateChain(g_reticleGame, S, S)) return;
     ID3D11Resource* r = nullptr;
     hud->GetResource(&r);
@@ -4313,7 +4389,7 @@ static void PresentTheater(ID3D11Texture2D* bb)
     XrFrameState fs;
     if (!ConsumeOrWaitFrame(fs)) return;
     XrCompositionLayerQuad quad = { XR_TYPE_COMPOSITION_LAYER_QUAD };
-    bool ok = fs.shouldRender && CopyToChain(g_theater, bb);
+    bool ok = fs.shouldRender && CopyToChain(g_theater, bb, nullptr, IsLowVirtualMemory() ? 1280u : 0u);
     if (ok) {
         float w = g_cfg.screenWidth;
         float h = w * (float)g_theater.height / (float)g_theater.width;
@@ -4519,6 +4595,10 @@ static void VRFrame(IDXGISwapChain* sc, ID3D11Resource* gameBB)
     bool stereo = g_cfg.vrMode == 1 && CameraInGameplay();
     if (stereo != g_wasStereo) {
         Log("vr: %s", stereo ? "stereo gameplay view" : "theater screen");
+        if (stereo && IsLowVirtualMemory() && g_theater.sc) {
+            DestroyChain(g_theater);
+            g_haveLastTheater = false;
+        }
         if (stereo) LogMemory("3D view");
         g_wasStereo = stereo;
         if (!stereo) ResetStereo();   // (not when the 3D view starts: the frame in flight would be dropped and every

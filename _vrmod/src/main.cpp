@@ -53,6 +53,7 @@ static void LoadConfig()
     g_cfg.fpsLimit = IniFloat(ini, L"General", L"FpsLimit", g_cfg.fpsLimit);
     g_cfg.vrFpsLimit = IniFloat(ini, L"General", L"VRFpsLimit", g_cfg.vrFpsLimit);
     g_cfg.texturePoolMB = IniFloat(ini, L"General", L"TexturePoolMB", g_cfg.texturePoolMB);
+    g_cfg.disablePhysXHardware = (int)IniFloat(ini, L"General", L"DisablePhysXHardware", (float)g_cfg.disablePhysXHardware);
     g_cfg.vrEnabled = (int)IniFloat(ini, L"VR", L"Enabled", (float)g_cfg.vrEnabled);
     g_cfg.vrMode = (int)IniFloat(ini, L"VR", L"Mode", (float)g_cfg.vrMode);
     g_cfg.worldScale = IniFloat(ini, L"VR", L"WorldScale", g_cfg.worldScale);

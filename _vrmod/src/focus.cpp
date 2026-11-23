@@ -250,6 +250,18 @@ static LPSTR WINAPI HookGetCmdA()
     return (LPSTR)s.c_str();
 }
 
+// Both WFC and FoC use High Moon's shared "UnrealEngine3_11" single-instance mutex;
+// scope WFC VR's mutex so it still prevents duplicate WFC launches without colliding with FoC.
+typedef HANDLE(WINAPI* PFN_CreateMutexW)(LPSECURITY_ATTRIBUTES, BOOL, LPCWSTR);
+static PFN_CreateMutexW g_origCreateMutexW;
+
+static HANDLE WINAPI HookCreateMutexW(LPSECURITY_ATTRIBUTES sa, BOOL own, LPCWSTR name)
+{
+    if (name && !wcscmp(name, L"UnrealEngine3_11"))
+        name = L"UnrealEngine3_11_TWFC";
+    return g_origCreateMutexW(sa, own, name);
+}
+
 // Called from DllMain, before the game creates its window.
 void WindowEarlyInit()
 {
@@ -262,6 +274,8 @@ void WindowEarlyInit()
     // the render size pixel for pixel.
     if (ForceSize()) SetProcessDPIAware();
     MH_Initialize();
+    if (MH_CreateHookApi(L"kernelbase", "CreateMutexW", (void*)HookCreateMutexW, (void**)&g_origCreateMutexW) != MH_OK)
+        MH_CreateHookApi(L"kernel32", "CreateMutexW", (void*)HookCreateMutexW, (void**)&g_origCreateMutexW);
     MH_CreateHookApi(L"user32", "CreateWindowExW", (void*)HookCreateWindowExW, (void**)&g_origCreateWindowExW);
     MH_CreateHookApi(L"user32", "SetWindowLongW", (void*)HookSetWindowLongW, (void**)&g_origSetWindowLongW);
     MH_CreateHookApi(L"user32", "SetWindowLongA", (void*)HookSetWindowLongA, (void**)&g_origSetWindowLongA);

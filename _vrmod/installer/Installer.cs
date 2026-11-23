@@ -16,16 +16,16 @@ using Microsoft.Win32;
 
 [assembly: AssemblyTitle("TWFC VR mod setup")]
 [assembly: AssemblyProduct("Transformers: War for Cybertron VR mod")]
-[assembly: AssemblyVersion("1.0.4.0")]
-[assembly: AssemblyFileVersion("1.0.4.0")]
+[assembly: AssemblyVersion("1.0.5.0")]
+[assembly: AssemblyFileVersion("1.0.5.0")]
 
 static class Setup
 {
 #if STEAM   // TWFC-VR-Setup-Steam.exe: the same installer for the Steam version (always writes steam_appid.txt)
-    public const string Version = "1.0.4 Steam";
+    public const string Version = "1.0.5 Steam";
     public const bool SteamBuild = true;
 #else
-    public const string Version = "1.0.4";
+    public const string Version = "1.0.5";
     public const bool SteamBuild = false;
 #endif
     public const string KnownExeMd5 = "69acde90af160650ee5f60fff2f57d50";
@@ -397,8 +397,14 @@ class SetupForm : Form
         }
         if (doInstall) {
             string md5 = "";
-            try { md5 = Setup.Md5(Path.Combine(game, @"Binaries\TWFC.exe")); } catch { }
-            if (md5 != Setup.KnownExeMd5 && !Setup.SteamBuild &&
+            bool stub = false;
+            try {
+                string srcExe = Path.Combine(game, @"Binaries\TWFC.exe");
+                md5 = Setup.Md5(srcExe);
+                Setup.ExeInfo(srcExe, out stub);
+            } catch { }
+            bool isSteam = Setup.SteamBuild || stub || Setup.SteamAppId(game) != null;
+            if (md5 != Setup.KnownExeMd5 && !isSteam &&
                 MessageBox.Show(this, T("Binaries\\TWFC.exe is not the version the mod was made for (PC, patch with the 2016 exe).\n" +
                     "The mod finds the game's code by its addresses: with another build (Steam...) it starts, but some of it may not work.\n" +
                     "If so, please send BinariesVR\\twfcvr.log and the install log. Install anyway?",

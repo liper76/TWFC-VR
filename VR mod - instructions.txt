@@ -117,7 +117,9 @@ SETTINGS - BinariesVR\twfcvr.ini (open with Notepad)
   Mode=1              1 = 3D in gameplay, 0 = always the virtual screen
   FpsLimit=120 / VRFpsLimit=300   FPS limit without / with the headset
   TexturePoolMB=1024  memory for textures (MB): the game kept 250 at most, so at a high resolution textures
-                      stayed blurry; 0 - as in the game
+                      stayed blurry; 0 - as in the game (on 2 GB Steam builds capped at 180 MB and tightened
+                      automatically if 32-bit address space gets low)
+  DisablePhysXHardware=1  [General]: force CPU PhysX (skips legacy GPU PhysX/CUDA init, saving ~300 MB of 32-bit VA)
   ScreenDistance / ScreenWidth - size and distance of the virtual screen (metres)
   Language=auto       [General]: the mod's language - auto, en or ru
 

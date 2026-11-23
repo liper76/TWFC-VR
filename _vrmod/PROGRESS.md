@@ -1320,3 +1320,33 @@ $env:XR_RUNTIME_JSON="...\_vrmod\tools\mockxr\mockxr.json"; Start-Process Binari
     репроекция крена 25°, открытие панели настроек VR по удержанию `LClick+RClick` (`overlay quad 640x520`).
   - Сохранения в обеих папках проверены по SHA-256 (все хэши 1:1 с базовыми).
 - **Не проверено:** реальная Steam-сборка / Meta Quest Link / Quest 3S SteamVR / PSVR2 в шлеме.
+
+## 2026-11-23 — v1.0.5: фикс вылетов/зависаний Out of Memory на 2 ГБ Steam-версии (Issue #4, Issue #1)
+- **Причины OOM на Steam-сборке (2 ГБ без флага LAA — `.bind` не патчится):**
+  - В реальном логе `ParadiseDecayTM` (Steam v1.0.4, Quest 3 + Virtual Desktop) процесс стартовал 3D-вид уже на `1530/2047 МБ`,
+    а в миссии после создания HUD-текстур упирался в `1909/2047 МБ` (крупнейший свободный блок всего `34 МБ`!) → фризы и `You ran out of memory`.
+  - Профилирование `TWFC.exe.noLAA` (`VirtualQueryEx` + трассировка `LOAD_DLL_DEBUG_EVENT` со стеками) выявило три огромных
+    лишних потребителя 32-битного адресного пространства + утечку/фрагментацию от пересоздания текстур:
+    1. `TWFC.exe` (`0x115D2EBB`) вызывает `NxCreatePhysicsSDK` без флага `NX_SDKF_NO_HARDWARE` (`0x80000000` вместо `0x80000001`),
+       из-за чего `PhysXCore` инициализировал устаревший GPU PhysX и резервировал `128+ МБ` CUDA-кучи.
+    2. `nvtt.dll+46C0` (`nv::cuda::isHardwarePresent`) на старте вызывает `cudart.dll!cudaGetDeviceCount`, загружая неиспользуемые
+       `nvcuda.dll` (8.1 МБ), `nvcuda32.dll` (37.1 МБ), `nvptxJitCompiler32.dll` (25.4 МБ) и `nvapi_impl.dll` (5.1 МБ) = **~76 МБ** DLL + CUDA-кучи.
+    3. `TWFC.exe` (`0x117F4280`) единожды грузит `ddraw.dll` ради `GetAvailableVidMem`, навсегда прибивая в 32-битную память **43.7 МБ** `nvd3dum.dll` (ненужный драйвер D3D9 при рендере через dgVoodoo2 D3D11).
+    4. В `vr.cpp` `CopyToChain` при источнике без `D3D11_BIND_SHADER_RESOURCE` (`sc->GetBuffer(0)`, `fmt 28`) 180 раз в секунду создавал и удалял временную `ID3D11Texture2D` (~13 МБ = 216 000 аллокаций за 20 минут, фризы WDDM и фрагментация VA).
+    5. На 2 ГБ процессе `TexturePoolMB` в v1.0.4 был завышен до `384 МБ` (выше стоковых `250 МБ`), а `g_hudChain` (`1800x1800`) и `g_theater` (`1800x1800`) оставались в памяти на весь бой.
+- **Сделано:**
+  - `game.cpp` (`GameEarlyPatches`, `DisablePhysXHardware`):
+    - Патч `0x115D2EBB` (`0x80000000` → `0x80000001` `NX_SDKF_NO_HARDWARE`, с фолбэк-хуком `PhysXLoader!NxCreatePhysicsSDK`) — принудительный CPU PhysX (`DisablePhysXHardware=1` в `[General]`).
+    - Хук `cudart.dll!cudaGetDeviceCount` (`__stdcall`) → `cudaErrorNoDevice` (блокирует неиспользуемую пробу CUDA из `nvtt.dll`, экономит ~76 МБ DLL + кучи).
+    - Хук `0x117F4280` (`__stdcall`) → записывает `2048 МБ` VRAM без загрузки `ddraw.dll` / `nvd3dum.dll` (экономит ~44 МБ).
+    - В `PatchThread` на 2 ГБ процессах: лимит текстурного пула снижен с `384` до **`180 МБ`** + адаптивный сторож свободной VA (`<384 МБ` → `128 МБ`, `<256 МБ` → `96 МБ` с гистерезисом) + периодический `LogMemory("periodic")` раз в 2 мин.
+  - `vr.cpp`:
+    - Постоянная буферная текстура `g_copyScratch` в `CopyToChain` (0 `CreateTexture2D` за кадр для non-SRV / MSAA).
+    - На 2 ГБ процессах: `MaxRenderSide` `1800` → **`1600`** (включая кламп до создания `twfcvr_headset.txt` и при `RenderScale=0`), `g_hudChain` ≤ `1024`, `g_reticleGame` = `512`, `g_theater` ≤ `1280` и уничтожается при входе в 3D-геймплей.
+  - `focus.cpp`: хук `CreateMutexW` переименовывает общий мьютекс High Moon `UnrealEngine3_11` → `UnrealEngine3_11_TWFC`, чтобы WFC VR не конфликтовал с одновременно запущенной *Fall of Cybertron* (дубликаты самой WFC VR по-прежнему блокируются).
+  - `Installer.cs` (версия `1.0.5` / `1.0.5 Steam`): убрано ложное предупреждение *"Binaries\TWFC.exe is not the version the mod was made for"* в `TWFC-VR-Setup.exe` при автоопределении Steam-версии (`SteamBuild || .bind || SteamAppId != null`).
+- **Проверено на `TWFC.exe.noLAA` (реальный лимит 2047 МБ, MockXR):**
+  - Первый кадр: `1290 МБ` → **`815 МБ`** (−475 МБ; макс. свободный блок `350` → **`709 МБ`**).
+  - Старт 3D-вида: `1478 МБ` → **`987 МБ`** (−491 МБ; макс. свободный блок `158` → **`537 МБ`**, ×3.4).
+  - 90-секундный боевой soak-тест в миссии (`16 179` стерео-кадров, ~89 Гц стерео, 0 view failures): **`1210.5` → `1193.6 МБ`** (дельта **−16.9 МБ**, 0 утечек; **`853.4 МБ`** свободно, макс. свободный блок **`311.8 МБ`** против `34 МБ` в v1.0.4).
+  - Проверены дампы `eye0`/`eye1`/`overlay1` (`1024x1024` HUD), сохранения в обеих папках совпадают по SHA-256 1:1.
