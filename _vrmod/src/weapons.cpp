@@ -19,8 +19,11 @@ const uintptr_t kGNames = 0x12B2F0F4;
 const int kPawnMesh = 0x3F4;
 const int kPawnInvManager = 0x424;
 const int kPawnWeapon = 0x428;
+const int kPawnFlashCount = 0x275;    // APawn::FlashCount (increments on weapon shots)
+const int kPawnFlashLoc = 0x43C;      // APawn::FlashLocation (FVector; updated on instant-hit shots)
 const int kInvChain = 0x1C8;          // InventoryManager.InventoryChain / Inventory.Inventory (next)
-const int kWeaponGroup = 0x2A0;       // seen: 0 / 3 hand weapons, 1 vehicle weapon, 50 melee weapon (Megatron)
+const int kWeaponGroup = 0x2A0;       // ATnWeapon clip ammo (also used by wheel filter below)
+const int kWeaponClip = 0x2A0;        // ATnWeapon::ClipAmmo (decrements on fired rounds)
 const int kMeshAttachments = 0x260;   // TArray, 0x30 per entry: +0 component, +4 bone FName
 const int kCompScale = 0x178;
 const int kCompFlags = 0xF0;          // PrimitiveComponent bit flags
@@ -582,6 +585,62 @@ void UpdateTurrets(uint8_t* pawn, DWORD now)
     g_onTurret = on;
 }
 
+// Weapon firing detection for VR recoil haptics: watches APawn::FlashCount (+0x275), ATnWeapon clip ammo (+0x2A0),
+// and APawn::FlashLocation (+0x43C) so both finite-clip robot guns and infinite/overheat vehicle guns pulse crisply
+// on every shot without false triggers on reloads or weapon switches.
+uint8_t* g_firePawn;
+uint8_t* g_fireWeapon;
+bool g_fireVehicle;
+uint8_t g_prevFlash;
+int g_prevClip = -1;
+float g_prevFlashLoc[3];
+DWORD g_lastFirePulse;
+
+void ResetFireHaptics()
+{
+    g_firePawn = nullptr;
+    g_fireWeapon = nullptr;
+    g_fireVehicle = false;
+    g_prevFlash = 0;
+    g_prevClip = -1;
+    g_prevFlashLoc[0] = g_prevFlashLoc[1] = g_prevFlashLoc[2] = 0.0f;
+}
+
+void UpdateFireHaptics(uint8_t* pawn, bool vehicle, DWORD now)
+{
+    if (g_cfg.weaponHaptics <= 0 || g_cfg.weaponHapticsStrength <= 0.0f) { ResetFireHaptics(); return; }
+    uint8_t* w = *(uint8_t**)(pawn + kPawnWeapon);
+    uint8_t flash = *(uint8_t*)(pawn + kPawnFlashCount);
+    int clip = w ? *(int*)(w + kWeaponClip) : -1;
+    const float* fl = (const float*)(pawn + kPawnFlashLoc);
+    if (!w || pawn != g_firePawn || w != g_fireWeapon || vehicle != g_fireVehicle) {
+        g_firePawn = pawn;
+        g_fireWeapon = w;
+        g_fireVehicle = vehicle;
+        g_prevFlash = flash;
+        g_prevClip = clip;
+        if (fl) memcpy(g_prevFlashLoc, fl, sizeof(g_prevFlashLoc));
+        return;
+    }
+    const wchar_t* cls = NameOf(*(unsigned*)(w + 4));
+    bool skip = !cls || OffWheelClass(cls) || GrenadeWeaponClass(cls);
+    bool byFlash = !skip && flash != 0 && flash != g_prevFlash;
+    bool byClip = !skip && clip >= 0 && g_prevClip > 0 && clip < g_prevClip && (g_prevClip - clip) <= 10;
+    float dfx = fl[0] - g_prevFlashLoc[0], dfy = fl[1] - g_prevFlashLoc[1], dfz = fl[2] - g_prevFlashLoc[2];
+    bool flNonZero = (fl[0] * fl[0] + fl[1] * fl[1] + fl[2] * fl[2]) > 1.0f;
+    bool byLoc = !skip && flNonZero && (dfx * dfx + dfy * dfy + dfz * dfz) > 1.0f;
+    g_prevFlash = flash;
+    g_prevClip = clip;
+    memcpy(g_prevFlashLoc, fl, sizeof(g_prevFlashLoc));
+    if ((byFlash || byClip || byLoc) && now - g_lastFirePulse >= 35) {
+        g_lastFirePulse = now;
+        if (g_cfg.logFps)
+            Log("weapons: fire %ls (veh=%d tur=%d flash=%d[%u] clip=%d[%d] loc=%d)",
+                cls, vehicle ? 1 : 0, g_onTurret ? 1 : 0, byFlash ? 1 : 0, (unsigned)flash, byClip ? 1 : 0, clip, byLoc ? 1 : 0);
+        VRHapticShot(cls, vehicle, g_onTurret);
+    }
+}
+
 }   // namespace
 
 // For ik.cpp's arm model: attach/detach through the original functions (not the hooks), and what is attached.
@@ -630,6 +689,7 @@ void WeaponsUpdate(void* pawnPtr)
             // out of first person (cutscene, menu): put the melee weapon away; a new pawn or mesh has new meshes
             // (the old ones may be gone), so nothing to detach then
             ReleaseMelee(!pawn);
+            ResetFireHaptics();
             g_pawn = pawn;
             g_mesh = mesh;
             g_seenCount = 0;
@@ -640,6 +700,7 @@ void WeaponsUpdate(void* pawnPtr)
         if (!pawn || !mesh || !g_origDetach) { g_onTurret = false; return; }
         UpdateTurrets(pawn, now);
         bool vehicle = IKPawnIsVehicle();
+        UpdateFireHaptics(pawn, vehicle, now);
         TrackAttachments(mesh, now);
         UpdateMelee(mesh, vehicle, now);
         MirrorStrike(mesh, now);

@@ -129,6 +129,12 @@ struct Config {
     float screenHeight = 1.6f;      // metres above floor/eye origin offset
     int   vrControllers = 1;        // feed VR controllers into XInput
     float stickDeadzone = 0.15f;
+    int   weaponHaptics = 1;        // weapon firing recoil haptics: 0 off, 1 gun hand (+ off-hand if two-handed/turret/vehicle), 2 both hands
+    float weaponHapticsStrength = 1.0f;
+    int   hitHaptics = 1;           // distinct haptic tick when damaging enemies
+    float hitHapticsStrength = 0.75f;
+    int   gameRumble = 1;           // forward the game's native XInput rumble (explosions, hits, boost) to VR controllers
+    float gameRumbleStrength = 0.7f;
     int   alwaysFocused = 1;        // game keeps input/rendering when its window is not in front
     int   blockMouseKeyboard = 1;   // headset on: the game gets no mouse/keyboard
     int   buttonHints = 1;          // hints name the VR controller buttons instead of keyboard keys (hints.cpp)
@@ -283,6 +289,10 @@ bool IKForegrip(float out[3]);              // ik.cpp: held weapon's front grip 
 bool VRMeleeSwing(float& x, float& z);      // recent melee swing direction (OpenXR horizontal)
 DWORD VRAbilityPressedAt();                 // GetTickCount of the last ability (bumper) press
 void VRHaptic(int hand, float amplitude, float seconds);
+void VRHapticEx(int hand, float amplitude, float seconds, float frequency);
+void VRHapticShot(const wchar_t* weaponClass, bool vehicle, bool turret);
+void VRHapticHit();
+void VRHapticGameRumble(float leftAmp, float rightAmp);
 bool GameTimeFrozenForRightEye();           // game.cpp: the right-eye frames do not advance game time
 bool VRIsRunning();
 bool VRIsRunningOrFake();

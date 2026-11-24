@@ -205,6 +205,12 @@ static void LoadConfig()
     g_cfg.screenHeight = IniFloat(ini, L"VR", L"ScreenHeight", 0.0f);
     g_cfg.vrControllers = (int)IniFloat(ini, L"Input", L"VRControllers", (float)g_cfg.vrControllers);
     g_cfg.stickDeadzone = IniFloat(ini, L"Input", L"StickDeadzone", g_cfg.stickDeadzone);
+    g_cfg.weaponHaptics = (int)IniFloat(ini, L"Input", L"WeaponHaptics", (float)g_cfg.weaponHaptics);
+    g_cfg.weaponHapticsStrength = IniFloat(ini, L"Input", L"WeaponHapticsStrength", g_cfg.weaponHapticsStrength);
+    g_cfg.hitHaptics = (int)IniFloat(ini, L"Input", L"HitHaptics", (float)g_cfg.hitHaptics);
+    g_cfg.hitHapticsStrength = IniFloat(ini, L"Input", L"HitHapticsStrength", g_cfg.hitHapticsStrength);
+    g_cfg.gameRumble = (int)IniFloat(ini, L"Input", L"GameRumble", (float)g_cfg.gameRumble);
+    g_cfg.gameRumbleStrength = IniFloat(ini, L"Input", L"GameRumbleStrength", g_cfg.gameRumbleStrength);
     g_cfg.alwaysFocused = (int)IniFloat(ini, L"Input", L"AlwaysFocused", (float)g_cfg.alwaysFocused);
     g_cfg.blockMouseKeyboard = (int)IniFloat(ini, L"Input", L"BlockMouseKeyboard", (float)g_cfg.blockMouseKeyboard);
     g_cfg.buttonHints = (int)IniFloat(ini, L"HUD", L"ButtonHints", (float)g_cfg.buttonHints);

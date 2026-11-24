@@ -124,6 +124,8 @@ extern "C" DWORD WINAPI Proxy_XInputGetStateEx(DWORD user, XINPUT_STATE* st)
 extern "C" DWORD WINAPI Proxy_XInputSetState(DWORD user, XINPUT_VIBRATION* v)
 {
     LoadReal();
+    if (user == 0 && v)
+        VRHapticGameRumble(v->wLeftMotorSpeed / 65535.0f, v->wRightMotorSpeed / 65535.0f);
     DWORD r = real.setState ? real.setState(user, v) : ERROR_DEVICE_NOT_CONNECTED;
     if (r != ERROR_SUCCESS && user == 0 && VirtualPadActive()) return ERROR_SUCCESS;
     return r;

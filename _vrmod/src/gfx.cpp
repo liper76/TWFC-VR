@@ -357,9 +357,51 @@ bool FindClips(void* view)
     return true;
 }
 
+// Track newly attached "causeDamageN_mc" hit-confirmation clips in g_crossGroup to drive VR hit haptics.
+void* g_hitView;
+std::vector<std::string> g_seenHitClips;
+
+void CheckHitMarks(void* view, const std::vector<std::string>& attachedPaths)
+{
+    std::vector<std::string> cur;
+    for (const auto& p : attachedPaths)
+        if (p.find("causeDamage") != std::string::npos) cur.push_back(p);
+    if (view != g_hitView) {
+        g_hitView = view;
+        g_seenHitClips = std::move(cur);
+        return;   // suppress on initial scan when entering a level / view
+    }
+    bool hit = false;
+    for (const auto& p : cur) {
+        bool known = false;
+        for (const auto& old : g_seenHitClips) if (old == p) { known = true; break; }
+        if (!known) {
+            if (g_cfg.logFps) Log("gfx: hit mark %s", p.c_str());
+            hit = true;
+        }
+    }
+    g_seenHitClips = std::move(cur);
+    if (hit) VRHapticHit();
+}
+
 void __fastcall HookDisplay(void* view, void* edx)
 {
-    if (!HudSplitActive()) { g_origDisplay(view, edx); return; }
+    if (!HudSplitActive()) {
+        if (g_cfg.hitHaptics && CameraPlayerView() && GetCurrentThreadId() == GameThreadId()) {
+            void* hud = FindView(L"Hud_GFX");
+            if (view == hud && FindClips(view)) {
+                std::vector<std::string> paths;
+                int next = NextHighestDepth(view, g_crossGroup);
+                for (int d = std::max(0, next - 32); d < next; d++) {
+                    std::string p = ClipAtDepth(view, g_crossGroup, d);
+                    if (!p.empty()) paths.push_back(std::move(p));
+                }
+                CheckHitMarks(view, paths);
+            }
+        }
+        g_origDisplay(view, edx);
+        return;
+    }
     void* hud = FindView(L"Hud_GFX");
     if (view != hud || GetCurrentThreadId() != GameThreadId() || !FindClips(view)) {
         if (g_traceFrames > 0)
@@ -375,6 +417,8 @@ void __fastcall HookDisplay(void* view, void* edx)
         GFxValue v = {};
         if (!CallGet(view, g_visPath[i].c_str(), &v) || (v.type & 0xF) != 2) {   // (the movie changed)
             g_clipsView = nullptr;
+            g_hitView = nullptr;
+            g_seenHitClips.clear();
             HudSetLayer(kHudPanel, true);
             g_origDisplay(view, edx);
             D3D9Flush();
@@ -384,13 +428,18 @@ void __fastcall HookDisplay(void* view, void* edx)
         orig[i] = cur[i] = v.b;
     }
     std::vector<std::string> attached;   // "<clip>._visible" of the crosshair group's visible clips attached at run time
+    std::vector<std::string> attachedPaths;
     int next = NextHighestDepth(view, g_crossGroup);
     for (int d = std::max(0, next - 32); d < next; d++) {   // (they remove themselves: a few at most)
         std::string p = ClipAtDepth(view, g_crossGroup, d);
-        GFxValue v = {};
-        if (!p.empty() && CallGet(view, (p + "._visible").c_str(), &v) && (v.type & 0xF) == 2 && v.b)
-            attached.push_back(p + "._visible");
+        if (!p.empty()) {
+            attachedPaths.push_back(p);
+            GFxValue v = {};
+            if (CallGet(view, (p + "._visible").c_str(), &v) && (v.type & 0xF) == 2 && v.b)
+                attached.push_back(p + "._visible");
+        }
     }
+    if (g_cfg.hitHaptics && CameraPlayerView()) CheckHitMarks(view, attachedPaths);
     auto showAttached = [&](bool on) {
         for (auto& p : attached) {
             GFxValue v = {};

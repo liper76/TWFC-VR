@@ -122,6 +122,12 @@ SETTINGS - BinariesVR\twfcvr.ini (open with Notepad)
   DisablePhysXHardware=1  [General]: force CPU PhysX (skips legacy GPU PhysX/CUDA init, saving ~300 MB of 32-bit VA)
   ScreenDistance / ScreenWidth - size and distance of the virtual screen (metres)
   Language=auto       [General]: the mod's language - auto, en or ru
+  WeaponHaptics=1     [Input]: weapon firing recoil haptics (0 = off, 1 = gun hand + off-hand when two-handed,
+                      on a turret, or in a vehicle, 2 = both hands always); WeaponHapticsStrength=1.0
+  HitHaptics=1        [Input]: distinct higher-frequency haptic tick when landing hits on enemies;
+                      HitHapticsStrength=0.75
+  GameRumble=1        [Input]: forward the game's native XInput rumble (explosions, impacts, boost, damage) to VR
+                      controllers; GameRumbleStrength=0.7 (all haptic options are also in the in-VR Settings menu)
 
 TIPS
 - Both eyes are drawn from the very same game instant (StereoPerFrame=1 by default): the vehicle in

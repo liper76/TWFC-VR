@@ -463,17 +463,49 @@ static SHORT AxisToShort(float v)
     return (SHORT)((v < 0 ? -a : a) * 32767.0f);
 }
 
-void VRHaptic(int hand, float amplitude, float seconds)
+static std::mutex g_hapticMutex;
+static DWORD g_hapticBusyUntil[2];      // high-priority pulse end time per hand (low-priority game rumble yields)
+static DWORD g_offHandSuppressUntil;    // briefly suppress game XInput gunfire rumble on the free off-hand during 1-handed shots
+static int   g_offHandSuppressHand = -1;
+static DWORD g_lastShotAt;
+static DWORD g_lastHitAt;
+static DWORD g_pendingHitAt;            // deferred hit-confirmation tick so hitscan hits feel distinct from recoil
+static float g_rumbleLeft, g_rumbleRight;
+static DWORD g_rumbleAt;
+static DWORD g_rumbleSentAt;
+static bool  g_rumbleActive;
+
+static void ApplyHaptic(int hand, float amplitude, float seconds, float frequency, bool highPriority)
 {
-    if (!xr.running || !xr.haptic) return;
+    if (hand < 0 || hand > 1 || !xr.running || !xr.haptic) return;
+    amplitude = std::min(std::max(amplitude, 0.0f), 1.0f);
+    seconds = std::min(std::max(seconds, 0.005f), 2.0f);
+    if (amplitude <= 0.001f) return;
+    DWORD now = GetTickCount();
+    std::lock_guard<std::mutex> lock(g_hapticMutex);
+    if (!highPriority && (int)(g_hapticBusyUntil[hand] - now) > 0) return;
     XrHapticVibration v = { XR_TYPE_HAPTIC_VIBRATION };
     v.amplitude = amplitude;
     v.duration = (XrDuration)(seconds * 1e9);
-    v.frequency = XR_FREQUENCY_UNSPECIFIED;
+    v.frequency = frequency;
     XrHapticActionInfo hi = { XR_TYPE_HAPTIC_ACTION_INFO };
     hi.action = xr.haptic;
     hi.subactionPath = xr.hand[hand];
     xrApplyHapticFeedback(xr.session, &hi, (const XrHapticBaseHeader*)&v);
+    if (highPriority) {
+        DWORD until = now + (DWORD)(seconds * 1000.0f) + 10;
+        if ((int)(until - g_hapticBusyUntil[hand]) > 0) g_hapticBusyUntil[hand] = until;
+    }
+}
+
+void VRHapticEx(int hand, float amplitude, float seconds, float frequency)
+{
+    ApplyHaptic(hand, amplitude, seconds, frequency, true);
+}
+
+void VRHaptic(int hand, float amplitude, float seconds)
+{
+    ApplyHaptic(hand, amplitude, seconds, XR_FREQUENCY_UNSPECIFIED, true);
 }
 
 static Vec3f g_gripPos[2], g_aimPos[2], g_aimFwd[2];   // LOCAL space, refreshed by UpdateGestures
@@ -493,6 +525,138 @@ int VRGunHand() { return IKPawnIsVehicle() || g_gunHand == 1 ? (g_rightEmpty && 
 bool VRRightEmpty() { return VRGunHand() != 1; }
 void VRDebugPutAway(int on) { if (g_gunHand == 1) g_rightEmpty = on != 0; Log("debug: right hand %s", g_rightEmpty ? "empty" : "holds the gun"); }
 static int GunIdx() { return g_gunHand == 0 && !IKPawnIsVehicle() ? 0 : 1; }   // the controller that aims the gun
+
+static void FireHitPulse(DWORD now)
+{
+    (void)now;
+    float s = std::min(std::max(g_cfg.hitHapticsStrength, 0.0f), 1.0f);
+    if (s <= 0.0f || !xr.running) return;
+    float amp = std::min(1.0f, 0.60f * s);
+    int gun = GunIdx();
+    ApplyHaptic(gun, amp, 0.030f, 320.0f, true);
+    if (g_cfg.weaponHaptics >= 2)
+        ApplyHaptic(gun ^ 1, amp * 0.70f, 0.030f, 320.0f, true);
+    if (g_cfg.logFps)
+        Log("haptic: hit hand=%d%s amp=%.2f dur=30ms freq=320Hz", gun, g_cfg.weaponHaptics >= 2 ? "+off" : "", amp);
+}
+
+void VRHapticShot(const wchar_t* cls, bool vehicle, bool turret)
+{
+    if (g_cfg.weaponHaptics <= 0 || g_cfg.weaponHapticsStrength <= 0.0f || !xr.running) return;
+    float amp = vehicle ? 0.62f : 0.55f;
+    float dur = vehicle ? 0.045f : 0.036f;
+    float freq = vehicle ? 160.0f : 190.0f;
+    if (cls) {
+        if (wcsstr(cls, L"Rocket") || wcsstr(cls, L"Bazooka") || wcsstr(cls, L"Plasma") ||
+            wcsstr(cls, L"Cannon") || wcsstr(cls, L"GrenadeLauncher") || wcsstr(cls, L"Thermo") ||
+            wcsstr(cls, L"Fusion") || wcsstr(cls, L"Mortar") || wcsstr(cls, L"Missile")) {
+            amp = 0.95f; dur = 0.085f; freq = 120.0f;
+        } else if (turret || wcsstr(cls, L"Shotgun") || wcsstr(cls, L"Sniper") ||
+                   wcsstr(cls, L"NullRay") || wcsstr(cls, L"Eliminator") ||
+                   wcsstr(cls, L"Turret") || wcsstr(cls, L"Mounted")) {
+            amp = 0.85f; dur = 0.065f; freq = 150.0f;
+        } else if (wcsstr(cls, L"Pistol") || wcsstr(cls, L"Burst")) {
+            amp = 0.70f; dur = 0.048f; freq = 175.0f;
+        } else if (wcsstr(cls, L"Repair") || wcsstr(cls, L"Heal")) {
+            amp = 0.28f; dur = 0.075f; freq = 260.0f;
+        }
+    }
+    float s = std::min(std::max(g_cfg.weaponHapticsStrength, 0.0f), 1.0f);
+    amp = std::min(1.0f, amp * s);
+    int gun = GunIdx();
+    int off = gun ^ 1;
+    ApplyHaptic(gun, amp, dur, freq, true);
+    bool both = g_cfg.weaponHaptics >= 2;
+    bool offHand = both || xr.twoHand || turret || vehicle;
+    if (offHand) {
+        float offAmp = both ? amp : amp * 0.65f;
+        float offDur = both ? dur : dur * 0.90f;
+        ApplyHaptic(off, offAmp, offDur, freq, true);
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_hapticMutex);
+        DWORD now = GetTickCount();
+        g_lastShotAt = now;
+        if (!offHand) {
+            g_offHandSuppressHand = off;
+            g_offHandSuppressUntil = now + 180;
+        } else {
+            g_offHandSuppressHand = -1;
+        }
+    }
+    if (g_cfg.logFps)
+        Log("haptic: shot %ls hand=%d%s amp=%.2f dur=%.0fms freq=%.0fHz",
+            cls ? cls : L"?", gun, offHand ? (both ? "+both" : "+off") : "", amp, dur * 1000.0f, freq);
+}
+
+void VRHapticHit()
+{
+    if (!g_cfg.hitHaptics || g_cfg.hitHapticsStrength <= 0.0f || !xr.running) return;
+    DWORD now = GetTickCount();
+    bool defer = false;
+    {
+        std::lock_guard<std::mutex> lock(g_hapticMutex);
+        if (g_lastHitAt && now - g_lastHitAt < 45) return;
+        g_lastHitAt = now;
+        // If a weapon shot haptic just kicked off (<55 ms ago), defer the sharper hit tick slightly
+        // so hitscan hits feel like a crisp "THUMP ... tick!" instead of overwriting the recoil kick.
+        if (g_lastShotAt && now - g_lastShotAt < 55) {
+            DWORD target = g_lastShotAt + 55;
+            if ((int)(target - now) < 25) target = now + 25;
+            g_pendingHitAt = target ? target : 1;
+            defer = true;
+        }
+    }
+    if (!defer) FireHitPulse(now);
+}
+
+void VRHapticGameRumble(float leftAmp, float rightAmp)
+{
+    std::lock_guard<std::mutex> lock(g_hapticMutex);
+    g_rumbleLeft = leftAmp > 0.01f ? std::min(leftAmp, 1.0f) : 0.0f;
+    g_rumbleRight = rightAmp > 0.01f ? std::min(rightAmp, 1.0f) : 0.0f;
+    g_rumbleAt = GetTickCount();
+}
+
+static void VRUpdateHaptics(DWORD now, bool allowRumble)
+{
+    if (!xr.running || !xr.haptic) return;
+    bool fireHit = false;
+    float l = 0.0f, r = 0.0f;
+    DWORD rAt = 0, offSuppressUntil = 0;
+    int offSuppressHand = -1;
+    {
+        std::lock_guard<std::mutex> lock(g_hapticMutex);
+        if (g_pendingHitAt && (int)(now - g_pendingHitAt) >= 0) {
+            g_pendingHitAt = 0;
+            fireHit = true;
+        }
+        l = g_rumbleLeft;
+        r = g_rumbleRight;
+        rAt = g_rumbleAt;
+        offSuppressHand = g_offHandSuppressHand;
+        offSuppressUntil = g_offHandSuppressUntil;
+    }
+    if (fireHit) FireHitPulse(now);
+
+    bool active = allowRumble && g_cfg.gameRumble && g_cfg.gameRumbleStrength > 0.0f &&
+                  (l > 0.02f || r > 0.02f) && (now - rAt < 350);
+    if (active) {
+        if (!g_rumbleActive && g_cfg.logFps)
+            Log("haptic: game rumble L=%.2f R=%.2f", l, r);
+        g_rumbleActive = true;
+        if (now - g_rumbleSentAt >= 50) {
+            g_rumbleSentAt = now;
+            float s = std::min(std::max(g_cfg.gameRumbleStrength, 0.0f), 1.0f);
+            bool skipL = (offSuppressHand == 0 && (int)(offSuppressUntil - now) > 0);
+            bool skipR = (offSuppressHand == 1 && (int)(offSuppressUntil - now) > 0);
+            if (l > 0.02f && !skipL) ApplyHaptic(0, l * s, 0.065f, 140.0f, false);
+            if (r > 0.02f && !skipR) ApplyHaptic(1, r * s, 0.065f, 220.0f, false);
+        }
+    } else {
+        g_rumbleActive = false;
+    }
+}
 
 // Horizontal direction of a melee swing in the last few tenths of a second (OpenXR x/z), false if none.
 bool VRMeleeSwing(float& x, float& z)
@@ -1340,6 +1504,7 @@ static void UpdateInput()
 
     if (gameplay) UpdateGestures(p, now);
     else GunPoseOff();
+    VRUpdateHaptics(now, gameplay && !g_setup.active);
 
     std::lock_guard<std::mutex> lock(g_padMutex);
     g_pad.active = true;
@@ -2875,6 +3040,10 @@ static const SettingItem kSettings[] = {
     { L"Input", L"ElbowInGunUp", L"\x0412\x0420\x0415\x041C\x0415\x041D\x041D\x041E: \x043B\x043E\x043A\x043E\x0442\x044C \x0432 \x043E\x0440\x0443\x0436\x0438\x0438 \x2014 \x0432\x0432\x0435\x0440\x0445", L"TEMP: elbow in gun \x2014 up", 0, 0.05f, -1.5f, 1.5f },
     { L"Input", L"ElbowInGunOut", L"\x0412\x0420\x0415\x041C\x0415\x041D\x041D\x041E: \x043B\x043E\x043A\x043E\x0442\x044C \x0432 \x043E\x0440\x0443\x0436\x0438\x0438 \x2014 \x043D\x0430\x0440\x0443\x0436\x0443", L"TEMP: elbow in gun \x2014 out", 0, 0.05f, -1.5f, 1.5f },
     { L"Input", L"WeaponSmoothing", L"\x0421\x0433\x043B\x0430\x0436\x0438\x0432\x0430\x043D\x0438\x0435 \x043E\x0440\x0443\x0436\x0438\x044F (0-10)", L"Weapon smoothing (0-10)", 3, 1, 0, 10 },
+    { L"Input", L"WeaponHaptics", L"\x041E\x0442\x0434\x0430\x0447\x0430 \x043E\x0440\x0443\x0436\x0438\x044F: 0 \x043D\x0435\x0442, 1 \x0440\x0443\x043A\x0430, 2 \x043E\x0431\x0435", L"Weapon recoil: 0 off, 1 gun hand, 2 both", 1, 1, 0, 2 },
+    { L"Input", L"WeaponHapticsStrength", L"\x0421\x0438\x043B\x0430 \x043E\x0442\x0434\x0430\x0447\x0438 \x043E\x0440\x0443\x0436\x0438\x044F", L"Weapon recoil strength", 1.0f, 0.1f, 0, 1 },
+    { L"Input", L"HitHaptics", L"\x0412\x0438\x0431\x0440\x043E\x043E\x0442\x043A\x043B\x0438\x043A \x043F\x043E\x043F\x0430\x0434\x0430\x043D\x0438\x044F", L"Enemy hit feedback", 1, 1, 0, 1 },
+    { L"Input", L"GameRumble", L"\x0412\x0438\x0431\x0440\x0430\x0446\x0438\x044F \x0438\x0433\x0440\x044B (\x0432\x0437\x0440\x044B\x0432\x044B, \x0443\x0434\x0430\x0440\x044B)", L"Game rumble (explosions, hits)", 1, 1, 0, 1 },
     { L"Input", L"GrenadeGrab", L"\x0413\x0440\x0430\x043D\x0430\x0442\x044B \x0440\x0443\x043A\x043E\x0439 \x0441 \x043F\x043E\x044F\x0441\x0430", L"Grenades by hand from the belt", 1, 1, 0, 1 },
     { L"Input", L"GrenadeThrowScale", L"\x0421\x0438\x043B\x0430 \x0431\x0440\x043E\x0441\x043A\x0430 \x0433\x0440\x0430\x043D\x0430\x0442\x044B", L"Grenade throw strength", 3, 0.25f, 0.5f, 8 },
     { L"Input", L"GrenadeGravity", L"\x0412\x0435\x0441 \x0433\x0440\x0430\x043D\x0430\x0442\x044B", L"Grenade weight", 1, 0.25f, 0, 3 },
