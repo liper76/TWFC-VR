@@ -129,6 +129,7 @@ struct Config {
     float screenHeight = 1.6f;      // metres above floor/eye origin offset
     int   vrControllers = 1;        // feed VR controllers into XInput
     float stickDeadzone = 0.15f;
+    float stickOuterDeadzone = 0.85f; // radial outer threshold where stick reaches 100% (helps circular gates / worn sticks)
     int   weaponHaptics = 1;        // weapon firing recoil haptics: 0 off, 1 gun hand (+ off-hand if two-handed/turret/vehicle), 2 both hands
     float weaponHapticsStrength = 1.0f;
     int   hitHaptics = 1;           // distinct haptic tick when damaging enemies

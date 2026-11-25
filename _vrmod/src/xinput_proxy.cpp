@@ -68,7 +68,23 @@ static bool MergeVR(DWORD user, XINPUT_STATE* st, bool realOk)
     if (!vrOn && !dbgOn && !g_cfg.vrControllers) return false;
     static DWORD packet;
     XINPUT_GAMEPAD& p = st->Gamepad;
-    if (!realOk) p = {};
+    if (!realOk) {
+        p = {};
+    } else if (vrOn) {
+        static bool loggedReal;
+        if (!loggedReal) {
+            loggedReal = true;
+            Log("xinput: real or emulated gamepad 0 also connected - merging with VR controllers");
+        }
+        if (g_cfg.logFps && (abs(p.sThumbLX) > abs(vr.pad.sThumbLX) || abs(p.sThumbLY) > abs(vr.pad.sThumbLY))) {
+            static DWORD lastWarn;
+            DWORD now = GetTickCount();
+            if (now - lastWarn >= 2000) {
+                lastWarn = now;
+                Log("xinput: gamepad 0 L-stick (%d,%d) overrides VR (%d,%d)", p.sThumbLX, p.sThumbLY, vr.pad.sThumbLX, vr.pad.sThumbLY);
+            }
+        }
+    }
     if (vrOn) MergePad(p, vr.pad);
     if (dbgOn) MergePad(p, dbg);
     st->dwPacketNumber = realOk ? st->dwPacketNumber + (++packet) : ++packet;

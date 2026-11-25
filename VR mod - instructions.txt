@@ -128,6 +128,8 @@ SETTINGS - BinariesVR\twfcvr.ini (open with Notepad)
                       HitHapticsStrength=0.75
   GameRumble=1        [Input]: forward the game's native XInput rumble (explosions, impacts, boost, damage) to VR
                       controllers; GameRumbleStrength=0.7 (all haptic options are also in the in-VR Settings menu)
+  StickDeadzone=0.15 / StickOuterDeadzone=0.85  [Input]: radial inner deadzone and outer 100% full-speed threshold
+                      (0.40..1.00; lower StickOuterDeadzone in the VR menu or ini if pushing forward feels slow)
 
 TIPS
 - Both eyes are drawn from the very same game instant (StereoPerFrame=1 by default): the vehicle in

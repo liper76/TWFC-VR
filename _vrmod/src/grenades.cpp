@@ -300,15 +300,21 @@ int g_beltRecCount;
 const int kCompStaticMesh = 0x1C4, kWeaponData = 0x240, kDataProjectiles = 0x34, kClassDefaults = 0x9C;
 const int kWeaponMeshActor = 0x39C, kWeaponMeshAnimated = 0x3C, kAnimatedMeshComp = 0x30;
 
+bool ValidObjPtr(uint8_t* o)
+{
+    uintptr_t a = (uintptr_t)o;
+    return a >= 0x10000 && a < 0xF0000000 && (a & 3) == 0;
+}
+
 bool NameStarts(uint8_t* o, const wchar_t* s)
 {
-    const wchar_t* n = o ? NameOf(*(unsigned*)(o + 4)) : nullptr;
+    const wchar_t* n = ValidObjPtr(o) ? NameOf(*(unsigned*)(o + 4)) : nullptr;
     return n && !wcsncmp(n, s, wcslen(s));
 }
 
 bool NameEnds(uint8_t* o, const wchar_t* s)
 {
-    const wchar_t* n = o ? NameOf(*(unsigned*)(o + 4)) : nullptr;
+    const wchar_t* n = ValidObjPtr(o) ? NameOf(*(unsigned*)(o + 4)) : nullptr;
     size_t ln = n ? wcslen(n) : 0, ls = wcslen(s);
     return n && ln >= ls && !wcscmp(n + ln - ls, s);
 }

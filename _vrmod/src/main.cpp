@@ -205,6 +205,7 @@ static void LoadConfig()
     g_cfg.screenHeight = IniFloat(ini, L"VR", L"ScreenHeight", 0.0f);
     g_cfg.vrControllers = (int)IniFloat(ini, L"Input", L"VRControllers", (float)g_cfg.vrControllers);
     g_cfg.stickDeadzone = IniFloat(ini, L"Input", L"StickDeadzone", g_cfg.stickDeadzone);
+    g_cfg.stickOuterDeadzone = IniFloat(ini, L"Input", L"StickOuterDeadzone", g_cfg.stickOuterDeadzone);
     g_cfg.weaponHaptics = (int)IniFloat(ini, L"Input", L"WeaponHaptics", (float)g_cfg.weaponHaptics);
     g_cfg.weaponHapticsStrength = IniFloat(ini, L"Input", L"WeaponHapticsStrength", g_cfg.weaponHapticsStrength);
     g_cfg.hitHaptics = (int)IniFloat(ini, L"Input", L"HitHaptics", (float)g_cfg.hitHaptics);

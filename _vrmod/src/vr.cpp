@@ -453,14 +453,21 @@ static XrVector2f GetStick(XrAction a)
     return s.isActive ? s.currentState : XrVector2f{ 0, 0 };
 }
 
-static SHORT AxisToShort(float v)
+// Radial inner deadzone + outer saturation threshold: avoids sticky cross-deadzone axes and lets circular-gate
+// or slightly worn VR thumbsticks (e.g. 12 o'clock droop on Pico 4) reach full 32767 speed and menu response.
+static void StickToShorts(XrVector2f s, SHORT& outX, SHORT& outY)
 {
-    float dz = g_cfg.stickDeadzone;
-    float a = fabsf(v);
-    if (a < dz) return 0;
-    a = (a - dz) / (1.0f - dz);
-    if (a > 1.0f) a = 1.0f;
-    return (SHORT)((v < 0 ? -a : a) * 32767.0f);
+    float dz = std::min(std::max(g_cfg.stickDeadzone, 0.0f), 0.70f);
+    float outer = std::min(std::max(g_cfg.stickOuterDeadzone, dz + 0.10f), 1.0f);
+    float r = sqrtf(s.x * s.x + s.y * s.y);
+    if (r <= dz || r < 1e-5f) { outX = 0; outY = 0; return; }
+    float mag = (r - dz) / (outer - dz);
+    if (mag > 1.0f) mag = 1.0f;
+    float ux = s.x / r, uy = s.y / r;
+    int ix = (int)lroundf(ux * mag * 32767.0f);
+    int iy = (int)lroundf(uy * mag * 32767.0f);
+    outX = (SHORT)std::min(std::max(ix, -32767), 32767);
+    outY = (SHORT)std::min(std::max(iy, -32767), 32767);
 }
 
 static std::mutex g_hapticMutex;
@@ -1389,8 +1396,18 @@ static void UpdateInput()
     UpdateFingers();
     XINPUT_GAMEPAD p = {};
     XrVector2f ls = GetStick(xr.stick[0]), rs = GetStick(xr.stick[1]);
-    p.sThumbLX = AxisToShort(ls.x); p.sThumbLY = AxisToShort(ls.y);
-    p.sThumbRX = AxisToShort(rs.x); p.sThumbRY = AxisToShort(rs.y);
+    StickToShorts(ls, p.sThumbLX, p.sThumbLY);
+    StickToShorts(rs, p.sThumbRX, p.sThumbRY);
+    if (g_cfg.logFps) {
+        float r = sqrtf(ls.x * ls.x + ls.y * ls.y);
+        static DWORD lastStickLog;
+        DWORD tNow = GetTickCount();
+        if (r > 0.05f && tNow - lastStickLog >= 250) {
+            lastStickLog = tNow;
+            Log("vr: L-stick raw (%.3f, %.3f) r=%.3f -> out (%d, %d) [dz=%.2f outer=%.2f]",
+                ls.x, ls.y, r, (int)p.sThumbLX, (int)p.sThumbLY, g_cfg.stickDeadzone, g_cfg.stickOuterDeadzone);
+        }
+    }
     // the gun hand's trigger fires (RT), the other one is the game's fine aim / second action (LT)
     p.bLeftTrigger = (BYTE)(GetFloat(xr.trigger[GunIdx() ^ 1]) * 255.0f);
     p.bRightTrigger = (BYTE)(GetFloat(xr.trigger[GunIdx()]) * 255.0f);
@@ -3032,6 +3049,7 @@ static const SettingItem kSettings[] = {
     { L"Input", L"SnapTurnDegrees", L"\x041F\x043E\x0432\x043E\x0440\x043E\x0442 \x0440\x044B\x0432\x043A\x043E\x043C (0 = \x043F\x043B\x0430\x0432\x043D\x043E)", L"Snap turn (0 = smooth)", 0, 15, 0, 90 },
     { L"Input", L"SmoothTurnSpeed", L"\x0421\x043A\x043E\x0440\x043E\x0441\x0442\x044C \x043F\x043E\x0432\x043E\x0440\x043E\x0442\x0430", L"Turn speed", 120, 15, 30, 360 },
     { L"Input", L"MoveByHead", L"\x0418\x0434\x0442\x0438 \x043A\x0443\x0434\x0430 \x0441\x043C\x043E\x0442\x0440\x044E", L"Walk where I look", 1, 1, 0, 1 },
+    { L"Input", L"StickOuterDeadzone", L"\x041F\x043E\x0440\x043E\x0433 100% \x0441\x0442\x0438\x043A\x0430 (\x0432\x043D\x0435\x0448\x043D. \x0437\x043E\x043D\x0430)", L"Stick full-speed threshold (outer)", 0.85f, 0.05f, 0.40f, 1.0f },
     { L"Input", L"GripUse", L"\x0413\x0440\x0438\x043F = \x0434\x0435\x0439\x0441\x0442\x0432\x0438\x0435 (\x0432\x0437\x044F\x0442\x044C, \x0440\x044B\x0447\x0430\x0433, \x0441\x0435\x0441\x0442\x044C)", L"Grip = use (take, lever, get in)", 1, 1, 0, 1 },
     { L"Input", L"TwoHanded", L"\x0414\x0432\x0443\x0440\x0443\x0447\x043D\x044B\x0439 \x0445\x0432\x0430\x0442", L"Two-handed grip", 1, 1, 0, 1 },
     { L"Input", L"Gunstock", L"\x041F\x0440\x0438\x043A\x043B\x0430\x0434: 0 \x043D\x0435\x0442, 1 \x043A \x043F\x043B\x0435\x0447\x0443, 2 \x0443 \x0446\x0435\x0432\x044C\x044F", L"Virtual stock: 0 off, 1 shoulder, 2 front hand", 2, 1, 0, 2 },
@@ -3296,7 +3314,8 @@ static void UpdateSettingsPage(XrTime t, const XrPosef& head, DWORD now)
 
     // sticks: left - pick and change (held: repeats), right - scroll
     XrVector2f ls = GetStick(xr.stick[0]), rs = GetStick(xr.stick[1]);
-    int dir = ls.y > 0.6f ? 1 : ls.y < -0.6f ? 2 : ls.x > 0.6f ? 3 : ls.x < -0.6f ? 4 : rs.y > 0.6f ? 5 : rs.y < -0.6f ? 6 : 0;
+    float th = 0.6f * std::min(std::max(g_cfg.stickOuterDeadzone, 0.4f), 1.0f);
+    int dir = ls.y > th ? 1 : ls.y < -th ? 2 : ls.x > th ? 3 : ls.x < -th ? 4 : rs.y > th ? 5 : rs.y < -th ? 6 : 0;
     if (!dir) { heldDir = 0; return; }
     if (dir == heldDir && now < repeatAt) return;
     repeatAt = now + (dir == heldDir ? 120 : 400);
